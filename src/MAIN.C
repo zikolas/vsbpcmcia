@@ -195,7 +195,7 @@ void fatal_error( int nError )
 	_asm mov ax,3
 	_asm int 10h
 #endif
-	printf("VSBHDA: fatal error %u\n", nError );
+	printf("VSBPCMCIA: fatal error %u\n", nError );
 	for (;;);
 }
 #endif
@@ -386,7 +386,7 @@ int main(int argc, char* argv[])
     /* if -? or unrecognised option was entered, display help and exit */
     if( gm.bHelp ) {
         gm.bHelp = false;
-        printf("VSBHDA v" VERMAJOR "." VERMINOR "; Sound Blaster emulation on HDA/AC97. Usage:\n");
+        printf("VSBPCMCIA v" VSBPCM_VER " (VSBHDA " VERMAJOR "." VERMINOR " core); SB emulation on PCMCIA sound cards. Usage:\n");
 
         for( i = 0; GOptions[i].option; i++ ) {
             char *tmp;

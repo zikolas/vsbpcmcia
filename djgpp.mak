@@ -14,7 +14,7 @@ ifndef DEBUG
 DEBUG=0
 endif
 
-NAME=vsbhda
+NAME=vsbpcm
 
 ifeq ($(DEBUG),1)
 OUTD=djgppd
@@ -35,12 +35,15 @@ vpath %.h $(vpath_header)
 vpath_obj=./$(OUTD)/
 vpath %.o $(vpath_obj)
 
+# VSBPCMCIA: PCI card drivers (sc_e1371/ich/inthd/via82/sbliv/sbl24), ac97mix
+# and pcibios are excluded -- PCMCIA-only build, see NOxxx defines in config.h.
+# The sources stay in the tree for cheap upstream merges.
 OBJFILES=\
 	$(OUTD)/main.o		$(OUTD)/sndisr.o	$(OUTD)/ptrap.o		$(OUTD)/dbopl.o		$(OUTD)/linear.o	$(OUTD)/pic.o\
 	$(OUTD)/vsb.o		$(OUTD)/vdma.o		$(OUTD)/virq.o		$(OUTD)/vopl3.o		$(OUTD)/vmpu.o		$(OUTD)/tsf.o\
-	$(OUTD)/ac97mix.o	$(OUTD)/au_cards.o\
-	$(OUTD)/dmabuff.o	$(OUTD)/pcibios.o	$(OUTD)/physmem.o	$(OUTD)/timer.o\
-	$(OUTD)/sc_e1371.o	$(OUTD)/sc_ich.o	$(OUTD)/sc_inthd.o	$(OUTD)/sc_via82.o	$(OUTD)/sc_sbliv.o	$(OUTD)/sc_sbl24.o	$(OUTD)/sc_es1688.o\
+	$(OUTD)/au_cards.o\
+	$(OUTD)/dmabuff.o	$(OUTD)/physmem.o	$(OUTD)/timer.o\
+	$(OUTD)/sc_es1688.o\
 	$(OUTD)/stackio.o	$(OUTD)/stackisr.o	$(OUTD)/sbisr.o		$(OUTD)/int31.o		$(OUTD)/rmwrap.o	$(OUTD)/mixer.o\
 	$(OUTD)/hapi.o		$(OUTD)/dprintf.o	$(OUTD)/vioout.o	$(OUTD)/djdpmi.o	$(OUTD)/uninst.o	$(OUTD)/fileacc.o
 

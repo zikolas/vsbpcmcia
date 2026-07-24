@@ -5,6 +5,20 @@
  * weight on a 486, so strip them. NOFM also makes PTRAP skip the 0x388 trap
  * (ptrap.c:609) -> guest AdLib falls through to the card's real ESFM = hardware
  * FM for free. VMPU 0 = no 0x330 MPU trap. SOUNDFONT 0 = no TinySoundFont MIDI. */
+/* VSBPCMCIA: our fork version (the banner shows this; VERMAJOR/VERMINOR in
+ * version.h stay upstream's VSBHDA core version for lineage/merge sanity). */
+#define VSBPCM_VER "0.5"
+
+/* VSBPCMCIA is PCMCIA-only: none of the fleet has PCI, so the PCI card
+ * drivers are dead weight (~15% of the binary). Excluded via upstream's own
+ * per-card guards -- the source files stay in the tree untouched so
+ * `git merge upstream/main` stays cheap. */
+#define NOES1371  1
+#define NOICH     1
+#define NOHDA     1
+#define NOSBLIVE  1
+#define NOVIA82   1
+
 #define NOFM      1   /* strip DOSBox OPL3 emulation; leave 0x388 to the hardware */
 
 #define SB16      1   /* 1=support SB16 */
