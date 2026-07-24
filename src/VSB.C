@@ -19,7 +19,8 @@
 /* compatibility switches */
 #define FASTCMD14 1  /* 1=DSP cmd 0x14 for SB detection is handled instantly */
 
-#define SBMIDIUART 1 /* support DSP cmds 0x34-0x37 */
+#define SBMIDIUART VMPU /* DSP cmds 0x34-0x37 route SB-MIDI into the VMPU; without VMPU
+                         * (ES1688 passthrough-SB-only build) there's nowhere to route it */
 #define CMD10NOWAIT 1 /* 1=don't set busy flag if DSP cmd==0x10 (both cmd & data) */
 #define CMD10LASTSMPL 1 /* 1=save last sample and supply it as first in next read */
 

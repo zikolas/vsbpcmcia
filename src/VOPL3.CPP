@@ -8,6 +8,13 @@
 #include "DBOPL.H"
 #include "VOPL3.H"
 
+// NOFM build (ES1688 486 port): VOPL3.H supplies static-inline stubs for the
+// trap entry points when NOFM is defined, so this whole module must NOT also
+// define them (redefinition) -- compile it away entirely, like vmpu.c (#if VMPU)
+// and tsf.c (#if SOUNDFONT) already do. The DOSBox OPL3 core is thus dropped
+// from the binary (dead weight on a 486; guest AdLib rides the real ESFM).
+#ifndef NOFM
+
 #define VOPL3_PRIMARY 0
 #define VOPL3_SECONDARY 1
 //primary index read
@@ -220,3 +227,5 @@ bool VOPL3_IsActive( void )
     return opl3.bWritten;
 }
 #endif
+
+#endif // NOFM

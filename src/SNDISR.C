@@ -302,6 +302,10 @@ static int SNDISR_Interrupt( void )
     int loop;
 #endif
 
+#ifndef NOES1688
+    { extern void ES1688_dbg_tick(void); ES1688_dbg_tick(); }   /* DIAG: count every SNDISR entry (0x4F7) */
+#endif
+
     /* check if the sound hw does request an interrupt. */
     if( !AU_isirq( isr.hAU ) )
         return(0);
@@ -332,6 +336,18 @@ static int SNDISR_Interrupt( void )
         goto isrexit;
     }
     freq = AU_getfreq( isr.hAU );
+
+#ifndef NOES1688
+    /* RENDER-REENTRANCY GUARD: SETIF=1 enabled interrupts above, so while the
+     * outer SNDISR is in this (heavy, non-reentrant, RTC-pumped) render+tap
+     * path the next RTC tick can re-enter SNDISR. Nested SwitchStackISR
+     * carvings then march the 2KB private stack into the data segment and #GP.
+     * The guest IRQ injection (VIRQ_Invoke) already ran above, so it's safe to
+     * skip ONLY the render on re-entry: bail to isrexit (still sends PIC EOI).
+     * Do NOT clear the flag on the re-entrant path -- only the owner clears it. */
+    { extern volatile int es_in_render; if(es_in_render) goto isrexit; es_in_render = 1; }
+#endif
+
 #ifdef _DEBUG
     if (samples > isr.max_samples)
         isr.max_samples = samples;
@@ -360,6 +376,10 @@ static int SNDISR_Interrupt( void )
         uint32_t SB_Pos = VSB_GetPos();
         uint32_t SB_Rate = VSB_GetSampleRate();
         int IsSilent = VSB_IsSilent();
+
+#ifndef NOES1688
+        { extern void ES1688_dbg_mark(int); ES1688_dbg_mark(0); }   /* DIAG: render loop body entered */
+#endif
 
         if ( !IsSilent ) {
             DMA_Base = VDMA_GetBase(dmachannel);
@@ -470,6 +490,24 @@ static int SNDISR_Interrupt( void )
                 DMA_Count = VDMA_GetCount( dmachannel );
 #endif
             }
+#ifndef NOES1688
+            /* ES1688 PASSTHROUGH TAP: feed the RAW guest PCM straight to the card
+             * HERE -- before the cv_bits/cv_rate/cv_channels conversions below --
+             * so nothing is resampled (the ES1688 is a real SB codec and plays the
+             * guest's native rate/format directly). Both DMA read paths above have
+             * filled pDest[0..bytes) contiguously. PT_Feed sets es_pt_active, which
+             * makes ES1688_writedata no-op, so the render path's AU_writedata (689)
+             * harmlessly does nothing. 8/16-bit PCM only; ADPCM (<8) is expanded
+             * below and can't be passed through. */
+            {
+                extern int ES1688_PT;
+                extern void ES1688_PT_Feed(const unsigned char *, int, unsigned, unsigned, unsigned);
+                extern void ES1688_dbg_mark(int);
+                ES1688_dbg_mark(1);   /* DIAG: reached tap point (inside !IsSilent, after guest-DMA read) */
+                if ( ES1688_PT && !IsSilent && VSB_GetBits() >= 8 )
+                    ES1688_PT_Feed( (const unsigned char *)pDest, bytes, SB_Rate, VSB_GetBits(), channels );
+            }
+#endif
             /* v2.0: copy 1 more sample for cv_rate() */
             if ( resample ) {
                 /* copy the next sample is the best strategy, but
@@ -529,6 +567,10 @@ static int SNDISR_Interrupt( void )
             //if ( !VDMA_IsAuto(dmachannel) ) break;
         }
     };
+
+#ifndef NOES1688
+    { extern volatile int es_in_render; es_in_render = 0; }   /* render owner done (re-entrant path skipped this via goto isrexit) */
+#endif
 
     if (IdxSm) {
         /* in case there weren't enough samples copied, fill the rest with silence.

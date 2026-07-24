@@ -40,7 +40,7 @@ OBJFILES=\
 	$(OUTD)/vsb.o		$(OUTD)/vdma.o		$(OUTD)/virq.o		$(OUTD)/vopl3.o		$(OUTD)/vmpu.o		$(OUTD)/tsf.o\
 	$(OUTD)/ac97mix.o	$(OUTD)/au_cards.o\
 	$(OUTD)/dmabuff.o	$(OUTD)/pcibios.o	$(OUTD)/physmem.o	$(OUTD)/timer.o\
-	$(OUTD)/sc_e1371.o	$(OUTD)/sc_ich.o	$(OUTD)/sc_inthd.o	$(OUTD)/sc_via82.o	$(OUTD)/sc_sbliv.o	$(OUTD)/sc_sbl24.o\
+	$(OUTD)/sc_e1371.o	$(OUTD)/sc_ich.o	$(OUTD)/sc_inthd.o	$(OUTD)/sc_via82.o	$(OUTD)/sc_sbliv.o	$(OUTD)/sc_sbl24.o	$(OUTD)/sc_es1688.o\
 	$(OUTD)/stackio.o	$(OUTD)/stackisr.o	$(OUTD)/sbisr.o		$(OUTD)/int31.o		$(OUTD)/rmwrap.o	$(OUTD)/mixer.o\
 	$(OUTD)/hapi.o		$(OUTD)/dprintf.o	$(OUTD)/vioout.o	$(OUTD)/djdpmi.o	$(OUTD)/uninst.o	$(OUTD)/fileacc.o
 
@@ -104,6 +104,7 @@ $(OUTD)/sc_inthd.o:: sc_inthd.c  mpxplay.h au_cards.h dmabuff.h pcibios.h sc_int
 $(OUTD)/sc_sbl24.o:: sc_sbl24.c  mpxplay.h au_cards.h dmabuff.h pcibios.h ac97mix.h sc_sbl24.h emu10k1.h
 $(OUTD)/sc_sbliv.o:: sc_sbliv.c  mpxplay.h au_cards.h dmabuff.h pcibios.h ac97mix.h sc_sbliv.h emu10k1.h
 $(OUTD)/sc_via82.o:: sc_via82.c  mpxplay.h au_cards.h dmabuff.h pcibios.h ac97.h
+$(OUTD)/sc_es1688.o:: sc_es1688.c au_cards.h
 $(OUTD)/timer.o::    timer.c     mpxplay.h au_cards.h timer.h
 
 $(OUTD)/dbopl.o::    dbopl.cpp   dbopl.h

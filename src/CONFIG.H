@@ -1,9 +1,19 @@
 #ifndef _CONFIG_H_
 #define _CONFIG_H_
 
+/* ES1688 486 build: passthrough SB ONLY. Software OPL3/MPU/soundfont are dead
+ * weight on a 486, so strip them. NOFM also makes PTRAP skip the 0x388 trap
+ * (ptrap.c:609) -> guest AdLib falls through to the card's real ESFM = hardware
+ * FM for free. VMPU 0 = no 0x330 MPU trap. SOUNDFONT 0 = no TinySoundFont MIDI. */
+#define NOFM      1   /* strip DOSBox OPL3 emulation; leave 0x388 to the hardware */
+
 #define SB16      1   /* 1=support SB16 */
 #define ADPCM     1   /* 1=support ADPCM */
-#define SETIF     1   /* 1=enable interrupts when ISR is entered (also see config.inc!) */
+#define SETIF     1   /* KEEP 1: VSBHDA's guest IRQ injection needs interrupts on (SETIF=0
+                       * starved the guest -> VSB never "running" -> no audio). Reentrancy of
+                       * the heavy render path is instead bounded by the es_in_render guard in
+                       * sndisr.c (SETIF's _enable_ints runs AFTER the injection, so guarding
+                       * only the render loop is safe). MUST match config.inc. */
 #define COMPAT4   1   /* 1=support /CF4 - mask PIT interrupt during snd interrupt */
 #ifndef NOFM
 #define REINITOPL 1   /* 1=reinit OPL during RESET */
@@ -11,9 +21,9 @@
 #define REINITOPL 0
 #endif
 #define SETABSVOL 0   /* 0=the master volume is set by /VOL cmdline option and isn't modified by the application */
-#define VMPU      1   /* 1=virtualize MPU at port 0x330-0x331 if BLASTER contains P=xxx */
+#define VMPU      0   /* ES1688: no MPU virtualization (inert on 486; guest 0x330 untrapped) */
 #define SLOWDOWN  1   /* 1=support /SD option */
-#define SOUNDFONT 1   /* 1=support soundfonts if VMPU is on */
+#define SOUNDFONT 0   /* ES1688: no soundfont MIDI (needs VMPU anyway) */
 #define PT0V86    1   /* 1=support read access to v86 page table 0 */
 #define HOSTRT    0   /* 0=protect SB irq, so it's not modified by programs; must match setting in SBISR.ASM */
 

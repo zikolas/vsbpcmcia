@@ -26,6 +26,9 @@
 
 extern uint8_t bOMode;
 
+#ifndef NOES1688
+extern struct sndcard_info_s ES1688_sndcard_info;
+#endif
 #ifndef NOES1371
 extern struct sndcard_info_s ES1371_sndcard_info;
 #endif
@@ -43,6 +46,9 @@ extern struct sndcard_info_s SBALL_sndcard_info;
 #endif
 
 static const struct sndcard_info_s *sndcard_info_table[] = {
+#ifndef NOES1688
+	&ES1688_sndcard_info,   /* PCMCIA ES1688 passthrough (PC110/235); no PCI, tried first */
+#endif
 #ifndef NOES1371
 	&ES1371_sndcard_info,
 #endif

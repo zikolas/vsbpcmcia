@@ -1,0 +1,4 @@
+/djgpp/
+*.o
+*.obj
+*.ar

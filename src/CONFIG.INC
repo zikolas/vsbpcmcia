@@ -5,7 +5,7 @@ SLOWDOWN  equ 1	; 1=SL option supported
 SOUNDFONT equ 1	; 1=Soundfonts supported
 
 TRAPINT21 equ 1	; 1=hook int 21h
-SETIF     equ 1	; 1=enable interrupts inside sound isr (setting should match the one in config.h)
+SETIF     equ 1	; KEEP 1: guest IRQ injection needs IF on; render reentrancy guarded in sndisr.c. MUST match config.h
 COMPAT4   equ 1	; 1=support /CF4
 
 CF_STIONEOI equ 2
