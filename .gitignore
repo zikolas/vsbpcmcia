@@ -2,3 +2,4 @@
 *.o
 *.obj
 *.ar
+.DS_Store
