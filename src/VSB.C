@@ -367,6 +367,16 @@ static void DSP_Reset( uint8_t value )
         //}
 #endif
         vsb.ResetState = true;
+#ifndef NOES1688
+        /* ES1688 passthrough: real-SB reset semantics + pump revival. On the
+         * crazii port this was a main.c hook; the first VSBHDA port left it
+         * orphaned, so an RTC pump that died while idle stayed dead until
+         * reboot, and a format-matching next stream skipped its chip re-arm
+         * (the 'pinball -> idle -> pinball silent' case). Every guest DSP
+         * reset lands here, i.e. before any game's SB detect. */
+        { extern int ES1688_PT; extern void ES1688_PT_Watchdog(void);
+          if ( ES1688_PT ) ES1688_PT_Watchdog(); }
+#endif
         /* v1.5: bits 4-7 are rsvd, set to 1? DosBox sets to 0 - check a real SB16! */
         /* v1.7: now done in VSB_Init() - INT_SETUP and DMA_SETUP are r/o registers */
         //vsb.MixerRegs[SB_MIXERREG_INT_SETUP] = 0xF0 | (1 << FindItem(VSB_IRQMap, countof(VSB_IRQMap), vsb.Irq));

@@ -14,7 +14,11 @@
 externdef c __djgpp_stack_top:dword
 externdef bIntSnd:byte
 
-STACKCHECK equ 0
+;--- ES1688 port: STACKCHECK on -- trips fatal_error(3) if SNDISR nesting ever
+;--- carves more than 64KB (16 levels) off the private ISR stack, instead of
+;--- silently marching into .data and corrupting fn ptrs (the hardware-test-3
+;--- #GP). With the PT-mode speedups in sndisr.c depth should stay 1.
+STACKCHECK equ 1
 
 ifdef NOTFLAT
 

@@ -109,8 +109,48 @@ volatile int es_in_render = 0;
 //           the very top of SNDISR before AU_isirq).
 //   0x4F8 = count of ES1688_irq (irq_routine) calls, i.e. SNDISR reaching AU_isirq.
 // If 0x4F6==0xAA but 0x4F7==0 -> SNDISR never runs (RTC not reaching our PM ISR).
+//
+// Reentrancy + duration probes (hardware-test 3 follow-up; the fix is option
+// (ii): keep SNDISR inside one RTC period so it never re-enters at all):
+//   0x4F0 = MAX SNDISR nesting depth seen (1 = never re-entered = goal)
+//   0x4F1 = render-guard skips (SNDISR re-entered while the owner rendered)
+//   0x4FC/0x4FD = longest outermost SNDISR pass, 16-bit LE, in 256-TSC-cycle
+//                 units (~1.1us @233MHz). RTC period @1024Hz ~ 890 units --
+//                 max duration must stay well under that.
+//   0x4FE = PT_Feed overfeed clamps (ring full; should stay 0 -- sndisr paces
+//           by ES1688_PT_Space now)
+#define ES_DIAG_TSC 1   /* rdtsc: fine on the 235 (P-MMX has a TSC); set 0 for a real 486 build! */
 static unsigned char es_tel_sndisr, es_tel_irq;
-void ES1688_dbg_tick(void){ _farpokeb(_dos_ds, 0x4F7, ++es_tel_sndisr); }
+static unsigned char es_dbg_depth, es_dbg_maxdepth, es_dbg_skips;
+#if ES_DIAG_TSC
+static unsigned long long es_dbg_t0;
+static unsigned es_dbg_maxdur;
+static unsigned long long es_rdtsc(void){ unsigned long long v; __asm__ __volatile__("rdtsc" : "=A"(v)); return v; }
+#endif
+void ES1688_dbg_tick(void)
+{
+ _farpokeb(_dos_ds, 0x4F7, ++es_tel_sndisr);
+ if(++es_dbg_depth > es_dbg_maxdepth){ es_dbg_maxdepth = es_dbg_depth; _farpokeb(_dos_ds, 0x4F0, es_dbg_maxdepth); }
+#if ES_DIAG_TSC
+ if(es_dbg_depth == 1) es_dbg_t0 = es_rdtsc();
+#endif
+}
+void ES1688_dbg_exit(void)
+{
+#if ES_DIAG_TSC
+ if(es_dbg_depth == 1){
+  unsigned long long dt = es_rdtsc() - es_dbg_t0;
+  unsigned u = ((dt >> 8) > 0xFFFFULL) ? 0xFFFFu : (unsigned)(dt >> 8);
+  if(u > es_dbg_maxdur){
+   es_dbg_maxdur = u;
+   _farpokeb(_dos_ds, 0x4FC, (unsigned char)u);
+   _farpokeb(_dos_ds, 0x4FD, (unsigned char)(u >> 8));
+  }
+ }
+#endif
+ if(es_dbg_depth) es_dbg_depth--;
+}
+void ES1688_dbg_reenter(void){ _farpokeb(_dos_ds, 0x4F1, ++es_dbg_skips); }
 // which: 0 = SNDISR render-loop body entered (VSB_Running() true) -> 0x4F4;
 //        1 = reached the tap point (inside !IsSilent, after the guest-DMA read) -> 0x4F5.
 // loop>0 & reach=0 => IsSilent always true; loop=0 => VSB_Running() false; reach>0 & feed=0 => tap condition fails.
@@ -375,6 +415,15 @@ void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, unsigned
  }
  _farpokeb(_dos_ds, 0x4F2, 3);                                 // DIAG stage: ring fill
  wr = ring_wr;
+ // Ring overrun guard: never write past the read pointer. sndisr.c paces the
+ // tap by ES1688_PT_Space(), so this should never clamp (0x4FE counts if it
+ // does) -- but PT_Feed must not corrupt the ring however it's called.
+ { unsigned es_free = (ring_rd - wr - 1u) & RING_MASK;
+   if((unsigned)bytes > es_free){
+    static unsigned char es_tel_drop;
+    _farpokeb(_dos_ds, 0x4FE, ++es_tel_drop);
+    bytes = (int)es_free;
+   } }
  while(bytes > 0){
   int chunk = (int)(RING_BYTES - wr);      // contiguous space to end of ring
   if(chunk > bytes) chunk = bytes;

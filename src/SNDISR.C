@@ -301,14 +301,37 @@ static int SNDISR_Interrupt( void )
 #ifdef _DEBUG
     int loop;
 #endif
+#ifndef NOES1688
+    /* ES1688 passthrough plumbing. pt_mode: our card is the AU output and the
+     * tap is armed. pt_space: raw bytes the driver ring still accepts this
+     * tick -- the REAL pacing governor: AU_cardbuf_space() is meaningless for
+     * the PT ring (our driver never advances card_dmalastput, so its result is
+     * just a ring_rd sawtooth that can pin at 0 and starve the loop). pt_took:
+     * at least one block went to the card raw this tick -> the whole render
+     * tail (conversions/mixer/AU_writedata) is dead weight and is skipped;
+     * that tail is what made SNDISR outlast the RTC period and caused the
+     * runaway re-entry that marched the ISR stack into .data (#GP). */
+    extern int ES1688_PT;
+    extern int ES1688_PT_Space(void);
+    extern void ES1688_PT_Feed(const unsigned char *, int, unsigned, unsigned, unsigned);
+    extern void ES1688_dbg_tick(void);
+    extern void ES1688_dbg_exit(void);
+    extern void ES1688_dbg_reenter(void);
+    int pt_mode = 0, pt_took = 0;
+    int pt_space = 0;
+#endif
 
 #ifndef NOES1688
-    { extern void ES1688_dbg_tick(void); ES1688_dbg_tick(); }   /* DIAG: count every SNDISR entry (0x4F7) */
+    ES1688_dbg_tick();   /* DIAG: entry count (0x4F7) + nesting depth (0x4F0) */
 #endif
 
     /* check if the sound hw does request an interrupt. */
-    if( !AU_isirq( isr.hAU ) )
+    if( !AU_isirq( isr.hAU ) ) {
+#ifndef NOES1688
+        ES1688_dbg_exit();
+#endif
         return(0);
+    }
 
 #if COMPAT4
     /* v1.8: /CF4 */
@@ -331,6 +354,18 @@ static int SNDISR_Interrupt( void )
 
     //AU_setoutbytes( isr.hAU ); //v1.9: now obsolete
     samples = AU_cardbuf_space( isr.hAU ) / ( sizeof(int16_t) * 2 ); //16 bit, 2 channels
+#ifndef NOES1688
+    /* PT mode: pace by ring space instead (see decl comment). samples becomes
+     * a plain loop bound; keeping it small also caps the mixer / direct-DAC
+     * tails so a non-PT tick stays cheap. 1024 >> any real per-tick need
+     * (worst sustained stream ~350 guest bytes/tick at the idle pump rate). */
+#define PT_MODE_SAMPLES 1024
+    if ( ES1688_PT ) {
+        pt_mode = 1;
+        pt_space = ES1688_PT_Space();
+        samples = PT_MODE_SAMPLES;
+    }
+#endif
     if ( !samples ) { /* no free space in DMA buffer? Shouldn't happen... */
         dbgprintf(("isr: ERROR - AU_cardbuf_space() returned 0 samples\n" ));
         goto isrexit;
@@ -338,14 +373,19 @@ static int SNDISR_Interrupt( void )
     freq = AU_getfreq( isr.hAU );
 
 #ifndef NOES1688
-    /* RENDER-REENTRANCY GUARD: SETIF=1 enabled interrupts above, so while the
-     * outer SNDISR is in this (heavy, non-reentrant, RTC-pumped) render+tap
-     * path the next RTC tick can re-enter SNDISR. Nested SwitchStackISR
-     * carvings then march the 2KB private stack into the data segment and #GP.
-     * The guest IRQ injection (VIRQ_Invoke) already ran above, so it's safe to
-     * skip ONLY the render on re-entry: bail to isrexit (still sends PIC EOI).
+    /* RENDER-REENTRANCY GUARD (safety net): SETIF=1 enabled interrupts above,
+     * so while the outer SNDISR is in the render+tap path the next RTC tick
+     * can re-enter SNDISR. Nested SwitchStackISR carvings each take STACKCORR
+     * (4KB, flat build) off the private ISR stack; runaway nesting marched it
+     * into .data and #GP'd (hardware test 3). With the PT-mode speedups the
+     * ISR should now always finish inside one RTC period, so this path should
+     * be RARE -- 0x4F1 counts it. The re-entrant path still EOIs via isrexit:
+     * Build A empirically ran full nested passes WITH EOI for 52 feeds, so
+     * EOI-per-delivered-tick is known-compatible with this PIC stack.
      * Do NOT clear the flag on the re-entrant path -- only the owner clears it. */
-    { extern volatile int es_in_render; if(es_in_render) goto isrexit; es_in_render = 1; }
+    { extern volatile int es_in_render;
+      if(es_in_render) { ES1688_dbg_reenter(); goto isrexit; }
+      es_in_render = 1; }
 #endif
 
 #ifdef _DEBUG
@@ -376,6 +416,11 @@ static int SNDISR_Interrupt( void )
         uint32_t SB_Pos = VSB_GetPos();
         uint32_t SB_Rate = VSB_GetSampleRate();
         int IsSilent = VSB_IsSilent();
+#ifndef NOES1688
+        /* ADPCM (<8 bits) can't pass through raw -- those blocks take the
+         * full render path (decode+convert+writedata) even in PT mode. */
+        int pt_block = pt_mode && VSB_GetBits() >= 8;
+#endif
 
 #ifndef NOES1688
         { extern void ES1688_dbg_mark(int); ES1688_dbg_mark(0); }   /* DIAG: render loop body entered */
@@ -456,8 +501,30 @@ static int SNDISR_Interrupt( void )
         count = min( count, max(1, sbcnt));
         bytes = count * samplesize * channels;
 
+#ifndef NOES1688
+        /* PT pacing: consume only what the driver ring accepts this tick.
+         * When the ring is at its latency target, STOP consuming guest DMA --
+         * exactly how a real SB throttles the guest: the DMA position simply
+         * doesn't advance until the card has played some of it. Also bounds
+         * the per-tick ISR work (part of the keep-it-inside-one-RTC-period
+         * reentrancy fix). */
+        if ( pt_block ) {
+            if ( pt_space < samplesize * channels )
+                break;
+            if ( bytes > pt_space ) {
+                count = pt_space / (samplesize * channels);
+                bytes = count * samplesize * channels;
+            }
+            pt_space -= bytes;
+            pt_took = 1;
+        }
+#endif
+
         /* copy samples to our PCM buffer */
         if( IsSilent ) {
+#ifndef NOES1688
+            if ( !pt_block )   /* PT: nothing downstream reads pPCM */
+#endif
             memset( isr.pPCM + IdxSm * 2, 0, bytes + 1 ); /* v2.0: one extra byte for resampling */
         } else {
             char *pDest = (char *)(isr.pPCM + IdxSm * 2);
@@ -495,21 +562,21 @@ static int SNDISR_Interrupt( void )
              * HERE -- before the cv_bits/cv_rate/cv_channels conversions below --
              * so nothing is resampled (the ES1688 is a real SB codec and plays the
              * guest's native rate/format directly). Both DMA read paths above have
-             * filled pDest[0..bytes) contiguously. PT_Feed sets es_pt_active, which
-             * makes ES1688_writedata no-op, so the render path's AU_writedata (689)
-             * harmlessly does nothing. 8/16-bit PCM only; ADPCM (<8) is expanded
-             * below and can't be passed through. */
+             * filled pDest[0..bytes) contiguously. bytes was already capped to the
+             * ring's free space above, so PT_Feed never overruns the ring. */
             {
-                extern int ES1688_PT;
-                extern void ES1688_PT_Feed(const unsigned char *, int, unsigned, unsigned, unsigned);
                 extern void ES1688_dbg_mark(int);
                 ES1688_dbg_mark(1);   /* DIAG: reached tap point (inside !IsSilent, after guest-DMA read) */
-                if ( ES1688_PT && !IsSilent && VSB_GetBits() >= 8 )
+                if ( pt_block )
                     ES1688_PT_Feed( (const unsigned char *)pDest, bytes, SB_Rate, VSB_GetBits(), channels );
             }
 #endif
             /* v2.0: copy 1 more sample for cv_rate() */
-            if ( resample ) {
+            if ( resample
+#ifndef NOES1688
+                 && !pt_block   /* PT: cv_rate below is skipped */
+#endif
+               ) {
                 /* copy the next sample is the best strategy, but
                  * may be a problem if SB buffer is at its end
                  * ( especially if DSP cmd is single-cycle only );
@@ -526,7 +593,13 @@ static int SNDISR_Interrupt( void )
         /* update DSP regs */
         SB_Pos = VSB_SetPos( SB_Pos + bytes ); /* will set mixer IRQ status if pos beyond buffer */
 
-        /* format conversion needed? */
+        /* format conversion needed? (PT: the card already played the raw
+         * bytes; all conversion below is dead weight and is skipped. count
+         * then stays in guest samples, which is fine -- on the PT path IdxSm
+         * is only a loop bound.) */
+#ifndef NOES1688
+        if ( !pt_block ) {
+#endif
 #if ADPCM
         if( VSB_GetBits() < 8)
             count = DecodeADPCM((uint8_t*)(isr.pPCM + IdxSm * 2), bytes);
@@ -541,6 +614,9 @@ static int SNDISR_Interrupt( void )
             count = cv_rate( isr.pPCM + IdxSm * 2, count * channels, channels, SB_Rate, freq );
         if( channels == 1) //should be the last step
             cv_channels_1_to_2( isr.pPCM + IdxSm * 2, count);
+#ifndef NOES1688
+        }
+#endif
 
         IdxSm += count;
 
@@ -570,6 +646,10 @@ static int SNDISR_Interrupt( void )
 
 #ifndef NOES1688
     { extern volatile int es_in_render; es_in_render = 0; }   /* render owner done (re-entrant path skipped this via goto isrexit) */
+    if ( pt_took )
+        goto isrexit;   /* PT consumed this tick's audio raw: there is no render
+                         * output to pad/mix/write, and skipping that tail is
+                         * what keeps SNDISR inside one RTC period. */
 #endif
 
     if (IdxSm) {
@@ -609,6 +689,15 @@ static int SNDISR_Interrupt( void )
         for( i = IdxSm; i < samples; i++ )
             *(isr.pPCM + i*2+1) = *(isr.pPCM + i*2) = 0;
     }
+
+#ifndef NOES1688
+    /* PT idle tick (no digital loop output, no direct-DAC bytes): don't burn
+     * CPU zero-filling + mixing + downmixing PT_MODE_SAMPLES frames nobody
+     * will hear -- the driver's ring/pump plays silence on its own. This was
+     * real per-tick 486 work at the DOS prompt before. */
+    if ( pt_mode && !IdxSm )
+        goto isrexit;
+#endif
 
     /* get volumes for software mixer */
 
@@ -736,6 +825,9 @@ static int SNDISR_Interrupt( void )
 #endif
 
 isrexit:
+#ifndef NOES1688
+    ES1688_dbg_exit();   /* DIAG: depth-- + outermost-pass duration (0x4FC/D) */
+#endif
     PIC_SendEOI( isr.SndIrq );
 #if COMPAT4
     if ( gvars.compatflags & CF_MASKPIT )
