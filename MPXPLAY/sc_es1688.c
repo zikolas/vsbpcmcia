@@ -734,7 +734,13 @@ static int ES1688_irq(struct audioout_info_s *aui)
  //  Ramp FASTER whenever the ring runs dry (detection or a game starving the RTC).
  if(es_adaptive && es_pt_ever){
   unsigned used = (ring_wr - ring_rd) & RING_MASK;
-  if(!es_pt_active && (es_last_tick - es_last_feed) >= ES_IDLE_GAP){
+  // Idle also when the stream is provably dead WITH es_pt_active still set:
+  // nothing clears pt_active when a guest just stops (AU never calls card_stop
+  // here and no DSP reset follows), so the pump used to park at the stream
+  // rate (~128Hz) at the DOS prompt forever. Feed-stale AND ring drained below
+  // one frame (<4 covers every unit size) can't be mid-detect (SC2K feeds every
+  // cycle -> gap false) nor steady play (ring holds data -> used>=4).
+  if((!es_pt_active || used < 4) && (es_last_tick - es_last_feed) >= ES_IDLE_GAP){
    if(es_rtc_rs != ES_RS_IDLE) es_rtc_setrate(ES_RS_IDLE);
   }else if(used < ES_RING_LOW && es_rtc_rs > ES_RS_MIN){
    es_rtc_setrate((unsigned char)(es_rtc_rs - 1));
