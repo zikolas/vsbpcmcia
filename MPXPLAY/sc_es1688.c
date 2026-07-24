@@ -119,26 +119,37 @@ volatile int es_in_render = 0;
 //                 max duration must stay well under that.
 //   0x4FE = PT_Feed overfeed clamps (ring full; should stay 0 -- sndisr paces
 //           by ES1688_PT_Space now)
-#define ES_DIAG_TSC 1   /* rdtsc: fine on the 235 (P-MMX has a TSC); set 0 for a real 486 build! */
+/* The duration probe needs rdtsc, which #UDs on a real 486 -- and the 486
+ * fleet is this port's whole reason to exist. Detect at RUNTIME (in adetect,
+ * never in ISR context): EFLAGS.ID (bit 21) togglable -> CPUID exists ->
+ * CPUID.1 EDX bit 4 = TSC. One binary serves the fleet: Pentium rigs keep the
+ * 0x4FC/0x4FD duration telemetry, a 486 just leaves it at zero. */
+static int es_has_tsc;   /* set once in ES1688_adetect */
+static int es_tsc_check(void)
+{
+ unsigned a, b, d;
+ __asm__ __volatile__(
+  "pushfl; popl %0; movl %0, %1; xorl $0x200000, %0;"
+  "pushl %0; popfl; pushfl; popl %0; pushl %1; popfl"
+  : "=&r"(a), "=&r"(b));
+ if(!((a ^ b) & 0x200000)) return 0;      /* ID stuck -> no CPUID -> 486-class */
+ __asm__ __volatile__("cpuid" : "=d"(d) : "a"(1) : "ebx", "ecx");
+ return (d >> 4) & 1;
+}
 static unsigned char es_tel_sndisr, es_tel_irq;
 static unsigned char es_dbg_depth, es_dbg_maxdepth, es_dbg_skips;
-#if ES_DIAG_TSC
 static unsigned long long es_dbg_t0;
 static unsigned es_dbg_maxdur;
 static unsigned long long es_rdtsc(void){ unsigned long long v; __asm__ __volatile__("rdtsc" : "=A"(v)); return v; }
-#endif
 void ES1688_dbg_tick(void)
 {
  _farpokeb(_dos_ds, 0x4F7, ++es_tel_sndisr);
  if(++es_dbg_depth > es_dbg_maxdepth){ es_dbg_maxdepth = es_dbg_depth; _farpokeb(_dos_ds, 0x4F0, es_dbg_maxdepth); }
-#if ES_DIAG_TSC
- if(es_dbg_depth == 1) es_dbg_t0 = es_rdtsc();
-#endif
+ if(es_has_tsc && es_dbg_depth == 1) es_dbg_t0 = es_rdtsc();
 }
 void ES1688_dbg_exit(void)
 {
-#if ES_DIAG_TSC
- if(es_dbg_depth == 1){
+ if(es_has_tsc && es_dbg_depth == 1){
   unsigned long long dt = es_rdtsc() - es_dbg_t0;
   unsigned u = ((dt >> 8) > 0xFFFFULL) ? 0xFFFFu : (unsigned)(dt >> 8);
   if(u > es_dbg_maxdur){
@@ -147,7 +158,6 @@ void ES1688_dbg_exit(void)
    _farpokeb(_dos_ds, 0x4FD, (unsigned char)(u >> 8));
   }
  }
-#endif
  if(es_dbg_depth) es_dbg_depth--;
 }
 void ES1688_dbg_reenter(void){ _farpokeb(_dos_ds, 0x4F1, ++es_dbg_skips); }
@@ -545,6 +555,7 @@ static int ES1688_adetect(struct audioout_info_s *aui)
  { const char *l = getenv("SBEPTLAT");                                          // passthrough latency cap (ms)
    if(l){ int ms = atoi(l); if(ms >= 30 && ms <= 2000) es_pt_lat_ms = (unsigned)ms; } }
  if(!es_dsp_reset(base)) return 0;
+ es_has_tsc = es_tsc_check();             // 486-safe: rdtsc only ever runs if CPUID says TSC exists
  card = (es1688_card_s *)pds_calloc(1,sizeof(es1688_card_s));
  if(!card) return 0;
  card->base = base; aui->card_private_data = card; es_base = base;

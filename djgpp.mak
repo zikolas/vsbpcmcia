@@ -48,7 +48,9 @@ INCLUDE_DIRS=src mpxplay
 SRC_DIRS=src mpxplay
 
 C_OPT_FLAGS=-Os -fno-asynchronous-unwind-tables
-C_EXTRA_FLAGS=-march=i586
+# ES1688 port: i486, not i586 -- this stack exists FOR the 486 fleet (vdpmi
+# covers Pentiums); i586 scheduling is worthless there and risks 586-isms.
+C_EXTRA_FLAGS=-march=i486
 LD_FLAGS=$(addprefix -Xlinker ,$(LD_EXTRA_FLAGS))
 LD_EXTRA_FLAGS=-Map $(OUTD)/$(NAME).map
 
