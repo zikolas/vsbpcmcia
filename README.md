@@ -25,7 +25,9 @@ Sound blaster 1.0, 2.0, Pro, Pro2, 16.
 Requirements:
  * HDPMI32i v3.21+ - DPMI host with port trapping; 32-bit protected-mode
  * JEMM386/JEMMEX + JLOAD QPIEMU.DLL - V86 monitor with port trapping; v86-mode
- * An enabler that powers/configures the card (ES1688GO), real chip at 0x220,
+ * An enabler that powers/configures the card - ES1688GO,
+   https://github.com/zikolas/es1688go (v1.4+ for game-native ESFM) -
+   real chip at 0x220,
    emulation at 0x240 (see deploy/GO.BAT for the proven launch order)
 
 Environment knobs (all optional):
@@ -39,8 +41,8 @@ Environment knobs (all optional):
 VSBPCMCIA uses some source codes from:
  * VSBHDA: https://github.com/Baron-von-Riedesel/VSBHDA - the SB emulation core
  * MPXPlay: https://mpxplay.sourceforge.net/ - sound card driver interface
- * SBEMU: https://github.com/crazii/SBEMU - the original ES1688 passthrough
-   backend was developed against SBEMU (github.com/zikolas/rex5571-sbemu)
+ * SBEMU: https://github.com/crazii/SBEMU - the ES1688 passthrough backend
+   was originally developed against SBEMU
 
 To create the binary, DJGPP v2.05 and JWasm (v2.17 or better) are needed;
 tools/build.sh runs the whole build in a Linux container (see doc/NOTES.md).
