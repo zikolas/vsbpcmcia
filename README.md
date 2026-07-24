@@ -23,8 +23,16 @@ Emulated modes/cards:
 Sound blaster 1.0, 2.0, Pro, Pro2, 16.
 
 Requirements:
- * HDPMI32i v3.21+ - DPMI host with port trapping; 32-bit protected-mode
- * JEMM386/JEMMEX + JLOAD QPIEMU.DLL - V86 monitor with port trapping; v86-mode
+ * HDPMI32i v3.21+ - DPMI host with port trapping; 32-bit protected-mode.
+   Get it from https://github.com/Baron-von-Riedesel/HX (BIN\HDPMI32i.EXE
+   inside the HXRT release zip, e.g. HXRT223.zip). Note it must be the "i"
+   variant, and stock v3.20 or older fails with "Failed installing IO port
+   trap for protected-mode".
+ * JEMM386/JEMMEX + JLOAD QPIEMU.DLL - V86 monitor with port trapping;
+   v86-mode. Get Jemm v5.84+ from https://github.com/Baron-von-Riedesel/Jemm -
+   JEMM386.EXE, JLOAD.EXE and QPIEMU.DLL all ship in that one zip and MUST
+   come from the same release (mixed generations refuse to load, lose
+   real-mode support, or hang).
  * An enabler that powers/configures the card - ES1688GO,
    https://github.com/zikolas/es1688go (v1.4+ for game-native ESFM) -
    real chip at 0x220,
