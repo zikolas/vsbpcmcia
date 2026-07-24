@@ -80,7 +80,7 @@ option still executes rdtsc unconditionally -- don't use it on a 486.
 
 ## Deploy
 
-See `deploy/GOVS.BAT` for the proven order: JEMM386 (NOEMS + attribute-window
+See `deploy/GO.BAT` for the proven order: JEMM386 (NOEMS + attribute-window
 exclusion) -> ES1688GO (real chip 0x220, FM, window) -> env -> JLOAD
 QPIEMU.DLL -> HDPMI32i 3.21+ (-r -x) -> VSBPCM /A240. Real chip and emulated
 SB must be at different bases. To replace a resident VSBPCM: reboot. (The

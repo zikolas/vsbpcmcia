@@ -26,7 +26,7 @@ Requirements:
  * HDPMI32i v3.21+ - DPMI host with port trapping; 32-bit protected-mode
  * JEMM386/JEMMEX + JLOAD QPIEMU.DLL - V86 monitor with port trapping; v86-mode
  * An enabler that powers/configures the card (ES1688GO), real chip at 0x220,
-   emulation at 0x240 (see deploy/GOVS.BAT for the proven launch order)
+   emulation at 0x240 (see deploy/GO.BAT for the proven launch order)
 
 Environment knobs (all optional):
  * SBEBASE  - real chip base (hex, default 220)
