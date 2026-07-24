@@ -136,14 +136,23 @@ static int es_tsc_check(void)
  __asm__ __volatile__("cpuid" : "=d"(d) : "a"(1) : "ebx", "ecx");
  return (d >> 4) & 1;
 }
-static unsigned char es_tel_sndisr, es_tel_irq;
+/* Tick/feed counters are 16-BIT (lo/hi split across scratch bytes): 8-bit
+ * counters wrap-alias hopelessly when measuring rates over multi-second
+ * windows (the SC2K chop diagnosis needed exactly that). ticks = 0x4F7 lo /
+ * 0x4F9 hi; feeds = 0x4FB lo / 0x4FF hi. On no-TSC CPUs 0x4FC/0x4FD carry a
+ * 16-bit PT byte accumulator (>>4) instead of the duration probe. */
+static uint16_t es_tel_sndisr, es_tel_feed16;
+static unsigned long es_tel_bytes;
+static unsigned char es_tel_irq;
 static unsigned char es_dbg_depth, es_dbg_maxdepth, es_dbg_skips;
 static unsigned long long es_dbg_t0;
 static unsigned es_dbg_maxdur;
 static unsigned long long es_rdtsc(void){ unsigned long long v; __asm__ __volatile__("rdtsc" : "=A"(v)); return v; }
 void ES1688_dbg_tick(void)
 {
- _farpokeb(_dos_ds, 0x4F7, ++es_tel_sndisr);
+ ++es_tel_sndisr;
+ _farpokeb(_dos_ds, 0x4F7, (unsigned char)es_tel_sndisr);
+ _farpokeb(_dos_ds, 0x4F9, (unsigned char)(es_tel_sndisr >> 8));
  if(++es_dbg_depth > es_dbg_maxdepth){ es_dbg_maxdepth = es_dbg_depth; _farpokeb(_dos_ds, 0x4F0, es_dbg_maxdepth); }
  if(es_has_tsc && es_dbg_depth == 1) es_dbg_t0 = es_rdtsc();
 }
@@ -204,6 +213,11 @@ static unsigned char      ring_buf[RING_BYTES];
 static uint16_t           es_base = ES_DEF_BASE;
 static unsigned           es_dacrate = DAC_RATE_DEF;
 static unsigned char      es_rtc_rs = RTC_RS_DEF;    // current armed RTC pump rate (SET SBERTC=n forces it fixed)
+static unsigned char      es_rs_want = ES_RS_IDLE;   // the CURRENT STREAM's proper pump rate (feed-forward result).
+                                                     // PT_Feed restores it after an idle throttle: between two
+                                                     // same-format sounds NO reconfig runs, so nothing else would --
+                                                     // the pump stayed at 32Hz and the 256-byte FIFO drained dry
+                                                     // between 31ms pump visits (the SC2K mid-session chop).
 static int                es_adaptive;               // 1 = self-pace the pump (no SBERTC override)
 static DPMI_ISR_HANDLE    es_i5_handle;     // real IRQ5 handler for the card's TC IRQ
 static int                es_i5_on;
@@ -275,7 +289,13 @@ static void es_ewr(uint16_t base, unsigned char reg, unsigned char val)
 // ==========================================================================
 static volatile int es_pt_active;
 static unsigned es_pt_rate, es_pt_bits, es_pt_channels;
-static unsigned char es_tel_stop, es_tel_recfg, es_tel_feed;   // telemetry counters
+static unsigned char es_tel_recfg;                             // telemetry counter (FULL reconfigs only)
+// What the CHIP is armed with (0 = not armed), distinct from the STREAM state
+// es_pt_*: PT_Watchdog clears the stream state on every guest DSP reset (real
+// SB semantics), but the chip usually needs no re-arm at all -- see the
+// fast-resume path in es_pt_reconfig.
+static unsigned es_hw_rate, es_hw_bits, es_hw_channels;
+static volatile uint32_t es_last_drain;   // BIOS tick when FIFO_HE last seen set = chip provably draining
 
 // main.c hook: every guest DSP RESET calls this, so a pump that died while the
 // system sat idle (no polls, DAC halted, no hosts) is revived BEFORE the next
@@ -296,6 +316,28 @@ static void es_pt_reconfig(unsigned rate, unsigned bits, unsigned channels)
 {
  unsigned a1, a2, brate; int i; uint16_t base = es_base;
  if(rate < 4000) rate = 4000; if(rate > 44100) rate = 44100;
+ // FAST RESUME: guests that DSP-reset per sound (SC2K: one reset per SFX)
+ // clear the stream state via PT_Watchdog, but the CHIP usually needs no
+ // re-arm -- same format, DAC running, pump feeding. The full surgery below
+ // (DSP reset + ~20 reg writes + 256-byte silence prime) injected a multi-ms
+ // gap PLUS ~23ms of primed silence PER SOUND (the SC2K per-SFX chop;
+ // 0x4FA showed one reconfig per sound). Skip it when the chip is armed with
+ // this exact format AND provably draining: FIFO_HE seen within ~4 BIOS
+ // ticks. An idle-STALLED or stopped chip fails the drain test and still
+ // gets the full re-arm (the pinball->idle->pinball lesson stands).
+ if(rate == es_hw_rate && bits == es_hw_bits && channels == es_hw_channels
+    && (uint32_t)(_farpeekl(_dos_ds, 0x46C) - es_last_drain) <= 4){
+  es_pt_rate = rate; es_pt_bits = bits; es_pt_channels = channels;
+  if(es_adaptive){                            // same feed-forward pump re-arm as the full path
+   unsigned fifob2 = rate * ((channels >= 2) ? 2U : 1U);
+   if(fifob2 > 44100) fifob2 = 44100;
+   fifob2 *= (bits >= 16) ? 2U : 1U;
+   es_rs_want = es_rs_for_brate(fifob2);
+   es_rtc_rs = es_rs_want;
+   rtc_enable();
+  }
+  return;
+ }
  // The ESS clock counts BYTES: in stereo each channel gets half of it (DOSBox-X
  // halves its channel rate for ESS stereo). SBEMU hands us the per-channel
  // rate, so program A1/A2 from the byte rate or stereo runs at half speed
@@ -327,10 +369,13 @@ static void es_pt_reconfig(unsigned rate, unsigned bits, unsigned channels)
  es_dsp_cmd(base, 0xD1);
  es_ewr(base, 0xB8, 0x05);
  es_pt_rate = rate; es_pt_bits = bits; es_pt_channels = channels;
- _farpokeb(_dos_ds, 0x4FA, ++es_tel_recfg);                    // telemetry
+ es_hw_rate = rate; es_hw_bits = bits; es_hw_channels = channels;  // chip armed with this format
+ es_last_drain = _farpeekl(_dos_ds, 0x46C);                        // fresh arm = draining
+ _farpokeb(_dos_ds, 0x4FA, ++es_tel_recfg);                    // telemetry (FULL reconfigs only)
  if(es_adaptive){                             // FEED-FORWARD: size the pump to this stream, re-arm.
   unsigned fifob = brate * ((bits >= 16) ? 2U : 1U);  // true FIFO drain bytes/sec (16-bit doubles it)
-  es_rtc_rs = es_rs_for_brate(fifob);         // feedback ratchets faster from here if the game starves it
+  es_rs_want = es_rs_for_brate(fifob);        // feedback ratchets faster from here if the game starves it
+  es_rtc_rs = es_rs_want;
   rtc_enable();
  }
 }
@@ -360,6 +405,7 @@ static void es_fifo_pump(void)
  }
  while((inportb(base+ES_STAT) & FIFO_HE) && guard < 512){
   unsigned rd = ring_rd, wr = ring_wr; int k;
+  es_last_drain = _farpeekl(_dos_ds, 0x46C);   // FIFO_HE set = the DAC is consuming (fast-resume liveness)
   for(k=0;k<128;k+=(int)unit){
    unsigned u;
    if((((wr - rd) & RING_MASK)) >= unit){
@@ -413,8 +459,14 @@ void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, unsigned
  _farpokeb(_dos_ds, 0x4F2, 1);                                 // DIAG stage: entry
  if(es_pt_feed_busy){ _farpokeb(_dos_ds, 0x4F3, ++es_reentry); return; }   // re-entered -> skip
  es_pt_feed_busy = 1;
- _farpokeb(_dos_ds, 0x4FB, ++es_tel_feed);                     // telemetry
+ ++es_tel_feed16;                                              // telemetry (16-bit, lo/hi)
+ _farpokeb(_dos_ds, 0x4FB, (unsigned char)es_tel_feed16);
+ _farpokeb(_dos_ds, 0x4FF, (unsigned char)(es_tel_feed16 >> 8));
  es_last_feed = _farpeekl(_dos_ds, 0x46C);                     // audio flowing -> keep the pump fast
+ // Waking from the idle throttle: between same-format sounds no reconfig runs,
+ // so restore the stream's pump rate HERE, on the first feed. Rate-UP only
+ // (never slow down mid-play), one compare per feed.
+ if(es_adaptive && es_rtc_rs > es_rs_want) es_rtc_setrate(es_rs_want);
  if(!es_pt_active || rate != es_pt_rate || bits != es_pt_bits || channels != es_pt_channels)
  {
   uint8_t f = DPMI_DisableInterrupt();         // IF off: SNDISR can't re-enter during the long reconfig
@@ -434,6 +486,12 @@ void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, unsigned
     _farpokeb(_dos_ds, 0x4FE, ++es_tel_drop);
     bytes = (int)es_free;
    } }
+ es_tel_bytes += (unsigned long)bytes;         // PT byte-rate telemetry (no-TSC boxes: 0x4FC/D = bytes>>4, 16-bit)
+ if(!es_has_tsc){
+  unsigned u16 = (unsigned)((es_tel_bytes >> 4) & 0xFFFF);
+  _farpokeb(_dos_ds, 0x4FC, (unsigned char)u16);
+  _farpokeb(_dos_ds, 0x4FD, (unsigned char)(u16 >> 8));
+ }
  while(bytes > 0){
   int chunk = (int)(RING_BYTES - wr);      // contiguous space to end of ring
   if(chunk > bytes) chunk = bytes;
@@ -479,6 +537,11 @@ static void es_fifo_setup(uint16_t base, unsigned rate)
  for(i=0;i<256;i++) outportb(base+ES_FIFO, 0x80);      // prime FIFO with UNSIGNED silence (B7=0xD0, bit5=0)
  es_dsp_cmd(base, 0xD1);                // speaker on
  es_ewr(base, 0xB8, 0x05);              // start (run bit)
+ // NOT es_hw_*: this baseline config isn't byte-identical to a PT reconfig
+ // (mixer 0x0E stereo/filter bits differ), so never fast-resume onto it --
+ // the first PT stream after any bring-up does one full reconfig.
+ es_hw_rate = es_hw_bits = es_hw_channels = 0;
+ es_last_drain = _farpeekl(_dos_ds, 0x46C);
 }
 // Full driver reset for SBRESET (soft reset instead of a reboot): quiesce,
 // clear all cached passthrough state, bring the chip back up fresh, re-arm the
@@ -490,6 +553,7 @@ static void es_fifo_stop(uint16_t base)
  es_ewr(base, 0xB8, 0x00);              // clear run
  es_dsp_reset(base);
  es_dsp_cmd(base, 0xD3);                // speaker off
+ es_hw_rate = es_hw_bits = es_hw_channels = 0;   // chip disarmed: no fast-resume onto a stopped DAC
 }
 
 void ES1688_PT_FullReset(void)
@@ -648,7 +712,7 @@ static void ES1688_start(struct audioout_info_s *aui)
   }
  }
 
- if(es_adaptive) es_rtc_rs = es_rs_for_brate(es_dacrate);  // sane baseline for the initial/non-PT case; PT streams override via feed-forward
+ if(es_adaptive){ es_rs_want = es_rs_for_brate(es_dacrate); es_rtc_rs = es_rs_want; }  // sane baseline for the initial/non-PT case; PT streams override via feed-forward
  rtc_enable();                            // IRQ8 -> SBEMU pump + our FIFO feed
 }
 
@@ -663,7 +727,6 @@ static void ES1688_stop(struct audioout_info_s *aui)
  // idle" stall (755C) and the order-dependent SBDIAG failures (235). The RTC
  // pump and the IRQ5 TC handler stay installed until close().
  es_fifo_stop(card->base);
- _farpokeb(_dos_ds, 0x4F9, ++es_tel_stop);                     // telemetry
  es_pt_active = 0;            // next passthrough feed does a full chip re-arm
  ring_wr = ring_rd = 0;       // DRAIN the ring: with the DAC halted a full ring
                               // would report no space, so the tap never feeds,
