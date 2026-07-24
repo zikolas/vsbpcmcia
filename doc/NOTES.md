@@ -99,6 +99,15 @@ it from a remote-control agent kills the agent.)
   something HDPMI mishandles. Candidate upstream report for
   Baron-von-Riedesel (HX). Workaround: none with sound (VCPI clients are
   untappable); on the PC110 the game runs bare on the internal ES488.
+* **SOLVED (2026-07-24): game-native ESFM silence** was ES1688GO's 2-port
+  FM window (CIS-literal 388-389): the ESFM native-mode enable lives on the
+  OPL3 secondary pair at 38A/38B and never reached the chip -- AdLib worked,
+  ESFMPLAY (quad at the SB base) worked, every game's ESFM mode was silent.
+  Fixed in ES1688GO 1.4 (4-port FM window; CS falls back to 2 if refused).
+  Warcraft 2 'ESFM Enhanced' verified on cold boot through the full stack.
+  Related guidance: ESS-aware FM apps that read BLASTER (e.g. ESFMPLAY)
+  should be pointed at the REAL chip base (SET BLASTER=A220...) for the
+  probe; the emulated base has no FM.
 * **Theme Hospital (demo) plonk-hiss**: staff-placement sounds
   (pause -> single-cycle -> resume on the active Miles stream) latch a
   constant hiss. Measured: our delivered stream is byte-identical to the
