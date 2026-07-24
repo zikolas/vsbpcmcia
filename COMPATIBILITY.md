@@ -14,13 +14,17 @@ issue with your game, machine, card and symptoms.
 | Duke Nukem 3D | ✅ | 486DX4 | |
 | Wolfenstein 3D | ✅ | 486DX4 | |
 | Epic Pinball | ✅ | 486SX/33, 486DX4 | |
+| Prince of Persia | ✅ | 486 | |
+| Heretic | ✅ | 486 | |
+| Rise of the Triad | ✅ | 486 | |
 | The Lion King | ✅ | 486DX4 | |
 | SimCity 2000 | ✅ | 486DX4 | |
 | Theme Hospital | ✅ | 486DX4, P-MMX | native ESFM music with ES1688GO 1.4+ |
 | Warcraft II | ✅ | P-MMX | native ESFM ("ESFM Enhanced") with ES1688GO 1.4+ |
 | Tomb Raider | ✅ | P-MMX | |
 | Sam & Max Hit the Road (talkie) | ❌ | 486SX/33 | crashes in the HDPMI DPMI host itself (also without VSBPCMCIA loaded); runs on a bare boot |
-| Pinball Fantasies | ⚠️ | 486SX/33 | wedges on load; not yet triaged |
+| Pinball Fantasies | ⚠️ | 486SX/33, 486 | game freezes (on load on the SX/33); not yet triaged |
+| Duke Nukem II | ❌ | 486 | game's SB detection fails; not yet triaged |
 | Earthworm Jim 2 | ⚠️ | 486SX/33 | audio distortion; suspected CPU limit, untested on faster machines |
 
 FM-only ESS-native players (e.g. ESFMPLAY) probe the BLASTER variable:
