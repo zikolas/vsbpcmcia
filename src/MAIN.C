@@ -475,7 +475,7 @@ int main(int argc, char* argv[])
 #endif
 
     if ( IsInstalled() ) {
-        printf("SB found - probably VSBHDA already installed\n" );
+        printf("SB found - probably VSBPCMCIA already installed\n" );
         return(0);
     }
 #ifdef _DEBUG
@@ -659,6 +659,6 @@ int main(int argc, char* argv[])
     dbgprintf(("main: bISR=%u, bQemm=%u, bHdpmi=%u\n", gm.bISR, gm.bQemm, gm.bHdpmi ));
 errexit:
     ReleaseRes();
-    printf("Error: VSBHDA not installed.\n");
+    printf("Error: VSBPCMCIA not installed.\n");
     return 1;
 }
