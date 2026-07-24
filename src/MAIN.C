@@ -29,6 +29,12 @@
 
 #include "AU.H"
 
+/* VSBPCMCIA: cap the DJGPP stack at 64KB (default is 512KB, committed up
+ * front under HDPMI -x -- half a megabyte of resident XMS on RAM-starved
+ * boxes like the PC110). 64KB covers main() init depth plus SwitchStackISR's
+ * 4KB-per-nesting carvings with a wide margin; STACKCHECK guards the floor. */
+unsigned _stklen = 0x10000;
+
 #define BASE_DEFAULT 0x220
 #define IRQ_DEFAULT 7
 #define DMA_DEFAULT 1

@@ -38,8 +38,10 @@ vpath %.o $(vpath_obj)
 # VSBPCMCIA: PCI card drivers (sc_e1371/ich/inthd/via82/sbliv/sbl24), ac97mix
 # and pcibios are excluded -- PCMCIA-only build, see NOxxx defines in config.h.
 # The sources stay in the tree for cheap upstream merges.
+# dbopl.o dropped too: under NOFM vopl3.cpp never references DBOPL, and the
+# OPL engine's tables/objects would still occupy resident RAM (PC110 budget).
 OBJFILES=\
-	$(OUTD)/main.o		$(OUTD)/sndisr.o	$(OUTD)/ptrap.o		$(OUTD)/dbopl.o		$(OUTD)/linear.o	$(OUTD)/pic.o\
+	$(OUTD)/main.o		$(OUTD)/sndisr.o	$(OUTD)/ptrap.o		$(OUTD)/linear.o	$(OUTD)/pic.o\
 	$(OUTD)/vsb.o		$(OUTD)/vdma.o		$(OUTD)/virq.o		$(OUTD)/vopl3.o		$(OUTD)/vmpu.o		$(OUTD)/tsf.o\
 	$(OUTD)/au_cards.o\
 	$(OUTD)/dmabuff.o	$(OUTD)/physmem.o	$(OUTD)/timer.o\

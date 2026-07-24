@@ -89,6 +89,16 @@ it from a remote-control agent kills the agent.)
 
 ## Open issues
 
+* **Sam & Max (talkie) faults under HDPMI** -- not a VSBPCMCIA bug: SETMUSE
+  and the game both die with DOS/4GW error 2001 / exception 0Eh at
+  25F:00438A89 (EAX=90641BE0 wild pointer, deterministic, identical
+  registers every run) with ONLY Jemm+QPIEMU+HDPMI32i loaded, no VSBPCM.
+  Swapping the extender for DOS32A faults identically; running with
+  `HDPMI32I -d` (DPMI refused -> VCPI fallback) works -- the host is the
+  common factor. Unaffected by HDPMI -a / -x5 / -n. iMUSE driver init does
+  something HDPMI mishandles. Candidate upstream report for
+  Baron-von-Riedesel (HX). Workaround: none with sound (VCPI clients are
+  untappable); on the PC110 the game runs bare on the internal ES488.
 * **Theme Hospital (demo) plonk-hiss**: staff-placement sounds
   (pause -> single-cycle -> resume on the active Miles stream) latch a
   constant hiss. Measured: our delivered stream is byte-identical to the
