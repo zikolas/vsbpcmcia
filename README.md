@@ -45,3 +45,8 @@ VSBPCMCIA uses some source codes from:
 To create the binary, DJGPP v2.05 and JWasm (v2.17 or better) are needed;
 tools/build.sh runs the whole build in a Linux container (see doc/NOTES.md).
 The 16-bit Open Watcom variant of upstream VSBHDA is not built here.
+
+License: GNU General Public License v2 (see COPYING). VSBPCMCIA is a
+derivative of VSBHDA, SBEMU, MPXPlay (C) PDSoft (Attila Padar) and DOSBox's
+OPL emulation, all GPL v2; the ES1688 passthrough backend (C) 2026 zikolas.
+Released binaries always correspond to the tagged source in this repository.
