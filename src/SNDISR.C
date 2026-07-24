@@ -422,9 +422,7 @@ static int SNDISR_Interrupt( void )
         int pt_block = pt_mode && VSB_GetBits() >= 8;
 #endif
 
-#ifndef NOES1688
-        { extern void ES1688_dbg_mark(int); ES1688_dbg_mark(0); }   /* DIAG: render loop body entered */
-#endif
+        /* (0x4F4 is the RTC-revival counter now; the loop-entered diag is retired) */
 
         if ( !IsSilent ) {
             DMA_Base = VDMA_GetBase(dmachannel);
@@ -564,12 +562,9 @@ static int SNDISR_Interrupt( void )
              * guest's native rate/format directly). Both DMA read paths above have
              * filled pDest[0..bytes) contiguously. bytes was already capped to the
              * ring's free space above, so PT_Feed never overruns the ring. */
-            {
-                extern void ES1688_dbg_mark(int);
-                ES1688_dbg_mark(1);   /* DIAG: reached tap point (inside !IsSilent, after guest-DMA read) */
-                if ( pt_block )
-                    ES1688_PT_Feed( (const unsigned char *)pDest, bytes, SB_Rate, VSB_GetBits(), channels );
-            }
+            /* (0x4F5 is the ring-fill probe now; the reached-tap diag is retired) */
+            if ( pt_block )
+                ES1688_PT_Feed( (const unsigned char *)pDest, bytes, SB_Rate, VSB_GetBits(), channels );
 #endif
             /* v2.0: copy 1 more sample for cv_rate() */
             if ( resample

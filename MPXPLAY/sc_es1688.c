@@ -47,6 +47,7 @@
 #include <stdio.h>
 #include <go32.h>
 #include <sys/farptr.h>   // telemetry pokes into the BIOS IAC area (0x4F0)
+#include <dpmi.h>         // _go32_dpmi_* : the IRQ0 watchdog heartbeat is a REAL hook now
 #include <stdlib.h>
 #include <pc.h>
 #include "au_cards.h"
@@ -72,11 +73,30 @@
 #define TRUE  1
 #define FALSE 0
 #endif
-typedef struct { int intno; } DPMI_ISR_HANDLE;
-static int  DPMI_InstallISR(int intno, void (*isr)(void), DPMI_ISR_HANDLE *h, int chain)
-{ (void)intno; (void)isr; (void)h; (void)chain; return -1; }   // deferred (see note)
-static void DPMI_UninstallISR(DPMI_ISR_HANDLE *h){ (void)h; }
-static void DPMI_CallOldISR(DPMI_ISR_HANDLE *h){ (void)h; }
+/* REAL install now (was a fail-safe stub, deferred pending evidence). The
+ * evidence arrived on the T2130CT: Theme Hospital (DOS4GW/Miles) kills the
+ * RTC periodic mid-game -- ticks16 frozen for 6.5s -- and with es_watchdog's
+ * only hosts being the RTC ISR itself (dead) and guest DSP resets (none
+ * mid-game), the pump stayed dead: silence, then the exit path wedged
+ * waiting on SB IRQs. The chained IRQ0 heartbeat is the guest-independent
+ * watchdog host (crazii-proven design): the PIT always ticks, so RTC death
+ * heals within ~110ms. go32's chain wrapper handles the jump to the old
+ * handler (BIOS EOIs); our handler just runs the watchdog and returns. */
+typedef struct { int intno; _go32_dpmi_seginfo si, oldsi; } DPMI_ISR_HANDLE;
+static int DPMI_InstallISR(int intno, void (*isr)(void), DPMI_ISR_HANDLE *h, int chain)
+{
+ h->intno = intno;
+ if(_go32_dpmi_get_protected_mode_interrupt_vector(intno, &h->oldsi)) return -1;
+ h->si.pm_offset = (unsigned long)isr;
+ h->si.pm_selector = _go32_my_cs();
+ if(chain)
+  return _go32_dpmi_chain_protected_mode_interrupt_vector(intno, &h->si) ? -1 : 0;
+ if(_go32_dpmi_allocate_iret_wrapper(&h->si)) return -1;
+ return _go32_dpmi_set_protected_mode_interrupt_vector(intno, &h->si) ? -1 : 0;
+}
+static void DPMI_UninstallISR(DPMI_ISR_HANDLE *h)
+{ _go32_dpmi_set_protected_mode_interrupt_vector(h->intno, &h->oldsi); }
+static void DPMI_CallOldISR(DPMI_ISR_HANDLE *h){ (void)h; }   // still unused: IRQ5 TC handler stays opt-in (see es_i5_install)
 static uint8_t DPMI_DisableInterrupt(void)
 {
  unsigned f;
@@ -207,8 +227,13 @@ typedef struct es1688_card_s { uint16_t base; } es1688_card_s;
 static const unsigned char es_sine16[16] =
     {128,177,218,246,255,246,218,177,128,79,38,10,0,10,38,79};
 
-// ring: 8-bit UNSIGNED mono, written by SBEMU pump, drained into the FIFO
+// ring: 8-bit UNSIGNED mono, written by SBEMU pump, drained into the FIFO.
+// OWNERSHIP: ring_rd is written ONLY by es_fifo_pump (serialized by
+// es_pump_busy); ring_wr only by the feed path. Trap-context code must NEVER
+// write either -- it requests a flush via es_flush_gen and the pump snaps
+// rd := wr itself (see ES1688_PT_Watchdog for the race this prevents).
 static volatile unsigned ring_wr, ring_rd;
+static volatile unsigned es_flush_gen, es_flush_ack;
 static unsigned char      ring_buf[RING_BYTES];
 static uint16_t           es_base = ES_DEF_BASE;
 static unsigned           es_dacrate = DAC_RATE_DEF;
@@ -246,7 +271,11 @@ static int                es_pt_ever;         // a passthrough stream has run ->
 static void es_watchdog(void)
 {
  uint32_t now = _farpeekl(_dos_ds, 0x46C);
- if(now - es_last_tick >= 2) rtc_enable();    // >=~110ms without a tick: re-arm
+ if(now - es_last_tick >= 2){                 // >=~110ms without a tick: re-arm
+  static unsigned char es_tel_revive;
+  _farpokeb(_dos_ds, 0x4F4, ++es_tel_revive); // DIAG: RTC revivals (how often a guest kills the RTC)
+  rtc_enable();
+ }
 }
 
 
@@ -303,11 +332,14 @@ static volatile uint32_t es_last_drain;   // BIOS tick when FIFO_HE last seen se
 void ES1688_PT_Watchdog(void)
 {
  es_watchdog();               // revive the RTC pump if it died while idle
- // Real-SB semantics: a DSP reset kills the current transfer. Flush the ring
- // and force a FULL chip re-arm on the next feed -- an idle-stalled chip with
- // a format-matching next stream otherwise skips the reconfig and stays dead
- // (the 'pinball -> idle -> pinball silent' case).
- ring_wr = ring_rd = 0;
+ // Real-SB semantics: a DSP reset kills the current transfer. But NEVER touch
+ // ring_rd/ring_wr from this (trap) context: this runs mid-guest-OUT and can
+ // preempt the pump between its ring_rd read and write-back -- one lost race
+ // at a sample boundary leaves rd permanently skewed into stale ring bytes
+ // (constant fuzz under all audio thereafter; latched at the end of a random
+ // sample -- the Theme Hospital hiss). Request the flush instead: the pump
+ // (sole owner of ring_rd) executes it within one tick.
+ es_flush_gen++;
  es_pt_active = 0;
  es_pt_rate = es_pt_bits = es_pt_channels = 0;
 }
@@ -391,6 +423,10 @@ static void es_fifo_pump(void)
  unsigned unit = 1;
  if(es_pump_busy) return;            // RTC tick vs inline PT_Feed (or a nested light-path tick):
  es_pump_busy = 1;                   // the outer call owns the ring_rd walk -- don't corrupt it
+ if(es_flush_gen != es_flush_ack){   // deferred ring flush (requested from trap context):
+  es_flush_ack = es_flush_gen;       // rd := wr from the CONSUMER side is race-free -- at worst a
+  ring_rd = ring_wr;                 // few concurrently-produced bytes survive the flush
+ }
  // NOTE (DOSBox-X authority): B7 bit5=0 in our 0xD0 config = FIFO data is
  // UNSIGNED. The old XOR here fed signed data - a periodic tone masks that
  // mangling, real audio doesn't. Everything 8-bit is unsigned end-to-end now.
@@ -558,7 +594,7 @@ static void es_fifo_stop(uint16_t base)
 
 void ES1688_PT_FullReset(void)
 {
- ring_wr = ring_rd = 0;
+ es_flush_gen++;              // pump-executed ring flush (see ring ownership note)
  es_pt_active = 0;
  es_pt_rate = es_pt_bits = es_pt_channels = 0;  // force a full reconfig on next feed
  es_dsp_reset(es_base);
@@ -662,6 +698,7 @@ static void es_irq0_isr(void)
 static void es_i8_install(void)
 {
  if(es_i8_on) return;
+ if(getenv("ESNOI8")) return;   // diagnostic kill-switch: run without the IRQ0 heartbeat (v0.3 behavior)
  if(DPMI_InstallISR(0x08, &es_irq0_isr, &es_i8_handle, TRUE) != 0) return;  // IRQ0, CHAINED
  es_i8_on = 1;
 }
@@ -675,6 +712,11 @@ static void es_i8_remove(void)
 static void es_i5_install(void)
 {
  if(es_i5_on) return;
+ // OPT-IN only (SET ESIRQ5=1): every stream on this stack has run fine with
+ // the card's TC IRQ unserviced, and DPMI_InstallISR is REAL now -- silently
+ // unmasking IRQ5 with a non-chaining handler is a behavior change we don't
+ // take without evidence.
+ if(!getenv("ESIRQ5")) return;
  if(DPMI_InstallISR(0x0D, &es_irq5_isr, &es_i5_handle, FALSE) != 0) return;  // IRQ5 = INT 0x0D
  outportb(0x21, inportb(0x21) & ~0x20);   // unmask IRQ5
  es_i5_on = 1;
@@ -728,11 +770,12 @@ static void ES1688_stop(struct audioout_info_s *aui)
  // pump and the IRQ5 TC handler stay installed until close().
  es_fifo_stop(card->base);
  es_pt_active = 0;            // next passthrough feed does a full chip re-arm
- ring_wr = ring_rd = 0;       // DRAIN the ring: with the DAC halted a full ring
-                              // would report no space, so the tap never feeds,
-                              // so the re-arm (inside PT_Feed) never runs -- a
-                              // permanent silence deadlock (pinball reruns,
-                              // Wolf3D one-shot SFX, SBDIAG ordering).
+ es_flush_gen++;              // DRAIN the ring (pump-executed; see ring ownership
+                              // note): with the DAC halted a full ring would
+                              // report no space, so the tap never feeds, so the
+                              // re-arm (inside PT_Feed) never runs -- a permanent
+                              // silence deadlock (pinball reruns, Wolf3D one-shot
+                              // SFX, SBDIAG ordering).
 }
 
 static void ES1688_close(struct audioout_info_s *aui)
@@ -778,7 +821,9 @@ static int ES1688_irq(struct audioout_info_s *aui)
  _farpokeb(_dos_ds, 0x4F8, ++es_tel_irq);                   // DIAG: irq_routine called (SNDISR reached AU_isirq)
  es_watchdog();                                             // re-arm if ticks died
  es_last_tick = _farpeekl(_dos_ds, 0x46C);                  // stamp this run
- outportb(0x70,0x0C); (void)inportb(0x71);                  // ack RTC
+ { uint8_t f = DPMI_DisableInterrupt();                     // ack RTC. cli: with the IRQ0 heartbeat live,
+   outportb(0x70,0x0C); (void)inportb(0x71);                // a tick landing between index and data would
+   DPMI_RestoreInterrupt(f); }                              // leave the CMOS index clobber-prone
 
  if(es_irqtone){                                            // diagnostic tone path
   guard = 0;
@@ -799,6 +844,7 @@ static int ES1688_irq(struct audioout_info_s *aui)
   es_fifo_pump();
  }
  else es_fifo_pump();                                       // normal / passthrough feed
+ _farpokeb(_dos_ds, 0x4F5, (unsigned char)(((ring_wr - ring_rd) & RING_MASK) >> 5));  // DIAG: ring fill, 32-byte units
  // SELF-PACING. Idle needs BOTH signals, because each alone is wrong somewhere:
  //  - es_pt_active flickers off every cycle during single-cycle DMA detection
  //    (SBEMU_Stop per cycle) -> using it alone stalls the pump mid-detect (slow launch)
