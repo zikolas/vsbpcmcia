@@ -1,0 +1,28 @@
+# Game compatibility
+
+Results below are from real hardware: IBM PC110 (486SX/33), Toshiba T2130CT
+(486DX4), IBM ThinkPad 755C (486DX4), IBM ThinkPad 235 (Pentium MMX), with
+Panasonic KXL-C101 and Ratoc REX-5571/5572 cards enabled by ES1688GO.
+"Works" means digital + FM audio in normal play, not exhaustive testing.
+Game version can matter. Reports welcome -- open a compatibility-report
+issue with your game, machine, card and symptoms.
+
+| Game | Status | Tested on | Notes |
+|---|---|---|---|
+| DOOM | ✅ | 486SX/33, 486DX4, P-MMX | instant SB detect |
+| DOOM II | ✅ | 486DX4 | |
+| Duke Nukem 3D | ✅ | 486DX4 | |
+| Wolfenstein 3D | ✅ | 486DX4 | |
+| Epic Pinball | ✅ | 486SX/33, 486DX4 | |
+| The Lion King | ✅ | 486DX4 | |
+| SimCity 2000 | ✅ | 486DX4 | |
+| Theme Hospital | ✅ | 486DX4, P-MMX | native ESFM music with ES1688GO 1.4+ |
+| Warcraft II | ✅ | P-MMX | native ESFM ("ESFM Enhanced") with ES1688GO 1.4+ |
+| Tomb Raider | ✅ | P-MMX | |
+| Sam & Max Hit the Road (talkie) | ❌ | 486SX/33 | crashes in the HDPMI DPMI host itself (also without VSBPCMCIA loaded); runs on a bare boot |
+| Pinball Fantasies | ⚠️ | 486SX/33 | wedges on load; not yet triaged |
+| Earthworm Jim 2 | ⚠️ | 486SX/33 | audio distortion; suspected CPU limit, untested on faster machines |
+
+FM-only ESS-native players (e.g. ESFMPLAY) probe the BLASTER variable:
+point it at the REAL chip base (`SET BLASTER=A220 I5 D1`) for such tools --
+the emulated base carries no FM.

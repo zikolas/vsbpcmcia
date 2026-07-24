@@ -18,6 +18,8 @@ Sibling forks: VSBCMI (https://github.com/drivelling-spinel/VSBCMI) supports
 PCI cards based on CMI 8338/8738; upstream VSBHDA covers HDA/AC97/SB Live.
 The PCI card drivers are present in this tree but excluded from the build.
 
+Game compatibility: see COMPATIBILITY.md.
+
 Emulated modes/cards:
 8-bit, 16-bit, mono, stereo, high-speed;
 Sound blaster 1.0, 2.0, Pro, Pro2, 16.
