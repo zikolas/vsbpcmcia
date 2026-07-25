@@ -9,6 +9,12 @@
  * version.h stay upstream's VSBHDA core version for lineage/merge sanity). */
 #define VSBPCM_VER "0.5"
 
+/* VSBPCMCIA card backend: default = ES1688 (sc_es1688.c). Define CARD_VEW211
+ * (tools/build.sh CARD=VEW211 does it via CFLAGS) to build the Panasonic
+ * CF-VEW211 / CS4231A backend instead -- the two provide the same passthrough
+ * ABI (ES1688_PT_*) and are compile-time exclusive. */
+/* #define CARD_VEW211 1 */
+
 /* VSBPCMCIA is PCMCIA-only: none of the fleet has PCI, so the PCI card
  * drivers are dead weight (~15% of the binary). Excluded via upstream's own
  * per-card guards -- the source files stay in the tree untouched so

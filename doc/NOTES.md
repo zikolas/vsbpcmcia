@@ -70,9 +70,27 @@ Rate measurements: read 0x46C (BIOS tick dword) and the counters in ONE
 mem_read (0x46C, 148 bytes spans both) and clock deltas against the BIOS
 tick -- wall-clock between tool calls is unreliable.
 
+## Card backends
+
+Two compile-time-exclusive backends share one passthrough ABI (the
+`ES1688_PT_*` symbols -- historical names, card-agnostic):
+
+* **ES1688** (default; `vsbpcm.exe`): Ratoc REX-5571/5572, Panasonic
+  KXL-C101. 256-byte chip FIFO, FIFO-half-empty-paced feed, enabler ES1688GO.
+* **CS4231A** (`CARD=VEW211 tools/build.sh` -> `vsbpcmv.exe`): Panasonic
+  CF-VEW211/212, PC-9801N-J04. 16-sample FIFO, PIT-absolute-time-paced PIO
+  (PRDY is unreliable on this card), ms-paced verified MCE bring-up, codec
+  at window base+4, discrete YMF262 for FM (native 4-port 0x388 decode --
+  NOFM passthrough needs no enabler window tricks). Enabler VEW21XGO
+  (github.com/zikolas/vew21xgo); see deploy/GO-VEW211.BAT. 22.05 kHz design
+  ceiling. Ported from the rex5571-sbemu vew211-backend branch; carries the
+  same session machinery as the ES1688 backend (flush-generation ring
+  ownership, rs_want pump-restore, fast-resume on same-format re-arms, IRQ0
+  heartbeat, runtime TSC probe, telemetry map).
+
 ## Build
 
-`tools/build.sh` (Linux container; DJGPP cross + JWasm). The tree is
+`tools/build.sh` (Linux container; DJGPP cross + JWasm); `CARD=VEW211` selects the CS4231A backend. The tree is
 case-normalized for case-sensitive filesystems. Always clean-builds.
 CPU target is i486; the TSC duration probe is runtime-gated (EFLAGS.ID ->
 CPUID -> TSC), so one binary serves 486s and Pentiums. Upstream's `/SD`

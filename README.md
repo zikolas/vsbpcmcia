@@ -12,7 +12,11 @@ directly at 0x388, untrapped.
 
 Supported Sound cards:
  * ES1688-class PCMCIA cards: Ratoc REX-5571/5572, Panasonic KXL-C101
-   (bring the card up with ES1688GO first)
+   (bring the card up with ES1688GO first) - VSBPCM.EXE
+ * CS4231A PCMCIA cards: Panasonic CF-VEW211/212, NEC PC-9801N-J04
+   (bring the card up with VEW21XGO first,
+   https://github.com/zikolas/vew21xgo) - VSBPCMV.EXE, built with
+   CARD=VEW211
 
 Sibling forks: VSBCMI (https://github.com/drivelling-spinel/VSBCMI) supports
 PCI cards based on CMI 8338/8738; upstream VSBHDA covers HDA/AC97/SB Live.
