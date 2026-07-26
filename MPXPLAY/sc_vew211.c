@@ -17,17 +17,26 @@
 //  playback. VSBPCMCIA emulates the SB, taps the raw guest stream, and we
 //  push it to the real CS4231A by PIO.
 //
-//  *** OUTPUT PATH: CS4231A PIO, PIT-time-paced (NOT flag-gated) ***
+//  *** OUTPUT PATH: CS4231A PIO, RTC-tick-credit-paced (NOT flag-gated) ***
 //  The CS4231A has a 16-sample playback FIFO clocked by its own crystal at
 //  the programmed rate. On the CF-VEW211's CS4231A-KQ behind the MEI ASIC,
 //  the PRDY flag is USELESS for pacing -- it reads "ready" continuously while
-//  overfeed is silently dropped. So the feed is paced by ABSOLUTE TIME off
-//  PIT channel 0 (the proven VEWPLAY design):
-//    * perb = PIT ticks per output byte, from the CODEC's actual table rate
-//      (not the guest's nominal rate -- the 10989-asked/11025-played mismatch
-//      otherwise underruns ~36x/s into a steady crackle).
-//    * each pump pass feeds only the frames elapsed real time has earned,
-//      capped at the 16-deep FIFO.
+//  overfeed is silently dropped. So the feed is paced by ABSOLUTE TIME:
+//    * each delivered RTC tick grants exactly one RTC period's worth of
+//      frames at the CODEC's actual table rate (not the guest's nominal
+//      rate -- the 10989-asked/11025-played mismatch otherwise underruns
+//      ~36x/s into a steady crackle); the pump spends the credit, capped
+//      at the 16-deep FIFO per pass.
+//    * the timebase is the RTC period, NOT PIT channel 0 (the earlier
+//      VEWPLAY design): the PIT is GUEST hardware -- games reprogram ch0's
+//      mode and reload for their own timers, which rescales the decrement
+//      rate and moves the wrap point, so a PIT-side accumulator gains a
+//      huge bogus "elapsed" at every guest-timer wrap and the pump bursts
+//      ahead of real time. Overfeed into a full FIFO is silently DROPPED
+//      -> sample decimation = fast, pitched-up, crackling playback in
+//      exactly the games that reprogram the timer. The RTC periodic is
+//      OURS (reg A; rate = 32768 >> (rs-1), crystal-exact) and needs no
+//      boot-time calibration.
 //    * DATASHEET R3: a sample COMMITS to the FIFO only when the Status
 //      register is read after its bytes are written -> outp(PDR); inp(SR)
 //      per byte, or total silence.
@@ -174,7 +183,6 @@ void ES1688_dbg_reenter(void){ _farpokeb(_dos_ds, 0x4F1, ++es_dbg_skips); }
 #define VEW_RS_MIN    5             // fastest pump = 2048 Hz (22.05k design ceiling)
 #define VEW_RS_IDLE   11            // idle keep-alive = 32 Hz
 #define VEW_RING_LOW  256
-#define VEW_IDLE_GAP  4             // base value; widened by SBEPTLAT (see adetect)
 #define VEW_BURST_FRAMES 16         // per-pass ceiling = FIFO depth
 
 typedef struct vew211_card_s { uint16_t base; } vew211_card_s;
@@ -198,42 +206,22 @@ static int                vew_adaptive;
 static void rtc_enable(void);
 static void vew_rtc_setrate(unsigned char rs);
 static unsigned char vew_rs_for_frate(unsigned frames_per_sec);
-static volatile uint32_t vew_last_tick;
-static volatile uint32_t vew_last_feed;
+// Time is kept in OUR OWN RTC tick count -- NEVER the BIOS tick at 0x46C.
+// Games own the timer chain: Lion King hooks INT8 without chaining (0x46C
+// freezes solid, measured on the 235), fast-timer games advance it several
+// times too fast. Any 0x46C-keyed decision (idle detection, watchdog gap)
+// misfires exactly while a game is running.
+static volatile uint32_t vew_tick_seq;   // ++ per delivered RTC tick
+static volatile uint32_t vew_feed_seq;   // vew_tick_seq at the last PT_Feed
 static int                vew_pt_ever;
 
-// ---- PIT-channel-0 absolute-time pacing ----------------------------------
-static unsigned long vew_pit_per_sec = 1193182UL / 2;
-static unsigned long vew_perb = 100;
-static unsigned      vew_pit_prev;
-static unsigned long vew_acc;
-
-static unsigned vew_pit_read(void)
-{
- unsigned lo, hi;
- outportb(0x43, 0x00);
- lo = (unsigned char)inportb(0x40);
- hi = (unsigned char)inportb(0x40);
- return (unsigned)((hi << 8) | lo);
-}
-static void vew_pit_calibrate(void)
-{
- uint32_t t0, guard = 0; unsigned prev, now; unsigned long cal = 0;
- t0 = _farpeekl(_dos_ds, 0x46C);
- while(_farpeekl(_dos_ds, 0x46C) == t0 && ++guard < 4000000UL) ;
- prev = vew_pit_read(); t0 = _farpeekl(_dos_ds, 0x46C); guard = 0;
- while(_farpeekl(_dos_ds, 0x46C) == t0 && ++guard < 4000000UL){
-  now = vew_pit_read(); cal += (unsigned long)((prev - now) & 0xFFFFU); prev = now;
- }
- if(cal < 30000UL) cal = 65536UL;
- vew_pit_per_sec = cal * 182UL / 10UL;
-}
-static void vew_set_byterate(unsigned brate)
-{
- if(!brate) brate = 22050U;
- vew_perb = vew_pit_per_sec / brate;
- if(!vew_perb) vew_perb = 1;
-}
+// ---- RTC-tick-credit pacing ----------------------------------------------
+// Credit is granted in VEW211_irq (one RTC period of frames per delivered
+// tick) and spent by the pump. Units: frames * rtc_hz -- one frame costs
+// rtc_hz, one tick earns vew_frate. Guest-independent (see header).
+static unsigned long vew_frate = DAC_RATE_DEF;  // codec TABLE rate, frames/s
+static unsigned long vew_fr_acc;                // pacing credit
+#define VEW_RTC_HZ() (32768UL >> (vew_rtc_rs - 1))
 
 // ---- CS4231A indexed-register helpers ------------------------------------
 static void vew_iodelay(unsigned n){ while(n--) (void)inportb(0x80); }
@@ -320,8 +308,9 @@ static void vew_codec_config(unsigned rate, unsigned bits, unsigned channels)
  vew_pt_rate = rate; vew_pt_bits = bits; vew_pt_channels = channels;
  vew_hw_rate = rate; vew_hw_bits = bits; vew_hw_channels = channels;
  // Pace at the rate the codec will actually PLAY (the table entry).
- vew_set_byterate((unsigned)vew_rates[ri].hz * ((channels>=2)?2U:1U) * ((bits>=16)?2U:1U));
- vew_acc = 0; vew_pit_prev = vew_pit_read();
+ vew_frate = vew_rates[ri].hz;
+ vew_fr_acc = 0;
+ _farpokeb(_dos_ds, 0x4F2, (unsigned char)(rate >> 8));  // guest rate >> 8 (pitch-bug forensics)
  _farpokeb(_dos_ds, 0x4FA, ++vew_tel_recfg);          // FULL reconfigs only
 }
 static void vew_codec_stop(void)
@@ -335,14 +324,15 @@ static void vew_codec_stop(void)
  vew_hw_rate = vew_hw_bits = vew_hw_channels = 0;     // codec disarmed: no fast-resume
 }
 
-// drain ring -> codec FIFO, PIT-time-paced. Called from the RTC tick AND
-// inline from PT_Feed.
+// drain ring -> codec FIFO, RTC-credit-paced. Called from the RTC tick
+// (which grants the credit first) AND inline from PT_Feed (which only
+// spends leftovers -- no time source of its own, so no double-credit).
 static void vew_pio_pump(void)
 {
  uint16_t cb = vew_codec;
  unsigned unit = 1;
  unsigned char sil;
- unsigned now; unsigned long owed;
+ unsigned long hz;
  int guard = 0;
  if(vew_pump_busy) return;
  vew_pump_busy = 1;
@@ -358,14 +348,26 @@ static void vew_pio_pump(void)
  }
  sil = (vew_pt_active && vew_pt_bits >= 16) ? 0x00 : 0x80;
 
- (void)inportb(cb+VC_SR);                             // clear stale INT/PUR
- now = vew_pit_read();
- vew_acc += (unsigned long)((vew_pit_prev - now) & 0xFFFFU);
- vew_pit_prev = now;
- owed = vew_perb * unit * VEW_BURST_FRAMES;
- if(vew_acc > owed) vew_acc = owed;
-
- while(vew_acc >= vew_perb * unit && guard < VEW_BURST_FRAMES){
+ hz = VEW_RTC_HZ();
+ // TICK-LOSS RECOVERY off the codec's own starvation flag. Per-tick credit
+ // is guest-proof but lost RTC periods (a game's cli bursts, a saturating
+ // game-timer ISR -- LK fades, EP in-game) are lost credit: the pump then
+ // chronically underfeeds by the loss fraction and the codec stretches
+ // samples = steady pitch sag. SER (SR bit 4) asserts whenever the DAC
+ // missed a sample since the last SR WRITE cleared it (reads don't clear --
+ // VEWPIO-proven on this card), and it is clocked by the codec crystal: a
+ // guest-proof underrun detector. Starved -> the FIFO is empty by
+ // definition, so a full 16-frame refill always fits: snap the credit to a
+ // full burst. Average delivery stays locked to the codec clock as long as
+ // delivered ticks * burst >= the frame rate (33% headroom at the ceiling).
+ { unsigned char sr = (unsigned char)inportb(cb+VC_SR);
+   if(vew_pt_active && (sr & 0x10)){
+    static unsigned char vew_tel_ser;
+    vew_fr_acc = hz * VEW_BURST_FRAMES;
+    _farpokeb(_dos_ds, 0x4F6, ++vew_tel_ser);         // SER catch-up count
+   }
+   outportb(cb+VC_SR, 0); }                           // clear SER/INT for the next interval
+ while(vew_fr_acc >= hz && guard < VEW_BURST_FRAMES){
   unsigned rd = ring_rd, wr = ring_wr, u;
   if(((wr - rd) & RING_MASK) >= unit){
    for(u=0;u<unit;u++){ outportb(cb+VC_PDR, ring_buf[rd]); (void)inportb(cb+VC_SR); rd = (rd+1)&RING_MASK; }
@@ -373,7 +375,7 @@ static void vew_pio_pump(void)
   }else{
    for(u=0;u<unit;u++){ outportb(cb+VC_PDR, sil); (void)inportb(cb+VC_SR); }
   }
-  vew_acc -= vew_perb * unit;
+  vew_fr_acc -= hz;
   guard++;
  }
  vew_pump_busy = 0;
@@ -383,13 +385,52 @@ static void vew_pio_pump(void)
 //  Passthrough backend ABI (ES1688_PT_* names are the engine's ABI --
 //  card-agnostic; here they drive the CS4231A).
 // ==========================================================================
+// RTC-death watchdog. The old version compared 0x46C BIOS ticks and blindly
+// re-armed on a >=110ms gap -- under Lion King's timer hooking it fired 141
+// times during the LOAD SCREEN alone (measured), and every spurious
+// rtc_enable() reads register C, which can eat a pending PF and STEAL the
+// very tick it claims to guard: lost pump ticks = underfeed = the codec
+// stretches samples = pitch sags + fuzz. Redesign: trigger on OUR tick
+// counter going stale, then VERIFY the arm state and fix only what is
+// provably wrong. The one destructive heal (the reg-C read that clears a
+// latched-PF wedge) is gated behind 1-2 s of confirmed silence measured by
+// the RTC's own seconds register -- the only guest-proof wall clock here.
 static void vew_watchdog(void)
 {
- uint32_t now = _farpeekl(_dos_ds, 0x46C);
- if(now - vew_last_tick >= 2){
-  static unsigned char es_tel_revive;
-  _farpokeb(_dos_ds, 0x4F4, ++es_tel_revive);         // RTC revivals
+ static unsigned char es_tel_revive;
+ static uint32_t wd_seq;
+ static unsigned char wd_stale, wd_sec, wd_secchg;
+ unsigned char b, sec;
+ uint8_t f;
+ uint32_t seq = vew_tick_seq;
+ if(seq != wd_seq){ wd_seq = seq; wd_stale = 0; wd_secchg = 0; return; }
+ if(++wd_stale < 2) return;                           // debounce one visit
+ wd_stale = 0;
+ f = DPMI_DisableInterrupt();
+ outportb(0x70,0x8B); b   = (unsigned char)inportb(0x71);
+ outportb(0x70,0x80); sec = (unsigned char)inportb(0x71);
+ DPMI_RestoreInterrupt(f);
+ if(!(b & 0x40)){                                     // PIE killed (the TH-class death)
   rtc_enable();
+  _farpokeb(_dos_ds, 0x4F4, ++es_tel_revive);
+  return;
+ }
+ if(inportb(0xA1) & 0x01){                            // IRQ8 masked at the slave PIC
+  f = DPMI_DisableInterrupt();
+  outportb(0xA1, (unsigned char)(inportb(0xA1) & ~0x01));
+  DPMI_RestoreInterrupt(f);
+  _farpokeb(_dos_ds, 0x4F4, ++es_tel_revive);
+  return;
+ }
+ if(sec != wd_sec){                                   // armed yet silent: confirm by
+  wd_sec = sec;                                       // real elapsed time before the
+  if(++wd_secchg >= 2){                               // PF-eating reg-C heal
+   wd_secchg = 0;
+   f = DPMI_DisableInterrupt();
+   outportb(0x70,0x0C); (void)inportb(0x71);
+   DPMI_RestoreInterrupt(f);
+   _farpokeb(_dos_ds, 0x4F4, ++es_tel_revive);
+  }
  }
 }
 
@@ -403,7 +444,6 @@ void ES1688_PT_Watchdog(void)
 }
 
 static unsigned vew_pt_lat_ms = 250;
-static unsigned vew_idle_gap_ticks = VEW_IDLE_GAP;
 int ES1688_PT_Space(void)
 {
  unsigned used = (ring_wr - ring_rd) & RING_MASK;
@@ -434,7 +474,7 @@ void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, unsigned
  ++es_tel_feed16;
  _farpokeb(_dos_ds, 0x4FB, (unsigned char)es_tel_feed16);
  _farpokeb(_dos_ds, 0x4FF, (unsigned char)(es_tel_feed16 >> 8));
- vew_last_feed = _farpeekl(_dos_ds, 0x46C);
+ vew_feed_seq = vew_tick_seq;
  // Waking from the idle throttle: between same-format sounds no reconfig
  // runs, so restore the stream's pump rate HERE (rate-up only).
  if(vew_adaptive && vew_rtc_rs > vew_rs_want) vew_rtc_setrate(vew_rs_want);
@@ -568,9 +608,6 @@ static int VEW211_adetect(struct audioout_info_s *aui)
  if(t){ int rs = atoi(t); if(rs>=3 && rs<=15) vew_rtc_rs = (unsigned char)rs; }
  else { vew_adaptive = 1; vew_rtc_rs = VEW_RS_IDLE; }
  if(l){ int ms = atoi(l); if(ms >= 30 && ms <= 2000) vew_pt_lat_ms = (unsigned)ms; }
- // Idle detection keys on FEED RECENCY; the gap must exceed one full latency
- // drain or steady playback (ring riding above target) would false-idle.
- vew_idle_gap_ticks = VEW_IDLE_GAP + (vew_pt_lat_ms * 2U) / 55U;
 
  // Codec must already be reachable (run VEW21XGO first): 0xFF on IAR =
  // nothing decoding the port -> card not enabled.
@@ -602,11 +639,10 @@ static void VEW211_setrate(struct audioout_info_s *aui)
 static void VEW211_start(struct audioout_info_s *aui)
 {
  vew211_card_s *card = aui->card_private_data;
- _farpokeb(_dos_ds, 0x4F6, 0xAA);                     // DIAG: start ran
+ // (0x4F6 is the SER catch-up counter now; the 0xAA start marker is retired)
  ring_wr = ring_rd = 0;
  vew_base  = card->base;
  vew_codec = (uint16_t)(card->base + VEW_CODEC_OFF);
- vew_pit_calibrate();
  vew_i8_install();
  vew_codec_config(vew_dacrate, 8, 1);                 // baseline arm, PEN on
  // Startup pump = light keep-alive; the first passthrough stream
@@ -672,22 +708,34 @@ static int VEW211_irq(struct audioout_info_s *aui)
 {
  (void)aui;
  _farpokeb(_dos_ds, 0x4F8, ++es_tel_irq);
+ ++vew_tick_seq;
  vew_watchdog();
- vew_last_tick = _farpeekl(_dos_ds, 0x46C);
  { uint8_t f = DPMI_DisableInterrupt();               // cli: the IRQ0 heartbeat could
    outportb(0x70,0x0C); (void)inportb(0x71);          // land between CMOS index+data
    DPMI_RestoreInterrupt(f); }
 
+ { unsigned long hz = VEW_RTC_HZ();                   // one RTC period of feed credit;
+   vew_fr_acc += vew_frate;                           // burst-capped so a stall can't
+   if(vew_fr_acc > hz * VEW_BURST_FRAMES)             // run the pump ahead into full-
+    vew_fr_acc = hz * VEW_BURST_FRAMES; }             // FIFO writes (silently dropped)
  vew_pio_pump();
  _farpokeb(_dos_ds, 0x4F5, (unsigned char)(((ring_wr - ring_rd) & RING_MASK) >> 5));  // ring gauge
 
- // Self-pacing keyed on FEED RECENCY alone -- deliberately NOT on
- // vew_pt_active (which sticks at 1 when a guest exits mid-stream and would
- // pin the pump at max on an empty ring: the "sluggish prompt" field bug).
+ // Self-pacing keyed on FEED RECENCY (our tick units) + RING OCCUPANCY --
+ // deliberately NOT on vew_pt_active (which sticks at 1 when a guest exits
+ // mid-stream: the "sluggish prompt" field bug). The idle throttle engages
+ // only once the ring is EMPTY: throttling with data still queued plays the
+ // tail out at 32 Hz -- a 43x slow-motion stretch (the Epic Pinball
+ // "returning to titles is very slow" / Lion King fade-sag field bug), and
+ // with a full ring it deadlocks (PT_Space=0 blocks the very feed whose
+ // arrival would restore the rate). The ratchet only fires while feeds are
+ // recent, so a departed guest can't pin the pump high on an empty ring.
  if(vew_adaptive && vew_pt_ever){
   unsigned used = (ring_wr - ring_rd) & RING_MASK;
-  if((vew_last_tick - vew_last_feed) >= vew_idle_gap_ticks){
-   if(vew_rtc_rs != VEW_RS_IDLE) vew_rtc_setrate(VEW_RS_IDLE);
+  uint32_t gap = vew_tick_seq - vew_feed_seq;
+  uint32_t lim = (VEW_RTC_HZ() * (220UL + 2UL * vew_pt_lat_ms)) / 1000UL;  // scale-invariant ~720ms
+  if(gap >= lim){
+   if(!used && vew_rtc_rs != VEW_RS_IDLE) vew_rtc_setrate(VEW_RS_IDLE);
   }else if(used < VEW_RING_LOW && vew_rtc_rs > VEW_RS_MIN){
    vew_rtc_setrate((unsigned char)(vew_rtc_rs - 1));
   }
