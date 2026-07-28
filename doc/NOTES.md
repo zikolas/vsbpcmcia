@@ -91,7 +91,13 @@ Two compile-time-exclusive backends share one passthrough ABI (the
   (PRDY is unreliable on this card; PIT ch0 is guest hardware -- games
   reprogram its mode/reload, which corrupted a PIT-side elapsed-time
   accumulator into burst overfeed = fast/pitched-up/crackling playback, the
-  2026-07-26 field bug), ms-paced verified MCE bring-up, codec
+  2026-07-26 field bug). The codec has 14 fixed crystal-divided rates; a
+  guest rate missing the table by >2% engages a nearest-neighbour FRAME
+  STEPPER in PT_Feed (Bresenham drop/dup of whole frames during the ring
+  copy -- no interpolation, 486-priced; `SBENORS=1` disables it for A/B).
+  Table picks cap at the 22.05k design ceiling, so a 44.1k guest decimates
+  2:1 to correct pitch/tempo at half bandwidth. Exact/near-table streams
+  keep the raw untouched path. ms-paced verified MCE bring-up, codec
   at window base+4, discrete YMF262 for FM (native 4-port 0x388 decode --
   NOFM passthrough needs no enabler window tricks). Enabler VEW21XGO
   (github.com/zikolas/vew21xgo); see deploy/GO-VEW211.BAT. 22.05 kHz design
@@ -148,6 +154,22 @@ it from a remote-control agent kills the agent.)
   estimate (pre-existing; SC2000 uses DSP 0x14, not direct-DAC).
 * **ADPCM** (<8-bit) falls back to the full render path, paced by the broken
   AU sawtooth (rare in practice).
+* **CS4231A fade dropouts are FIFO physics (closed 2026-07-26).** Some
+  games black out ALL interrupts for several ms at a time (Lion King's
+  screen fades, measured: SER starvation events fire in volume while the
+  guest-DSP-reset counter stays flat -- no reset storm, nothing to feed
+  with). The ES1688 rides the identical blackouts on its 256-BYTE chip
+  FIFO (~12 ms of cushion at 21 kHz); the CS4231A holds 16 SAMPLES
+  (~0.8 ms) and punctures. No driver can extend a hardware FIFO and the
+  PCMCIA bridge has no DMA. Verdict: fade-heavy titles sound best on the
+  ES1688-family cards; the VEW211 keeps native OPL3 + stereo + the frame
+  stepper's correct pitch everywhere else. (Two mitigation experiments were
+  field-WITHDRAWN the same day after a long session ended in crackle then
+  total silence: pumping from the IRQ0 heartbeat -- heavy work on a
+  borrowed, possibly slim guest ISR stack -- and a MODE2/DACZ underrun-
+  silence poke, an unverified write on a codec known to drop hasty writes.
+  The wedge state was lost to a reboot, so blame is split; neither had
+  shown audible benefit.)
 * **SBPro stereo-bit rate cache**: toggling the mixer stereo bit did not
   invalidate vsb.SampleRate (CalcSampleRate divides by channels) -- a 2x rate
   skew for guests that toggle stereo without resending the time constant.

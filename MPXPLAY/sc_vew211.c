@@ -257,15 +257,39 @@ static const struct { unsigned long hz; unsigned char code; } vew_rates[] = {
  {44100UL,0x0B},{48000UL,0x0C}
 };
 #define VEW_NRATES (int)(sizeof(vew_rates)/sizeof(vew_rates[0]))
+// Picks are capped at the 22.05k design ceiling: the pump can sustain at
+// most 2048 Hz x 16 frames = 32768 frames/s, so entries above 22050 can
+// never be fed continuously -- a 44.1k guest maps to 22050 and the frame
+// stepper (below) decimates 2:1: correct pitch and tempo, half bandwidth.
+#define VEW_RATE_CEIL 22050UL
 static int vew_rate_pick(unsigned rate)
 {
  int i, best = 7; unsigned long bd = 0xFFFFFFFFUL;
  for(i=0;i<VEW_NRATES;i++){
-  unsigned long d = vew_rates[i].hz > rate ? vew_rates[i].hz - rate : rate - vew_rates[i].hz;
+  unsigned long d;
+  if(vew_rates[i].hz > VEW_RATE_CEIL) continue;
+  d = vew_rates[i].hz > rate ? vew_rates[i].hz - rate : rate - vew_rates[i].hz;
   if(d < bd){ bd = d; best = i; }
  }
  return best;
 }
+
+// ---- nearest-neighbour frame stepper -------------------------------------
+// The CS4231A has 14 fixed crystal-divided rates and nothing in between,
+// while SB guests derive arbitrary rates from the time constant; nearest-
+// match alone leaves rates like 20000 or 25000 playing 5-8% flat/sharp --
+// and playing flat also drags the whole game (ring backpressure throttles
+// the guest to the codec's pace). When the mismatch exceeds ~2%, PT_Feed
+// re-steps the guest stream frame-wise onto the codec rate with a
+// Bresenham accumulator: whole frames are dropped or duplicated during
+// the ring copy that happens anyway. No interpolation, no per-sample
+// math -- a compare and an add per frame, 486-priced. Exact/near-table
+// streams (all the validated titles) keep the raw untouched path.
+// SBENORS=1 disables the stepper (A/B).
+static int           vew_no_step;      // env SBENORS
+static int           vew_step_on;      // engaged for the current format
+static unsigned long vew_step_in;      // guest frames/s
+static unsigned long vew_step_acc;     // Bresenham accumulator
 
 // Program the codec for {rate,bits,channels} in PIO mode; ms-paced MCE with
 // verify/retry (the CS4231A-KQ drops fast cold writes). ~25 ms.
@@ -310,6 +334,11 @@ static void vew_codec_config(unsigned rate, unsigned bits, unsigned channels)
  // Pace at the rate the codec will actually PLAY (the table entry).
  vew_frate = vew_rates[ri].hz;
  vew_fr_acc = 0;
+ // Arm the frame stepper when the guest rate misses the table by >2%.
+ vew_step_in  = rate;
+ vew_step_acc = 0;
+ { unsigned long d = vew_frate > rate ? vew_frate - rate : rate - vew_frate;
+   vew_step_on = (!vew_no_step && d * 50UL > (unsigned long)rate) ? 1 : 0; }
  _farpokeb(_dos_ds, 0x4F2, (unsigned char)(rate >> 8));  // guest rate >> 8 (pitch-bug forensics)
  _farpokeb(_dos_ds, 0x4FA, ++vew_tel_recfg);          // FULL reconfigs only
 }
@@ -449,13 +478,22 @@ int ES1688_PT_Space(void)
  unsigned used = (ring_wr - ring_rd) & RING_MASK;
  unsigned target = RING_BYTES - 64;
  if(vew_pt_rate){
-  unsigned bps = vew_pt_rate * vew_pt_channels * ((vew_pt_bits + 7) / 8);
+  // The ring holds OUTPUT-rate bytes (the stepper may have re-stepped the
+  // guest stream), so the latency target is sized from the codec rate.
+  unsigned bps = (unsigned)vew_frate * vew_pt_channels * ((vew_pt_bits + 7) / 8);
   target = (unsigned)((unsigned long)bps * vew_pt_lat_ms / 1000UL);
   if(target > RING_BYTES - 64) target = RING_BYTES - 64;
   if(target < 512) target = 512;
  }
  if(used >= target) return 0;
- return (int)(target - used);
+ { unsigned space = target - used;
+   // The caller counts GUEST bytes; the stepper shrinks (or grows) them on
+   // the way into the ring. Convert output-byte room to the guest bytes
+   // that will fill it, or a decimated 44.1k guest would be throttled to
+   // half its real-time rate by its own bandwidth savings.
+   if(vew_step_on)
+    space = (unsigned)((unsigned long)space * vew_step_in / vew_frate);
+   return (int)space; }
 }
 
 int ES1688_PT_Used(void)
@@ -466,6 +504,7 @@ int ES1688_PT_Used(void)
 // feed raw guest PCM (sndisr.c tap); reconfigure the codec on format change.
 static volatile int vew_pt_feed_busy;
 static unsigned char es_reentry;
+static unsigned char es_tel_drop;                     // 0x4FE: ring-full feed clamps
 void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, unsigned bits, unsigned channels)
 {
  unsigned wr;
@@ -495,30 +534,58 @@ void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, unsigned
   }
   vew_pt_active = 1; vew_pt_ever = 1;
   if(vew_adaptive){
-   vew_rs_want = vew_rs_for_frate(rate);              // frames/s = sample rate
+   // The pump only has to sustain what the CODEC plays (<= the 22.05k
+   // ceiling); a 44.1k guest is stepped down before it reaches the ring.
+   vew_rs_want = vew_rs_for_frate((unsigned)vew_frate);
    vew_rtc_rs = vew_rs_want;
    rtc_enable();
   }
  }
  wr = ring_wr;
- { unsigned es_free = (ring_rd - wr - 1u) & RING_MASK;  // never lap the consumer
-   if((unsigned)bytes > es_free){
-    static unsigned char es_tel_drop;
-    _farpokeb(_dos_ds, 0x4FE, ++es_tel_drop);
-    bytes = (int)es_free;
-   } }
- es_tel_bytes += (unsigned long)bytes;
+ if(!vew_step_on){
+  // Raw path: guest rate lands on (or within 2% of) a codec table rate.
+  { unsigned es_free = (ring_rd - wr - 1u) & RING_MASK;  // never lap the consumer
+    if((unsigned)bytes > es_free){
+     _farpokeb(_dos_ds, 0x4FE, ++es_tel_drop);
+     bytes = (int)es_free;
+    } }
+  es_tel_bytes += (unsigned long)bytes;
+  while(bytes > 0){
+   int chunk = (int)(RING_BYTES - wr);
+   if(chunk > bytes) chunk = bytes;
+   memcpy(ring_buf + wr, buf, chunk);
+   buf += chunk; bytes -= chunk;
+   wr = (wr + chunk) & RING_MASK;
+  }
+ }else{
+  // Frame stepper: re-step guest frames onto the codec rate (drop/dup
+  // whole frames, Bresenham). Emits vew_frate/vew_step_in output frames
+  // per input frame on average; the accumulator persists across feeds so
+  // the ratio holds exactly over time.
+  unsigned unit = (channels >= 2 ? 2u : 1u) * (bits >= 16 ? 2u : 1u);
+  unsigned es_free = (ring_rd - wr - 1u) & RING_MASK;
+  while(bytes >= (int)unit){
+   vew_step_acc += vew_frate;
+   while(vew_step_acc >= vew_step_in){
+    unsigned u;
+    vew_step_acc -= vew_step_in;
+    if(es_free < unit){                               // ring full: count + stop
+     _farpokeb(_dos_ds, 0x4FE, ++es_tel_drop);
+     bytes = 0;
+     break;
+    }
+    for(u = 0; u < unit; u++){ ring_buf[wr] = buf[u]; wr = (wr + 1) & RING_MASK; }
+    es_free -= unit;
+    es_tel_bytes += unit;
+   }
+   if(bytes < (int)unit) break;
+   buf += unit; bytes -= (int)unit;
+  }
+ }
  if(!es_has_tsc){
   unsigned u16 = (unsigned)((es_tel_bytes >> 4) & 0xFFFF);
   _farpokeb(_dos_ds, 0x4FC, (unsigned char)u16);
   _farpokeb(_dos_ds, 0x4FD, (unsigned char)(u16 >> 8));
- }
- while(bytes > 0){
-  int chunk = (int)(RING_BYTES - wr);
-  if(chunk > bytes) chunk = bytes;
-  memcpy(ring_buf + wr, buf, chunk);
-  buf += chunk; bytes -= chunk;
-  wr = (wr + chunk) & RING_MASK;
  }
  ring_wr = wr;
  vew_pio_pump();                                      // keep the FIFO fed inline
@@ -571,6 +638,14 @@ static unsigned char vew_rs_for_frate(unsigned frames_per_sec)
 }
 
 // ---- IRQ0 heartbeat: guest-independent watchdog host ---------------------
+// WATCHDOG ONLY -- keep this handler tiny. It chains on the guest's INT8
+// and runs on WHATEVER STACK that interrupt was taken on, and games run
+// slim ISR stacks. A field experiment (2026-07-26) that ran the full pump
+// from here -- deployed together with an unverified MODE2/DACZ codec poke
+// -- ended a long Lion King session in crackle then total silence; the
+// wedge state was lost to a reboot before telemetry could assign blame, so
+// which of the two killed it is unproven. Both were withdrawn. Regardless
+// of the verdict: do not put heavy work on a borrowed interrupt stack.
 static DPMI_ISR_HANDLE vew_i8_handle;
 static int vew_i8_on;
 static void vew_irq0_isr(void){ vew_watchdog(); }
@@ -598,6 +673,7 @@ static int VEW211_adetect(struct audioout_info_s *aui)
  const char *t = getenv("SBERTC");
  const char *v = getenv("SBEVOL");
  const char *l = getenv("SBEPTLAT");
+ if(getenv("SBENORS")) vew_no_step = 1;               // disable the frame stepper (A/B)
  if(e) base = (uint16_t)strtol(e, NULL, 16);
  vew_base  = base;
  vew_codec = (uint16_t)(base + VEW_CODEC_OFF);
