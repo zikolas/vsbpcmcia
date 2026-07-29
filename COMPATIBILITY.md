@@ -25,6 +25,7 @@ issue with your game, machine, card and symptoms.
 | Dune II | ✅ | P-MMX | |
 | Quake | ✅ | 486 (Libretto 20) | |
 | Raptor: Call of the Shadows | ✅ | P-MMX | |
+| Impulse Tracker | ✅ | P-MMX | tracker/editor, SB digital out |
 | Theme Hospital | ✅ | 486DX4, P-MMX | native ESFM music (stereo) with ES1688GO 1.4+ |
 | Warcraft II | ✅ | P-MMX | native ESFM ("ESFM Enhanced") with ES1688GO 1.4+ |
 | Tomb Raider | ✅ | P-MMX | |
@@ -32,6 +33,8 @@ issue with your game, machine, card and symptoms.
 | Pinball Fantasies | ⚠️ | 486SX/33, 486 | game freezes (on load on the SX/33); not yet triaged |
 | Duke Nukem II | ❌ | 486 | game's SB detection fails; not yet triaged |
 | Earthworm Jim 2 | ⚠️ | 486SX/33 | audio distortion; suspected CPU limit, untested on faster machines |
+| Cannon Fodder | ❌ | P-MMX | not yet triaged |
+| Worms | ❌ | P-MMX | not yet triaged |
 
 FM-only ESS-native players (e.g. ESFMPLAY) probe the BLASTER variable:
 point it at the REAL chip base (`SET BLASTER=A220 I5 D1`) for such tools --
