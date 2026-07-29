@@ -24,7 +24,8 @@ issue with your game, machine, card and symptoms.
 | SimCity 2000 | ✅ | 486DX4 | |
 | Dune II | ✅ | P-MMX | |
 | Quake | ✅ | 486 (Libretto 20) | |
-| Theme Hospital | ✅ | 486DX4, P-MMX | native ESFM music with ES1688GO 1.4+ |
+| Raptor: Call of the Shadows | ✅ | P-MMX | |
+| Theme Hospital | ✅ | 486DX4, P-MMX | native ESFM music (stereo) with ES1688GO 1.4+ |
 | Warcraft II | ✅ | P-MMX | native ESFM ("ESFM Enhanced") with ES1688GO 1.4+ |
 | Tomb Raider | ✅ | P-MMX | |
 | Sam & Max Hit the Road (talkie) | ❌ | 486SX/33 | crashes in the HDPMI DPMI host itself (also without VSBPCMCIA loaded); runs on a bare boot |
