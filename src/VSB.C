@@ -244,7 +244,6 @@ static void VSB_Mixer_Write( uint8_t value )
     /* INT and DMA setup are readonly */
     if ( vsb.MixerRegIndex == SB_MIXERREG_INT_SETUP || vsb.MixerRegIndex == SB_MIXERREG_DMA_SETUP )
         return;
-#ifdef CARD_VEW211
     /* SBPro rate cache: the stereo bit halves the per-channel rate
      * (CalcSampleRate divides by channels), but only cmd 0x40 invalidated the
      * cached vsb.SampleRate -- a guest that toggles stereo without resending
@@ -252,13 +251,10 @@ static void VSB_Mixer_Write( uint8_t value )
      * the doc/NOTES.md "latent" bug, now seen in the field). Recompute lazily
      * on any stereo change. Pre-SB16 only: SB16 rates come from cmd 0x41 and
      * must not be clobbered by a recompute from bTimeConst.
-     * Guarded by CARD_VEW211 ONLY to keep the default build byte-identical
-     * during bench testing -- unguard at merge (the ES1688 build shares the
-     * same latent bug). */
+     * Unguarded 2026-07-29 with the ES1688 stereo port (both builds). */
     if( vsb.DSPVER < 0x0400 && vsb.MixerRegIndex == SB_MIXERREG_MODEFILTER &&
         ( ( vsb.MixerRegs[SB_MIXERREG_MODEFILTER] ^ value ) & SB_MIXERREG_MODEFILTER_STEREO ) )
         vsb.SampleRate = 0;
-#endif
     vsb.MixerRegs[vsb.MixerRegIndex] = value;
 #if SB16
     if( vsb.DSPVER >= 0x0400 ) { //SB16
@@ -628,10 +624,8 @@ static void DSP_DoCommand( uint32_t flags )
         vsb.Bits = (vsb.dsp_cmd <= SB_DSP_2BIT_OUT_AUTO) ? 2 : ( vsb.dsp_cmd & 0x2 ) ? 3 : 4;
         ISR_adpcm_state.useRef = ( vsb.dsp_cmd & 1 );
         ISR_adpcm_state.step = 0;
-#ifdef CARD_VEW211
         if ( vsb.DSPVER < 0x0400 && ( vsb.MixerRegs[SB_MIXERREG_MODEFILTER] & SB_MIXERREG_MODEFILTER_STEREO ) )
             vsb.SampleRate = 0; /* stereo-off changes the per-channel rate (see VSB_Mixer_Write) */
-#endif
         vsb.MixerRegs[SB_MIXERREG_MODEFILTER] &= ~SB_MIXERREG_MODEFILTER_STEREO; /* reset stereo */
         vsb.Silent = false;
         vsb.Signed = false;
@@ -696,10 +690,8 @@ static void DSP_DoCommand( uint32_t flags )
     case SB_DSP_SILENCE_DAC: /* 80 - output silence samples */
         vsb.MixerRegs[SB_MIXERREG_IRQ_STATUS] &= ~0x7;
         vsb.Samples = vsb.dsp_in_data[0] | ( vsb.dsp_in_data[1] << 8 ); /* the value is #samples-1! */
-#ifdef CARD_VEW211
         if ( vsb.DSPVER < 0x0400 && ( vsb.MixerRegs[SB_MIXERREG_MODEFILTER] & SB_MIXERREG_MODEFILTER_STEREO ) )
             vsb.SampleRate = 0; /* stereo-off changes the per-channel rate (see VSB_Mixer_Write) */
-#endif
         vsb.MixerRegs[SB_MIXERREG_MODEFILTER] &= ~SB_MIXERREG_MODEFILTER_STEREO; /* reset stereo */
         vsb.Signed = false;
         vsb.Bits = 8;

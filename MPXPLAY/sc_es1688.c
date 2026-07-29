@@ -297,7 +297,7 @@ static void es_iodelay(unsigned n){ while(n--) inportb(0x80); }
 static int  es_dsp_reset(uint16_t base)
 {
  int i;
- outportb(base+0x06,1); es_iodelay(100);
+ outportb(base+0x06,3); es_iodelay(100);   // ESS reset: bit1 clears the FIFO (ALSA: 'SB -> 1')
  outportb(base+0x06,0); es_iodelay(300);
  for(i=0;i<4000;i++) if(inportb(base+0x0E)&0x80) break;
  return inportb(base+0x0A)==0xAA;
@@ -372,36 +372,49 @@ static void es_pt_reconfig(unsigned rate, unsigned bits, unsigned channels)
   }
   return;
  }
- // The ESS clock counts BYTES: in stereo each channel gets half of it (DOSBox-X
- // halves its channel rate for ESS stereo). SBEMU hands us the per-channel
- // rate, so program A1/A2 from the byte rate or stereo runs at half speed
- // (field-reported on Duke3D's sound test).
- brate = rate * ((channels >= 2) ? 2U : 1U);
+ // STEREO RECIPE (2026-07-29, STEREO88 probe, hardware-validated on the
+ // REX-5571/235; ES1868 DS Table 11 + PIO section; ALSA es1688_lib.c):
+ //  - A1/A2 from the FRAME rate: the chip doubles byte consumption in stereo
+ //    itself (the old byte-rate hack only corrected mono-mode playback of
+ //    interleaved data and makes true stereo run 2x fast).
+ //  - B7's 2nd byte encodes channels (98h/BCh stereo, D0h/F4h mono); the DAC
+ //    believes B7 over A8 -- the mono B7 here was the fleet-wide stereo bug.
+ //  - B9=01h (2-byte demand) in stereo makes the FIFO unload pair-atomic =
+ //    deterministic first-byte-LEFT channel phase (else a per-stream coin
+ //    flip). Requires the paced fills in es_fifo_pump.
+ //  - B2=10h (PIO: bits 7:5 low), B6 by signedness, prime AFTER the run bit
+ //    (B8 bit0 gates system->FIFO fills). 16-bit stereo values are Table-11
+ //    faithful but bench-untested (dormant: VSB emulates SBPro, 8-bit only).
+ brate = rate * ((channels >= 2) ? 2U : 1U);        // BYTE rate: pump sizing only
  if(brate > 44100) brate = 44100;
- if(brate >= 6215) a1 = 256 - (unsigned)((795444UL + brate/2)/brate);
- else              a1 = 128 - (unsigned)((397722UL + brate/2)/brate);
- a2 = 256 - (unsigned)((218293UL + brate/2)/brate);
+ if(rate >= 6215) a1 = 256 - (unsigned)((795444UL + rate/2)/rate);
+ else             a1 = 128 - (unsigned)((397722UL + rate/2)/rate);
+ a2 = 256 - (unsigned)((218293UL + rate/2)/rate);
  es_dsp_reset(base);
  es_dsp_cmd(base, 0xC6);
  es_ewr(base, 0xB8, 0x04);                          // auto-init
- es_ewr(base, 0xA8, (channels >= 2) ? 0x11 : 0x12); // stereo : mono (bit4: reserved, ALWAYS 1
-                                                    // per the DOSBox-X-documented A8 layout --
-                                                    // with it clear the chip never entered
-                                                    // stereo: L/R collapsed to centre + buzz)
+ es_ewr(base, 0xA8, (channels >= 2) ? 0x11 : 0x12); // stereo : mono (bit4 kept set)
+ es_ewr(base, 0xB9, (channels >= 2) ? 0x01 : 0x00); // stereo: 2-byte demand (pair-atomic)
  es_ewr(base, 0xA1, (unsigned char)a1);
  es_ewr(base, 0xA2, (unsigned char)a2);
  es_ewr(base, 0xA4, 0x00); es_ewr(base, 0xA5, 0xFE);
- if(bits >= 16){ es_ewr(base,0xB6,0x80); es_ewr(base,0xB7,0x71); es_ewr(base,0xB7,0xF4); }
- else          { es_ewr(base,0xB6,0x00); es_ewr(base,0xB7,0x51); es_ewr(base,0xB7,0xD0); }
- es_ewr(base, 0xB1, 0x50); es_ewr(base, 0xB2, 0x50);
- // SBPro-style stereo bit (mixer reg 0x0E bit1): on ES688/1688-class chips this
- // is the strong candidate for what ACTUALLY engages stereo (A8+B7 alone left
- // the chip in mono: L/R collapsed to centre and panned content buzzed).
- outportb(base + 0x04, 0x0E);
- outportb(base + 0x05, (channels >= 2) ? 0x22 : 0x20);  // bit1 stereo, bit5 filter off
- for(i=0;i<256;i++) outportb(base+ES_FIFO, (bits>=16)?0x00:0x80);  // prime silence (8-bit FIFO is UNSIGNED per B7 bit5=0)
+ if(bits >= 16){ es_ewr(base,0xB6,0x00); es_ewr(base,0xB7,0x71);
+                 es_ewr(base,0xB7,(channels >= 2) ? 0xBC : 0xF4); }
+ else          { es_ewr(base,0xB6,0x80); es_ewr(base,0xB7,0x51);
+                 es_ewr(base,0xB7,(channels >= 2) ? 0x98 : 0xD0); }
+ es_ewr(base, 0xB1, 0x50); es_ewr(base, 0xB2, 0x10);
+ if(channels < 2){                                  // mono keeps the fleet-proven
+  outportb(base + 0x04, 0x0E);                      // filter-off write; stereo leaves
+  outportb(base + 0x05, 0x20);                      // mixer 0x0E untouched (probe-exact)
+ }
  es_dsp_cmd(base, 0xD1);
  es_ewr(base, 0xB8, 0x05);
+ // SBPro-quirk polarity (the famous reversed-stereo SBPro trait; ES1868 DS
+ // compat mode: first byte -> RIGHT): games pre-compensate, so byte 0 of the
+ // guest stream must come out the RIGHT channel. The odd-prime trick was a
+ // NO-OP under B9 demand-2 (fill/unload is pair-quantized) -- the flip is done
+ // by swapping bytes per frame in es_fifo_pump (swap2). Prime stays even.
+ for(i=0;i<256;i++) outportb(base+ES_FIFO, (bits>=16)?0x00:0x80);  // prime AFTER run
  es_pt_rate = rate; es_pt_bits = bits; es_pt_channels = channels;
  es_hw_rate = rate; es_hw_bits = bits; es_hw_channels = channels;  // chip armed with this format
  es_last_drain = _farpeekl(_dos_ds, 0x46C);                        // fresh arm = draining
@@ -422,7 +435,7 @@ static void es_fifo_pump(void)
 {
  uint16_t base = es_base; int guard = 0;
  unsigned char sil = (es_pt_active && es_pt_bits >= 16) ? 0x00 : 0x80;
- unsigned unit = 1;
+ unsigned unit = 1; int pace = 0, swap2 = 0;
  if(es_pump_busy) return;            // RTC tick vs inline PT_Feed (or a nested light-path tick):
  es_pump_busy = 1;                   // the outer call owns the ring_rd walk -- don't corrupt it
  if(es_flush_gen != es_flush_ack){   // deferred ring flush (requested from trap context):
@@ -440,6 +453,9 @@ static void es_fifo_pump(void)
   unit = (es_pt_channels >= 2) ? 2 : 1;
   if(es_pt_bits >= 16) unit *= 2;
   if(unit > 4) unit = 4;
+  pace = (es_pt_channels >= 2);  // B9 demand-2 wants a settle after each frame
+                                 // group, or it hashes the 2nd byte (right ch)
+  swap2 = (es_pt_channels >= 2 && es_pt_bits < 16);  // SBPro-quirk R-first
  }
  while((inportb(base+ES_STAT) & FIFO_HE) && guard < 512){
   unsigned rd = ring_rd, wr = ring_wr; int k;
@@ -447,10 +463,16 @@ static void es_fifo_pump(void)
   for(k=0;k<128;k+=(int)unit){
    unsigned u;
    if((((wr - rd) & RING_MASK)) >= unit){
+    if(swap2){                                   // frame = [L,R] from the guest;
+     outportb(base+ES_FIFO, ring_buf[(rd+1)&RING_MASK]);  // emit R first
+     outportb(base+ES_FIFO, ring_buf[rd]);
+     rd = (rd+2)&RING_MASK;
+    }else
     for(u=0;u<unit;u++){ outportb(base+ES_FIFO, ring_buf[rd]); rd = (rd+1)&RING_MASK; }
    }else{
     for(u=0;u<unit;u++) outportb(base+ES_FIFO, sil);
    }
+   if(pace){ inportb(0x80); inportb(0x80); }  // ~1us pair settle (STEREO88 v1.7)
   }
   ring_rd = rd; guard += 128;
  }
