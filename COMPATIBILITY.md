@@ -26,6 +26,7 @@ issue with your game, machine, card and symptoms.
 | Quake | ✅ | 486 (Libretto 20) | |
 | Raptor: Call of the Shadows | ✅ | P-MMX | |
 | Impulse Tracker | ✅ | P-MMX | tracker/editor, SB digital out |
+| Open Cubic Player 2.6.0pre6 | ✅ | P-MMX | keep the UI in 80x25 (`screentype=0` in BOTH `[screen]` and `[fileselector]` of cp.ini) -- dense 80x50 text modes redraw slowly enough to starve CP's own mixer (warbly, slightly slow audio); put `devpSB` first in `playerdevices` so it uses the emulated SB via BLASTER |
 | Theme Hospital | ✅ | 486DX4, P-MMX | native ESFM music (stereo) with ES1688GO 1.4+ |
 | Warcraft II | ✅ | P-MMX | native ESFM ("ESFM Enhanced") with ES1688GO 1.4+ |
 | Tomb Raider | ✅ | P-MMX | |
