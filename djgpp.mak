@@ -58,6 +58,8 @@ OBJFILES=\
 # OPL at 0x388 to fall through to), so vopl3.cpp references DBOPL again.
 ifneq (,$(findstring CARD_AUDIGY,$(CFLAGS)))
 OBJFILES+= $(OUTD)/pcibios.o	$(OUTD)/ac97mix.o	$(OUTD)/sc_sbliv.o	$(OUTD)/sc_sbl24.o	$(OUTD)/dbopl.o
+# SF2 soundfonts played on the EMU10K2's own 64 hardware voices
+OBJFILES+= $(OUTD)/emu_sf2.o	$(OUTD)/emu_wt.o
 endif
 
 INCLUDE_DIRS=src mpxplay
@@ -73,7 +75,10 @@ LD_EXTRA_FLAGS=-Map $(OUTD)/$(NAME).map
 INCLUDES=$(addprefix -I,$(INCLUDE_DIRS))
 LIBS=$(addprefix -l,stdcxx m)
 
-COMPILE.asm.o=jwasm.exe -q -djgpp -Istartup -D?MODEL=small -DDJGPP $(A_DEBUG_FLAGS) -Fo=$@ $<
+# $(CFLAGS) carries only the card define (-DCARD_AUDIGY etc.), so the ASM side
+# can finally see which card is being built; with CFLAGS empty the command line
+# is unchanged and the 486 builds stay byte-identical (hash-verified).
+COMPILE.asm.o=jwasm.exe -q -djgpp -Istartup -D?MODEL=small -DDJGPP $(CFLAGS) $(A_DEBUG_FLAGS) -Fo=$@ $<
 COMPILE.c.o=gcc $(C_DEBUG_FLAGS) $(C_OPT_FLAGS) $(C_EXTRA_FLAGS) $(CFLAGS) $(INCLUDES) -c $< -o $@
 COMPILE.cpp.o=gcc $(C_DEBUG_FLAGS) $(C_OPT_FLAGS) $(C_EXTRA_FLAGS) $(CPPFLAGS) $(INCLUDES) -c $< -o $@
 

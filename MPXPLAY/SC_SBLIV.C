@@ -30,8 +30,19 @@
 #include "AC97MIX.H"
 #include "EMU10K1.H"
 #include "SC_SBLIV.H"
+#ifdef CARD_AUDIGY
+#include "emu_wt.h"
+#endif
 
+#ifdef CARD_AUDIGY
+/* A soundfont's sample pool lives in this address space too, so 4 MB is not
+ * enough -- a 6 MB GM font alone needs 1408 pages. 8192 is the hardware
+ * maximum (MAP_PTI_MASK is 13 bits = 32 MB) and costs 28 kB more than the
+ * default, which only this build pays. */
+#define MAXPAGES        8192
+#else
 #define MAXPAGES        1024 /* true max is 8192, but 1024 wastes 28 kB less */
+#endif
 #define LOOPINT         1 /* v1.9: 1=use loop interrupt; 0=use timer interrupt */
 
 #define VOICE_FLAGS_MASTER   0x01
@@ -48,9 +59,26 @@
 
 static void snd_emu10kx_fx_init( struct emu10k1_card *card, struct globalvars const *gvars);
 
+#ifdef CARD_AUDIGY
+/* PTR is a shared index register and every access is a non-atomic multi-op
+ * sequence. The sound ISR runs with interrupts enabled (SETIF) and NESTS --
+ * stackisr.asm exists to support 16 levels of it -- so one level's PTR/DATA
+ * pair can be split by another level's, sending the DATA op to whatever
+ * register the nested pass selected. Harmless at upstream's handful of ops
+ * per interrupt; fatal once the wavetable's MIDI pump issues ~60 per note
+ * (CANYON.MID wedged the box at random points in proportion to note
+ * density). Guard the whole sequence in the primitive itself. */
+#define PTR_GUARD_ENTER()  uint32_t flags_; 	__asm__ __volatile__("pushfl; popl %0; cli" : "=r"(flags_) : : "memory")
+#define PTR_GUARD_LEAVE()  	__asm__ __volatile__("pushl %0; popfl" : : "r"(flags_) : "memory")
+#else
+#define PTR_GUARD_ENTER()
+#define PTR_GUARD_LEAVE()
+#endif
+
 static void emu10k1_writeptr( struct emu10k1_card *card, uint32_t reg, uint32_t channel, uint32_t data)
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
 {
+	PTR_GUARD_ENTER();
 	outl(card->iobase + PTR, (reg << 16) | channel );
 	if ( reg & 0xff000000 ) {
 		uint32_t mask;
@@ -64,6 +92,7 @@ static void emu10k1_writeptr( struct emu10k1_card *card, uint32_t reg, uint32_t 
 		data |= inl(card->iobase + DATA) & ~mask;
 	}
 	outl(card->iobase + DATA, data);
+	PTR_GUARD_LEAVE();
 	return;
 }
 
@@ -72,6 +101,7 @@ static uint32_t emu10k1_readptr( struct emu10k1_card *card, uint32_t reg, uint32
 {
 	uint32_t val;
 
+	PTR_GUARD_ENTER();
 	outl(card->iobase + PTR, (reg << 16) | channel);
 	val = inl(card->iobase + DATA);
 	if ( reg & 0xff000000 ) {
@@ -82,8 +112,10 @@ static uint32_t emu10k1_readptr( struct emu10k1_card *card, uint32_t reg, uint32
 		offset = (reg >> 16) & 0x1f;
 		mask = ((1 << size) - 1) << offset;
 
+		PTR_GUARD_LEAVE();
 		return (val & mask) >> offset;
 	}
+	PTR_GUARD_LEAVE();
 	return val;
 }
 
@@ -969,116 +1001,66 @@ static void snd_emu10k1_playback_start_voice( struct emu10k1_card *card, int voi
 }
 
 #ifdef CARD_AUDIGY
-/* ---------------- hardware wavetable: milestone 1 -----------------------
- * Prove the sample path end to end before building a synth on it: put a
- * generated waveform in DMA-able memory, map its pages into the card's page
- * table above the PCM buffer, and play it on a spare voice.
+/* ---------------- hardware wavetable seam --------------------------------
+ * The wavetable itself lives in emu_wt.c; these are the only things it needs
+ * from here, all of which are static above.
  *
- * Samples live in HOST RAM on this chip -- there is no onboard sample memory
- * -- reached through the page table at PTB, entry = (phys << 1) | page_index,
- * 4kB pages. The PCM buffer only occupies the first pcmout_bufsize/4096
- * entries; the rest point at silentpage and are ours to use. The driver plays
- * on voices 0-2, so 3-63 are free.
- *
- * Enabled by setting the AUDWT environment variable, so no command line or
- * main.c changes are needed while this is still a probe.
+ * PTR is a shared index register and a write is two non-atomic I/O ops, so a
+ * sound interrupt landing between them would send our DATA to whatever
+ * register the ISR selected. The ISR cannot be preempted by us, so guarding
+ * this side alone closes the race.
  */
-#define WT_VOICE        3
-#define WT_PAGE         512         /* well clear of the PCM buffer */
-#define WT_FRAMES       1024        /* 16-bit mono samples = 2 pages */
-#define WT_PERIOD       128         /* samples per cycle -> ~344Hz at 44.1k */
-
-static struct cardmem_s wt_dm;
-static int wt_done = 0;
-
-static void wt_selftest( struct emu10k1_card *card )
+static __inline__ uint32_t emu_irq_off(void)
 {
-	unsigned int i, npages, startsmp, endsmp;
-	uint32_t silent;
-	char *page;
-	int16_t *smp;
-	int v = WT_VOICE;
+	uint32_t f;
+	__asm__ __volatile__("pushfl; popl %0; cli" : "=r"(f) : : "memory");
+	return f;
+}
 
-	if (wt_done)
+static __inline__ void emu_irq_restore(uint32_t f)
+{
+	__asm__ __volatile__("pushl %0; popfl" : : "r"(f) : "memory");
+}
+
+const uint32_t emuwt_maxpages = MAXPAGES;
+int emuwt_noio;     /* bisect: AUDWTNOIO -- synth runs, card is never touched */
+
+void EMU_WritePtr( struct emu10k1_card *card, uint32_t reg, uint32_t chn, uint32_t data)
+////////////////////////////////////////////////////////////////////////////////////////
+{
+	uint32_t f;
+	if (emuwt_noio)
 		return;
-	wt_done = 1;
+	f = emu_irq_off();
+	emu10k1_writeptr(card, reg, chn, data);
+	emu_irq_restore(f);
+}
 
-	/* one spare page so we can align inside the block */
-	if (!MDma_alloc_cardmem(&wt_dm, WT_FRAMES * 2 + EMUPAGESIZE)) {
-		dbgprintf(("wt_selftest: cardmem alloc failed\n"));
-		return;
-	}
-	page = (char *)(((uint32_t)wt_dm.pMem + EMUPAGESIZE - 1)
-	                & ~((uint32_t)EMUPAGESIZE - 1));
+uint32_t EMU_ReadPtr( struct emu10k1_card *card, uint32_t reg, uint32_t chn)
+/////////////////////////////////////////////////////////////////////////////
+{
+	uint32_t val, f;
+	if (emuwt_noio)
+		return 0;
+	f = emu_irq_off();
+	val = emu10k1_readptr(card, reg, chn);
+	emu_irq_restore(f);
+	return val;
+}
 
-	/* triangle wave -- no FP, the 16-bit build has no math library */
-	smp = (int16_t *)page;
-	for (i = 0; i < WT_FRAMES; i++) {
-		unsigned int p = i % WT_PERIOD;
-		int val = (p < WT_PERIOD / 2)
-		          ? (int)(p * 2)                       /* 0 .. PERIOD   */
-		          : (int)((WT_PERIOD - p) * 2);        /* PERIOD .. 0   */
-		smp[i] = (int16_t)((val - WT_PERIOD / 2) * 400);
-	}
+uint32_t EMU_SrToPitch( uint32_t rate)
+{
+	return emu10k1_srToPitch(rate);
+}
 
-	/* map the sample pages into the card's page table */
-	npages = (WT_FRAMES * 2 + EMUPAGESIZE - 1) / EMUPAGESIZE;
-	for (i = 0; i < npages; i++)
-		card->virtualpagetable[WT_PAGE + i] =
-			(pds_cardmem_physicalptr(wt_dm, page + i * EMUPAGESIZE) << 1)
-			| (WT_PAGE + i);
+uint32_t EMU_CalcPitchTarget( uint32_t rate)
+{
+	return emu10k1_calc_pitch_target(rate);
+}
 
-	/* addresses the voice engine wants are in SAMPLES, not bytes */
-	startsmp = ((uint32_t)WT_PAGE * EMUPAGESIZE) / 2;
-	endsmp   = startsmp + WT_FRAMES;
-
-	dbgprintf(("wt_selftest: page %u, samples %X..%X\n",
-	           WT_PAGE, startsmp, endsmp));
-
-	emu10k1_writeptr(card, DCYSUSV, v, 0);          /* silence while we set up */
-	emu10k1_writeptr(card, VTFT,    v, 0xffff);
-	emu10k1_writeptr(card, CVCF,    v, 0xffff);
-	emu10k1_writeptr(card, PTRX,    v, (0xff << 8) | 0xff);  /* full send L+R */
-	emu10k1_writeptr(card, CPF,     v, 0);
-	emu10k1_writeptr(card, DSL,     v, endsmp);     /* loop end   */
-	emu10k1_writeptr(card, PSST,    v, startsmp);   /* loop start */
-	emu10k1_writeptr(card, CCCA,    v, startsmp
-	                 | emu10k1_select_interprom(card, card->voice_pitch_target));
-	emu10k1_writeptr(card, Z1, v, 0);
-	emu10k1_writeptr(card, Z2, v, 0);
-
-	silent = (pds_cardmem_physicalptr(card->dm, card->silentpage) << 1)
-	         | MAP_PTI_MASK;
-	emu10k1_writeptr(card, MAPA, v, silent);
-	emu10k1_writeptr(card, MAPB, v, silent);
-
-	emu10k1_writeptr(card, ATKHLDM, v, 0x7f00);
-	emu10k1_writeptr(card, DCYSUSM, v, 0);
-	emu10k1_writeptr(card, LFOVAL1, v, 0x8000);
-	emu10k1_writeptr(card, LFOVAL2, v, 0x8000);
-	emu10k1_writeptr(card, FMMOD,   v, 0);
-	emu10k1_writeptr(card, TREMFRQ, v, 0);
-	emu10k1_writeptr(card, FM2FRQ2, v, 0);
-	emu10k1_writeptr(card, ENVVAL,  v, 0xefff);
-	emu10k1_writeptr(card, ATKHLDV, v, ATKHLDV_HOLDTIME_MASK | ATKHLDV_ATTACKTIME_MASK);
-	emu10k1_writeptr(card, ENVVOL,  v, 0x8000);
-	emu10k1_writeptr(card, PEFE_FILTERAMOUNT, v, 0);
-	emu10k1_writeptr(card, PEFE_PITCHAMOUNT,  v, 0);
-
-	/* Audigy voice routing: FX buses 0-3, no extra sends */
-	emu10k1_writeptr(card, A_FXRT1, v, 0x03020100);
-	emu10k1_writeptr(card, A_FXRT2, v, 0x3f3f3f3f);
-	emu10k1_writeptr(card, A_SENDAMOUNTS, v, 0);
-
-	/* same trigger the PCM path uses */
-	emu10k1_writeptr(card, IFATN, v, IFATN_FILTERCUTOFF_MASK);
-	emu10k1_writeptr(card, DCYSUSV, v, (DCYSUSV_CHANNELENABLE_MASK | 0x7f00));
-	emu10k1_writeptr(card, PTRX_PITCHTARGET, v, card->voice_pitch_target);
-	emu10k1_writeptr(card, CPF_CURRENTPITCH, v, card->voice_pitch_target);
-	emu10k1_writeptr(card, IP, v, card->voice_initial_pitch);
-
-	printf("Wavetable probe: looping a tone on hardware voice %d "
-	       "(page %u). Unset AUDWT to silence.\n", v, WT_PAGE);
+uint32_t EMU_SelectInterprom( struct emu10k1_card *card, uint32_t pitch_target)
+{
+	return emu10k1_select_interprom(card, pitch_target);
 }
 #endif /* CARD_AUDIGY */
 
@@ -1237,10 +1219,30 @@ static void snd_emu10kx_setrate( struct emu10k1_card *card, struct audioout_info
 #endif
 	dbgprintf(("snd_emu10kx_setrate exit, freq=%u, dmabufsize=0x%X, voice_pitch_target=0x%X\n", aui->freq_card, dmabufsize, card->voice_pitch_target ));
 #ifdef CARD_AUDIGY
-	/* here rather than hw_init: the pitch values the voice needs are only
-	 * computed above, and hw_init runs before AU_setrate() */
-	if (getenv("AUDWT"))
-		wt_selftest(card);
+	/* here rather than hw_init: the pitch values the voices need are only
+	 * computed above, and hw_init runs before AU_setrate().
+	 * Environment variables rather than command line options on purpose --
+	 * main.c is carrying unrelated uncommitted work. */
+	{
+		static int wt_started;
+		if (!wt_started) {
+			const char *sf = getenv("AUDSF2");
+			wt_started = 1;
+			if (getenv("AUDWT"))
+				EMUWT_Selftest(card);
+			if (sf && *sf && EMUWT_Init(card, sf)) {
+				const char *demo = getenv("AUDWTDEMO");
+				if (demo) {
+					int bank = 0, prog = 0;
+					if (*demo) {
+						prog = atoi(demo);
+						if (prog >= 128) { bank = 128; prog -= 128; }
+					}
+					EMUWT_Demo(bank, prog);
+				}
+			}
+		}
+	}
 #endif
 	return;
 }
@@ -1290,11 +1292,11 @@ static int snd_emu10kx_isr( struct emu10k1_card *card)
 	if ( interrupts ) {
 #if LOOPINT
 		if ( interrupts & IPR_CHANNELLOOP ) {
-			uint32_t tmp;
-			outl(card->iobase + PTR, CLIPL << 16 );
-			if ( tmp = inl( card->iobase + DATA ) ) {
-				outl(card->iobase + DATA, tmp);
-			}
+			/* via the (guarded) primitives: this raw PTR sequence was the
+			 * last one a nested ISR pass could split */
+			uint32_t tmp = emu10k1_readptr(card, CLIPL, 0);
+			if ( tmp )
+				emu10k1_writeptr(card, CLIPL, 0, tmp);
 		}
 #endif
 		emu10k1_writefn0(card, IPR, interrupts ); /* ack interrupt */

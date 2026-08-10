@@ -26,6 +26,9 @@
 
 #if SOUNDFONT
 #include "VMPU.H"
+#ifdef CARD_AUDIGY
+#include "emu_wt.h"     /* EMU10K2 hardware wavetable: parse MIDI, card renders */
+#endif
 //#include "../tsf/TSF.H"
 //extern tsf* tsfrenderer;
 extern void* tsfrenderer;
@@ -827,6 +830,14 @@ static int SNDISR_Interrupt( void )
         tsf_render_short(tsfrenderer, isr.pPCM, samples, 1);
         fpu_restore( fpu_buffer );
     }
+#ifdef CARD_AUDIGY
+    /* hardware wavetable: the EMU10K2 renders on its own voices, so only the
+     * MIDI ring needs pumping -- integer-only, no FPU state to save */
+    else if ( EMUWT_Active() ) {
+        VMPU_Process_Messages();
+        EMUWT_Poll();
+    }
+#endif
 #endif
     AU_writedata( isr.hAU, samples * 2, isr.pPCM );
 

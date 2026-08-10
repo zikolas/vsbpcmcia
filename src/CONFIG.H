@@ -50,9 +50,20 @@
 #define REINITOPL 0
 #endif
 #define SETABSVOL 0   /* 0=the master volume is set by /VOL cmdline option and isn't modified by the application */
+/* CARD_AUDIGY: the 0x330 trap feeds the EMU10K2 hardware wavetable (emu_wt.c),
+ * so VMPU comes back. SOUNDFONT comes with it: vmpu.c's MIDI parser lives
+ * under that gate, and enabling both also makes struct globalvars agree with
+ * config.inc's GLOBALVARS again (the ASM side has always been built with
+ * VMPU=1/SOUNDFONT=1). TSF itself stays dormant unless /SF: is given. */
+#ifdef CARD_AUDIGY
+#define VMPU      1
+#define SLOWDOWN  1   /* 1=support /SD option */
+#define SOUNDFONT 1
+#else
 #define VMPU      0   /* ES1688: no MPU virtualization (inert on 486; guest 0x330 untrapped) */
 #define SLOWDOWN  1   /* 1=support /SD option */
 #define SOUNDFONT 0   /* ES1688: no soundfont MIDI (needs VMPU anyway) */
+#endif
 #define PT0V86    1   /* 1=support read access to v86 page table 0 */
 #define HOSTRT    0   /* 0=protect SB irq, so it's not modified by programs; must match setting in SBISR.ASM */
 
