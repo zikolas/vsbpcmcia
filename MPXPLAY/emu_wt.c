@@ -212,6 +212,7 @@ static int                  wt_nocache;
  * 1=setup-silence  2=addresses  8=MAPA/MAPB  16=envelope/LFO  32=routing
  * 64=trigger+kill (voices never start) */
 static int                  wt_skip;
+static int                  wt_info;        /* AUDWTINFO: engineering detail */
 /* AUDWTMAXMB: cap the sample pool at N megabytes. Samples that fall beyond
  * the cap are dropped (their zones stay silent). Diagnostic for the
  * suspicion that this notebook TINA2 implements fewer page-table index bits
@@ -549,7 +550,9 @@ static void wt_voices_boot(struct emu10k1_card *card)
 		EMU_WritePtr(card, ENVVOL,  v, 0x8000);
 		EMU_WritePtr(card, PEFE_FILTERAMOUNT, v, 0);
 		EMU_WritePtr(card, PEFE_PITCHAMOUNT,  v, 0);
-		EMU_WritePtr(card, A_FXRT1, v, 0x03020100);
+		/* FX buses 4-7: the DSP program gives the wavetable its own group
+		 * fader (GPR 11) separate from the SB/PCM stream on buses 0-3 */
+		EMU_WritePtr(card, A_FXRT1, v, 0x07060504);
 		EMU_WritePtr(card, A_FXRT2, v, 0x3f3f3f3f);
 		EMU_WritePtr(card, A_SENDAMOUNTS, v, 0);
 		/* trigger, muted: the voice runs from here on and never stops */
@@ -1047,11 +1050,12 @@ int EMUWT_Init(struct emu10k1_card *card, const char *sf2path)
 			printf("Wavetable: no usable samples in %s\n", sf2path);
 			goto fail_dma;
 		}
-		printf("Wavetable: %d samples laid out, %d short loops unrolled",
-		       ns - dropped, unrolled);
+		if (wt_info)
+			printf("Wavetable: %d samples laid out, %d short loops "
+			       "unrolled\n", ns - dropped, unrolled);
 		if (dropped)
-			printf(", %d DROPPED by the pool cap", dropped);
-		printf("\n");
+			printf("Wavetable: WARNING - %d samples beyond the pool cap "
+			       "were dropped\n", dropped);
 	}
 
 	/* map the pool into the card's page table */
@@ -1075,6 +1079,7 @@ int EMUWT_Init(struct emu10k1_card *card, const char *sf2path)
 			       + (24 * 80 + 62);
 			printf("Wavetable: screen-corner trace ON (AUDWTTRACE)\n");
 		}
+		wt_info = getenv("AUDWTINFO") ? 1 : 0;
 		g = getenv("AUDWTLAYERS");
 		wt_layers = g ? atoi(g) : WT_MAXZONES;
 		if (wt_layers < 1)          wt_layers = 1;
@@ -1101,15 +1106,21 @@ int EMUWT_Init(struct emu10k1_card *card, const char *sf2path)
 	wt_ready = 1;
 	EMUWT_Reset();
 
-	printf("Wavetable: %s, SF2 v%d.%02d, %d presets, pool %lu kB "
-	       "(%lu pages from %d)\n",
-	       sf2path, wt_sf.ver_major, wt_sf.ver_minor,
-	       sf2_preset_count(&wt_sf), (unsigned long)(wt_pool_samples * 2 >> 10),
-	       (unsigned long)wt_pool_pages, WT_BASE_PAGE);
-	printf("Wavetable: voices %d-%d on the EMU10K2, host CPU does no mixing "
-	       "(headroom %d.%d dB)\n", WT_FIRST_VOICE, WT_LAST_VOICE,
-	       (WT_HEADROOM_CB - wt_trim_cb) / 10,
-	       ((WT_HEADROOM_CB - wt_trim_cb) % 10 + 10) % 10);
+	{
+		unsigned long kb = (unsigned long)(wt_pool_samples * 2) >> 10;
+		printf("Wavetable: %s - %d presets, %lu.%lu MB samples, "
+		       "%d hardware voices\n",
+		       sf2path, sf2_preset_count(&wt_sf),
+		       kb >> 10, (kb * 10 >> 10) % 10, WT_NVOICES);
+		if (wt_info)
+			printf("Wavetable: SF2 v%d.%02d, pool %lu kB (%lu pages from "
+			       "%d), voices %d-%d, headroom %d.%d dB\n",
+			       wt_sf.ver_major, wt_sf.ver_minor, kb,
+			       (unsigned long)wt_pool_pages, WT_BASE_PAGE,
+			       WT_FIRST_VOICE, WT_LAST_VOICE,
+			       (WT_HEADROOM_CB - wt_trim_cb) / 10,
+			       ((WT_HEADROOM_CB - wt_trim_cb) % 10 + 10) % 10);
+	}
 	return 1;
 
 fail_dma:
