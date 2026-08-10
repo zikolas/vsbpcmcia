@@ -684,6 +684,11 @@ static void snd_emu10kx_fx_init( struct emu10k1_card *card, struct globalvars co
 
 		for (i = 0; i < 512 ; i++)
 			emu10k1_writeptr(card, A_FXGPREGBASE+i,0,0);  // clear GPRs
+#ifdef CARD_AUDIGY
+		/* group faders (see the DSP program below) start at unity */
+		emu10k1_writeptr(card, A_FXGPREGBASE+10, 0, 0x7fffffff);
+		emu10k1_writeptr(card, A_FXGPREGBASE+11, 0, 0x7fffffff);
+#endif
 
 #ifdef AUDIGY1_USE_AC97
 		if (card->chiprev != 4) { // Audigy1
@@ -693,6 +698,31 @@ static void snd_emu10kx_fx_init( struct emu10k1_card *card, struct globalvars co
 		} else
 #endif
 		{
+#ifdef CARD_AUDIGY
+			/* Group faders ahead of the master: the wavetable (emu_wt)
+			 * routes its voices to FX buses 4/5 while SB PCM + everything
+			 * in the PCM stream stays on 0/1, so the two can be balanced
+			 * independently (AUDMIX pokes these GPRs live):
+			 *   GPR 10 = WAVE gain (SB digital / PCM stream)
+			 *   GPR 11 = MIDI gain (hardware wavetable)
+			 *   GPR 12/13 = mixed L/R fed to the master stage */
+			A_OP(iMAC0, A_GPR(12), A_C_00000000, A_GPR(10), A_FXBUS(FXBUS_PCM_LEFT));
+			A_OP(iMAC0, A_GPR(12), A_GPR(12),    A_GPR(11), A_FXBUS(4));
+			A_OP(iMAC0, A_GPR(13), A_C_00000000, A_GPR(10), A_FXBUS(FXBUS_PCM_RIGHT));
+			A_OP(iMAC0, A_GPR(13), A_GPR(13),    A_GPR(11), A_FXBUS(5));
+
+			// Front Output + Master Volume
+			A_OP(iMAC0, A_EXTOUT(A_EXTOUT_AFRONT_L), 0xc0, A_GPR(8), A_GPR(12));
+			A_OP(iMAC0, A_EXTOUT(A_EXTOUT_AFRONT_R), 0xc0, A_GPR(9), A_GPR(13));
+
+			// Digital Front + Master Volume
+			A_OP(iMAC0, A_EXTOUT(A_EXTOUT_FRONT_L),  0xc0, A_GPR(8), A_GPR(12));
+			A_OP(iMAC0, A_EXTOUT(A_EXTOUT_FRONT_R),  0xc0, A_GPR(9), A_GPR(13));
+
+			// Audigy Drive, Headphone out + Master Volume
+			A_OP(iMAC0, A_EXTOUT(A_EXTOUT_HEADPHONE_L),0xc0,A_GPR(8),A_GPR(12));
+			A_OP(iMAC0, A_EXTOUT(A_EXTOUT_HEADPHONE_R),0xc0,A_GPR(9),A_GPR(13));
+#else
 			// Front Output + Master Volume
 			A_OP(iMAC0, A_EXTOUT(A_EXTOUT_AFRONT_L), 0xc0, A_GPR(8), A_FXBUS(FXBUS_PCM_LEFT));
 			A_OP(iMAC0, A_EXTOUT(A_EXTOUT_AFRONT_R), 0xc0, A_GPR(9), A_FXBUS(FXBUS_PCM_RIGHT));
@@ -704,6 +734,7 @@ static void snd_emu10kx_fx_init( struct emu10k1_card *card, struct globalvars co
 			// Audigy Drive, Headphone out + Master Volume
 			A_OP(iMAC0, A_EXTOUT(A_EXTOUT_HEADPHONE_L),0xc0,A_GPR(8),A_FXBUS(FXBUS_PCM_LEFT));
 			A_OP(iMAC0, A_EXTOUT(A_EXTOUT_HEADPHONE_R),0xc0,A_GPR(9),A_FXBUS(FXBUS_PCM_RIGHT));
+#endif
 
 			// Rear output + Master Volume
 			/* v1.8: "rear" output requires option /O1 */
