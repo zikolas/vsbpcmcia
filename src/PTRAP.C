@@ -23,6 +23,7 @@
 #include "LINEAR.H"
 #include "PTRAP.H"
 #include "VOPL3.H"
+#include "FMVOL.H"
 #include "VDMA.H"
 #include "VIRQ.H"
 #include "VSB.H"
@@ -608,7 +609,18 @@ void PTRAP_Prepare( int opl, int sbaddr, int dma, int hdma, int sndirq )
 
     /* if no OPL3 emulation, skip ports 0x388-0x38b, 0x220-0x223 and 0x228-0x229 */
     if ( !opl ) {
-        PDT_DelEntries( portranges[OPL3_PDT], maxports, 4 );
+        if ( FMVOL_Active() ) {
+            /* FMVOL: keep 0x388-0x38B trapped, but filtered+forwarded to the
+             * REAL OPL3 with carrier-level scaling.  Because these are the
+             * ordinary port traps (QPI for V86, HDPMI32i for PM), this is the
+             * FM volume protected-mode games get - the half a JLM can't reach.
+             * The 0x220-0x223/0x228-0x229 FM aliases still go: the CF-VEW211
+             * decodes FM at 0x388 only. */
+            int b = portranges[OPL3_PDT];
+            PortHandler[b+0] = FMVOL_388; PortHandler[b+1] = FMVOL_389;
+            PortHandler[b+2] = FMVOL_38A; PortHandler[b+3] = FMVOL_38B;
+        } else
+            PDT_DelEntries( portranges[OPL3_PDT], maxports, 4 );
         PDT_DelEntries( portranges[SB_PDT], maxports, 4 );
         /* v1.8: also remove ports 0x228-0x229; +3 to skip ports 0x224,0x225,0x226 */
         PDT_DelEntries( portranges[SB_PDT]+3, maxports, 2 );

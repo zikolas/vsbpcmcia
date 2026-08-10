@@ -22,6 +22,7 @@
 #include "VDMA.H"
 #include "VIRQ.H"
 #include "VOPL3.H"
+#include "FMVOL.H"
 #include "VSB.H"
 #include "SNDISR.H"
 #include "VMPU.H"
@@ -143,6 +144,7 @@ static const struct {
     "P", "Set Midi port [330|300, no def]", &gvars.mpu,
 #endif
     "OPL","Set OPL3 emulation [0|1, def 1]", &gvars.opl3,
+    "FMVOL","Set hardware-FM volume [0-63 TL steps on the real OPL3, def off]", &gvars.fmvol,
     "PM", "Set protected-mode support [0|1, def 1]", &gvars.pm,
     "RM", "Set real-mode support [0|1, def 1]", &gvars.rm,
     "F",  "Set frequency [11025|22050|44100, def 22050]", &gvars.freq,
@@ -332,6 +334,8 @@ int main(int argc, char* argv[])
     void * p;
     int rmstksel;
     char* blaster = getenv("BLASTER");
+
+    gvars.fmvol = -1;  /* off unless /FMVOL given (struct init is positional) */
 
     bOMode = IsDebuggerPresent() ? OM_DEBUGGER : OM_DOS;
 
@@ -551,6 +555,13 @@ int main(int argc, char* argv[])
 #ifdef NOFM
     gvars.opl3 = 0;
 #endif
+    if ( gvars.fmvol >= 0 ) {
+        if ( gvars.fmvol > 63 ) gvars.fmvol = 63;
+        gvars.opl3 = 0;                 /* FMVOL owns 388h: no OPL emulation */
+        FMVOL_Init( gvars.fmvol, 0x388 );
+        printf("Hardware-FM volume: -%u.%02u dB (%d TL steps) on the real OPL3, both trap worlds\n",
+               (unsigned)(gvars.fmvol*3/4), (unsigned)((gvars.fmvol*75)%100), gvars.fmvol);
+    }
 #if SB16
 	PTRAP_Prepare( gvars.opl3, gvars.base, gvars.dma, gvars.hdma, AU_getirq( gm.hAU ) );
 #else
