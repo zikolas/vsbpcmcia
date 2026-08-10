@@ -968,6 +968,120 @@ static void snd_emu10k1_playback_start_voice( struct emu10k1_card *card, int voi
 	return;
 }
 
+#ifdef CARD_AUDIGY
+/* ---------------- hardware wavetable: milestone 1 -----------------------
+ * Prove the sample path end to end before building a synth on it: put a
+ * generated waveform in DMA-able memory, map its pages into the card's page
+ * table above the PCM buffer, and play it on a spare voice.
+ *
+ * Samples live in HOST RAM on this chip -- there is no onboard sample memory
+ * -- reached through the page table at PTB, entry = (phys << 1) | page_index,
+ * 4kB pages. The PCM buffer only occupies the first pcmout_bufsize/4096
+ * entries; the rest point at silentpage and are ours to use. The driver plays
+ * on voices 0-2, so 3-63 are free.
+ *
+ * Enabled by setting the AUDWT environment variable, so no command line or
+ * main.c changes are needed while this is still a probe.
+ */
+#define WT_VOICE        3
+#define WT_PAGE         512         /* well clear of the PCM buffer */
+#define WT_FRAMES       1024        /* 16-bit mono samples = 2 pages */
+#define WT_PERIOD       128         /* samples per cycle -> ~344Hz at 44.1k */
+
+static struct cardmem_s wt_dm;
+static int wt_done = 0;
+
+static void wt_selftest( struct emu10k1_card *card )
+{
+	unsigned int i, npages, startsmp, endsmp;
+	uint32_t silent;
+	char *page;
+	int16_t *smp;
+	int v = WT_VOICE;
+
+	if (wt_done)
+		return;
+	wt_done = 1;
+
+	/* one spare page so we can align inside the block */
+	if (!MDma_alloc_cardmem(&wt_dm, WT_FRAMES * 2 + EMUPAGESIZE)) {
+		dbgprintf(("wt_selftest: cardmem alloc failed\n"));
+		return;
+	}
+	page = (char *)(((uint32_t)wt_dm.pMem + EMUPAGESIZE - 1)
+	                & ~((uint32_t)EMUPAGESIZE - 1));
+
+	/* triangle wave -- no FP, the 16-bit build has no math library */
+	smp = (int16_t *)page;
+	for (i = 0; i < WT_FRAMES; i++) {
+		unsigned int p = i % WT_PERIOD;
+		int val = (p < WT_PERIOD / 2)
+		          ? (int)(p * 2)                       /* 0 .. PERIOD   */
+		          : (int)((WT_PERIOD - p) * 2);        /* PERIOD .. 0   */
+		smp[i] = (int16_t)((val - WT_PERIOD / 2) * 400);
+	}
+
+	/* map the sample pages into the card's page table */
+	npages = (WT_FRAMES * 2 + EMUPAGESIZE - 1) / EMUPAGESIZE;
+	for (i = 0; i < npages; i++)
+		card->virtualpagetable[WT_PAGE + i] =
+			(pds_cardmem_physicalptr(wt_dm, page + i * EMUPAGESIZE) << 1)
+			| (WT_PAGE + i);
+
+	/* addresses the voice engine wants are in SAMPLES, not bytes */
+	startsmp = ((uint32_t)WT_PAGE * EMUPAGESIZE) / 2;
+	endsmp   = startsmp + WT_FRAMES;
+
+	dbgprintf(("wt_selftest: page %u, samples %X..%X\n",
+	           WT_PAGE, startsmp, endsmp));
+
+	emu10k1_writeptr(card, DCYSUSV, v, 0);          /* silence while we set up */
+	emu10k1_writeptr(card, VTFT,    v, 0xffff);
+	emu10k1_writeptr(card, CVCF,    v, 0xffff);
+	emu10k1_writeptr(card, PTRX,    v, (0xff << 8) | 0xff);  /* full send L+R */
+	emu10k1_writeptr(card, CPF,     v, 0);
+	emu10k1_writeptr(card, DSL,     v, endsmp);     /* loop end   */
+	emu10k1_writeptr(card, PSST,    v, startsmp);   /* loop start */
+	emu10k1_writeptr(card, CCCA,    v, startsmp
+	                 | emu10k1_select_interprom(card, card->voice_pitch_target));
+	emu10k1_writeptr(card, Z1, v, 0);
+	emu10k1_writeptr(card, Z2, v, 0);
+
+	silent = (pds_cardmem_physicalptr(card->dm, card->silentpage) << 1)
+	         | MAP_PTI_MASK;
+	emu10k1_writeptr(card, MAPA, v, silent);
+	emu10k1_writeptr(card, MAPB, v, silent);
+
+	emu10k1_writeptr(card, ATKHLDM, v, 0x7f00);
+	emu10k1_writeptr(card, DCYSUSM, v, 0);
+	emu10k1_writeptr(card, LFOVAL1, v, 0x8000);
+	emu10k1_writeptr(card, LFOVAL2, v, 0x8000);
+	emu10k1_writeptr(card, FMMOD,   v, 0);
+	emu10k1_writeptr(card, TREMFRQ, v, 0);
+	emu10k1_writeptr(card, FM2FRQ2, v, 0);
+	emu10k1_writeptr(card, ENVVAL,  v, 0xefff);
+	emu10k1_writeptr(card, ATKHLDV, v, ATKHLDV_HOLDTIME_MASK | ATKHLDV_ATTACKTIME_MASK);
+	emu10k1_writeptr(card, ENVVOL,  v, 0x8000);
+	emu10k1_writeptr(card, PEFE_FILTERAMOUNT, v, 0);
+	emu10k1_writeptr(card, PEFE_PITCHAMOUNT,  v, 0);
+
+	/* Audigy voice routing: FX buses 0-3, no extra sends */
+	emu10k1_writeptr(card, A_FXRT1, v, 0x03020100);
+	emu10k1_writeptr(card, A_FXRT2, v, 0x3f3f3f3f);
+	emu10k1_writeptr(card, A_SENDAMOUNTS, v, 0);
+
+	/* same trigger the PCM path uses */
+	emu10k1_writeptr(card, IFATN, v, IFATN_FILTERCUTOFF_MASK);
+	emu10k1_writeptr(card, DCYSUSV, v, (DCYSUSV_CHANNELENABLE_MASK | 0x7f00));
+	emu10k1_writeptr(card, PTRX_PITCHTARGET, v, card->voice_pitch_target);
+	emu10k1_writeptr(card, CPF_CURRENTPITCH, v, card->voice_pitch_target);
+	emu10k1_writeptr(card, IP, v, card->voice_initial_pitch);
+
+	printf("Wavetable probe: looping a tone on hardware voice %d "
+	       "(page %u). Unset AUDWT to silence.\n", v, WT_PAGE);
+}
+#endif /* CARD_AUDIGY */
+
 static void snd_emu10k1_playback_stop_voice( struct emu10k1_card *card, int voice)
 //////////////////////////////////////////////////////////////////////////////////
 {
@@ -1122,6 +1236,12 @@ static void snd_emu10kx_setrate( struct emu10k1_card *card, struct audioout_info
 	emu10k1_pcm_init_voice(card, 2, VOICE_FLAGS_MASTER, 0, (aui->gvars->period_size ? aui->gvars->period_size : 512) >> 2 );
 #endif
 	dbgprintf(("snd_emu10kx_setrate exit, freq=%u, dmabufsize=0x%X, voice_pitch_target=0x%X\n", aui->freq_card, dmabufsize, card->voice_pitch_target ));
+#ifdef CARD_AUDIGY
+	/* here rather than hw_init: the pitch values the voice needs are only
+	 * computed above, and hw_init runs before AU_setrate() */
+	if (getenv("AUDWT"))
+		wt_selftest(card);
+#endif
 	return;
 }
 
