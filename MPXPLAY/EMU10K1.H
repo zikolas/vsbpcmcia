@@ -1265,6 +1265,9 @@
                                             * One list entry is 8 bytes long.
                                             * One list entry for each period in the buffer.
                                            */
+#define TINA2_VOLUME           0x71        /* Attenuate playback volume on the Audigy 2 ZS Notebook
+                                            * (Tina2 CardBus chip); without it output is 12dB too
+                                            * loud and distorts. Windows attenuates some other way. */
 #define PLAYBACK_LIST_SIZE     0x01        /* Size of list in bytes << 16. E.g. 8 periods -> 0x00380000  */
 #define PLAYBACK_LIST_PTR      0x02        /* Pointer to the current period being played */
 #define PLAYBACK_UNKNOWN3      0x03        /* Not used */

@@ -19,13 +19,22 @@
  * drivers are dead weight (~15% of the binary). Excluded via upstream's own
  * per-card guards -- the source files stay in the tree untouched so
  * `git merge upstream/main` stays cheap. */
+/* CARD_AUDIGY (tools/build.sh CARD=AUDIGY) is the exception: the Audigy 2 ZS
+ * Notebook is a CardBus -- i.e. PCI -- card, so that build keeps sc_sbliv. */
 #define NOES1371  1
 #define NOICH     1
 #define NOHDA     1
+#ifndef CARD_AUDIGY
 #define NOSBLIVE  1
+#endif
 #define NOVIA82   1
 
+/* The ES1688/VEW211 fleet has real hardware FM at 0x388 to fall through to, so
+ * stripping the software OPL3 is free there. The Audigy has none, so a
+ * CARD_AUDIGY build must emulate it or AdLib music is simply silent. */
+#ifndef CARD_AUDIGY
 #define NOFM      1   /* strip DOSBox OPL3 emulation; leave 0x388 to the hardware */
+#endif
 
 #define SB16      1   /* 1=support SB16 */
 #define ADPCM     1   /* 1=support ADPCM */
@@ -90,6 +99,8 @@ struct globalvars {
 #ifdef _DEBUG
 	char *logfile;
 #endif
+	int fmvol; /* /FMVOL: TL steps added to carriers on the REAL OPL3; -1 = off.
+	              Runtime default set in main() (the init above is positional). */
 };
 
 /* compatflags bits */

@@ -3,6 +3,12 @@
 #
 # Card backend:   ./tools/build.sh              -> ES1688 build   (vsbpcm.exe)
 #                 CARD=VEW211 ./tools/build.sh  -> CS4231A build  (vsbpcmv.exe)
+#                 CARD=AUDIGY ./tools/build.sh  -> Audigy build   (vsbpcma.exe)
+#
+# CARD=AUDIGY is the odd one out: it keeps the ES1688 PCMCIA backend but ALSO
+# links the SB Live/Audigy driver (sc_sbliv + sc_sbl24 + pcibios + ac97mix) for
+# the CardBus Audigy 2 ZS Notebook, which is a PCI card rather than PCMCIA and
+# so needs CBGO/CBINIT to bring its socket up first.
 #
 # Host prerequisites (paths overridable via env):
 #   DJGPP_DIR - a DJGPP cross toolchain (i586-pc-msdosdjgpp-*), default ~/djgpp
@@ -23,6 +29,9 @@ JWASM_BIN="${JWASM_BIN:-$HOME/vsbhda-tools/jwasm}"
 if [ "$CARD" = "VEW211" ]; then
   CARDDEF="-DCARD_VEW211"
   OUTNAME="vsbpcmv"
+elif [ "$CARD" = "AUDIGY" ]; then
+  CARDDEF="-DCARD_AUDIGY"
+  OUTNAME="vsbpcma"
 else
   CARDDEF=""
   OUTNAME="vsbpcm"
@@ -39,7 +48,9 @@ docker run --rm --platform linux/amd64 \
   for t in /opt/djgpp/bin/i586-pc-msdosdjgpp-*; do n=$(basename "$t" | sed "s/i586-pc-msdosdjgpp-//"); ln -sf "$t" /usr/local/bin/"$n"; done
   export PATH=/opt/djgpp/bin:/usr/local/bin:$PATH
   echo "=== compiling objects (${CARDDEF:-ES1688 default}) ==="
-  make -f djgpp.mak CFLAGS="$CARDDEF" 2>&1 | grep -viE "warning:|note:| \^|~~~|\| |In file included" | tail -8 || true
+  # CPPFLAGS too, not just CFLAGS: vopl3.cpp/dbopl.cpp use $(CPPFLAGS), and
+  # without the card define they compile away under NOFM -> undefined VOPL3_*.
+  make -f djgpp.mak CFLAGS="$CARDDEF" CPPFLAGS="$CARDDEF" 2>&1 | grep -viE "warning:|note:| \^|~~~|\| |In file included" | tail -8 || true
   cd djgpp
   echo "=== manual archive + link (Linux) ==="
   OBJ=$(ls *.o 2>/dev/null | grep -v "^main.o$")

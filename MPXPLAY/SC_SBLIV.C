@@ -104,6 +104,136 @@ static uint32_t emu10k1_ptr20_read( struct emu10k1_card *card, uint32_t reg, uin
 	return val;
 }
 
+/* Audigy 2 ZS Notebook [SB0530] wake-up.
+ *
+ * The CA0108 on this CardBus board powers up with its I/O register file
+ * inert: it claims cycles in its BAR but never completes a READ, which hard
+ * hangs the host (no recovery -- the machine has to be reset).  Linux's
+ * snd_emu10k1_cardbus_init() says why: this sequence runs "before the rest of
+ * the IO-Ports become active".  It must therefore be the very first thing
+ * done to the card, before hw_init or any other register touch.
+ *
+ * Linux interleaves dummy reads between the writes, but discards them
+ * (__always_unused).  That matters here: on an uninitialised card only writes
+ * complete, so we issue writes only.  Verified on a ThinkPad 235 (Ricoh
+ * RL5C476 socket) -- afterwards HCFG reads back 0001800C and the wall clock
+ * ticks.
+ */
+static void snd_emu10k1_cardbus_init( struct emu10k1_card *card )
+/////////////////////////////////////////////////////////////////
+{
+	unsigned int special_port = card->iobase + 0x38;
+
+	dbgprintf(("snd_emu10k1_cardbus_init: iobase=%X\n", card->iobase));
+
+	outl(special_port, 0x00d00000);
+	outl(special_port, 0x00d00001);
+	outl(special_port, 0x00d0005f);
+	outl(special_port, 0x00d0007f);
+	outl(special_port, 0x0090007f);
+
+	/* Attenuate playback: without this the output is 12dB too hot and
+	 * distorts (the Windows driver attenuates some other way). */
+	emu10k1_ptr20_write(card, TINA2_VOLUME, 0, 0xfefefefe);
+
+	pds_delay_10us(20000);   /* 200ms, as in ALSA */
+	return;
+}
+
+/* --- Audigy 2 ZS Notebook analog output: Wolfson WM8768/WM8568 over SPI ---
+ *
+ * This board has no ac97 codec; its analog path is a Wolfson DAC programmed
+ * over an SPI shim in the p17v register file.  Leave it unprogrammed and the
+ * analog stage sits wide open, so playback arrives grossly over level and
+ * clips -- attenuating in the FX engine only trades that for quantisation
+ * noise, because the gain is downstream of the DAC.
+ */
+#define P17V_SPI   0x3c     /* SPI interface register (p16v/p17v space) */
+
+static int snd_emu10k1_spi_write( struct emu10k1_card *card, unsigned int data)
+///////////////////////////////////////////////////////////////////////////////
+{
+	unsigned int reset, set, tmp;
+	int n;
+
+	if (data > 0xffff)      /* 16-bit values only */
+		return 1;
+
+	tmp   = emu10k1_ptr20_read(card, P17V_SPI, 0);
+	reset = (tmp & ~0x3ffff) | 0x20000;    /* set xxx20000 */
+	set   = reset | 0x10000;               /* set xxx1xxxx */
+
+	emu10k1_ptr20_write(card, P17V_SPI, 0, reset | data);
+	tmp = emu10k1_ptr20_read(card, P17V_SPI, 0);   /* write post */
+	emu10k1_ptr20_write(card, P17V_SPI, 0, set | data);
+
+	/* wait for the status bit to fall back to 0 */
+	for (n = 0; n < 100; n++) {
+		pds_delay_10us(1);
+		tmp = emu10k1_ptr20_read(card, P17V_SPI, 0);
+		if (!(tmp & 0x10000))
+			break;
+	}
+	if (n >= 100)
+		return 1;   /* timed out */
+
+	emu10k1_ptr20_write(card, P17V_SPI, 0, reset | data);
+	tmp = emu10k1_ptr20_read(card, P17V_SPI, 0);   /* write post */
+	return 0;
+}
+
+/* WM8768 register set, verbatim from ALSA's spi_dac_init[] */
+static const unsigned int spi_dac_init[] = {
+	0x00ff, 0x02ff, 0x0400, 0x0520, 0x0600, 0x08ff, 0x0aff,
+	0x0cff, 0x0eff, 0x10ff, 0x1200, 0x1400, 0x1480, 0x1800,
+	0x1aff, 0x1cff, 0x1e00, 0x0530, 0x0602, 0x0622, 0x1400
+};
+
+/* The nine per-channel volume registers of the set above, register field only.
+ * ALSA leaves them all at 0xff (maximum), which on this board is far too hot --
+ * playback arrives so far over level that it clips, and pulling it back in the
+ * FX engine only trades the clipping for quantisation noise, because the gain
+ * is downstream of the converter. Attenuating in the DAC itself is free.
+ *
+ * The SPI word is a 7-bit register plus 9-bit data, and bit 8 of the data is
+ * the volume UPDATE strobe: write a level without it and the DAC latches the
+ * value but never applies it (silently does nothing).
+ *
+ * 0xC0 measured by ear on a ThinkPad 235 into headphones. /VOL still works as
+ * a fader on top of this, and DACVOL.EXE can retune it live.
+ */
+#define ZSNB_DAC_VOLUME   0xC0
+#define ZSNB_DAC_UPDATE   0x0100
+
+static const unsigned int spi_dac_vol_regs[] = {
+	0x0000, 0x0200, 0x0800, 0x0a00, 0x0c00, 0x0e00, 0x1000, 0x1a00, 0x1c00
+};
+
+static void snd_emu10k1_spi_dac_init( struct emu10k1_card *card )
+/////////////////////////////////////////////////////////////////
+{
+	int n;
+
+	dbgprintf(("snd_emu10k1_spi_dac_init\n"));
+
+	/* ALSA's sequence first: it sets up the interface format and control
+	 * registers, which we do not want to second-guess. */
+	for (n = 0; n < (int)(sizeof(spi_dac_init)/sizeof(spi_dac_init[0])); n++)
+		snd_emu10k1_spi_write(card, spi_dac_init[n]);
+
+	/* then drop the volume registers to a usable level */
+	for (n = 0; n < (int)(sizeof(spi_dac_vol_regs)/sizeof(spi_dac_vol_regs[0])); n++)
+		snd_emu10k1_spi_write(card, spi_dac_vol_regs[n]
+		                            | ZSNB_DAC_UPDATE | ZSNB_DAC_VOLUME);
+
+	emu10k1_ptr20_write(card, 0x60, 0, 0x10);
+
+	/* GPIO: bit1 = speakers enabled, bit4 = IEC958 out. The Audigy 2 Value
+	 * GPIO values the 0108 path would otherwise write are wrong here. */
+	outw(card->iobase + A_IOCFG, 0x76);   /* Windows uses 0x3f76 */
+	return;
+}
+
 // init & close
 
 static void snd_emu10k1_hw_init( struct emu10k1_card *card, struct audioout_info_s *aui)
@@ -283,6 +413,12 @@ static void snd_emu10k1_hw_init( struct emu10k1_card *card, struct audioout_info
 		outl(card->iobase + A_IOCFG, tmp);
 	}
 
+	/* ZS Notebook: program the Wolfson DAC and its GPIOs (ALSA order: right
+	 * after the 0108 block). The A_IOCFG writes further down are skipped for
+	 * this board so they cannot clobber the 0x76 set here. */
+	if (card->chips & EMU_CHIPS_CARDBUS)
+		snd_emu10k1_spi_dac_init(card);
+
 	if (card->chip_select & EMU_CHIPS_10KX) {
 		//buffer config
 		//  emu10k1_writeptr(card, PTB, 0, (uint32_t) card->virtualpagetable);
@@ -315,7 +451,8 @@ static void snd_emu10k1_hw_init( struct emu10k1_card *card, struct audioout_info
 		}
 	}
 
-	if (card->chips & EMU_CHIPS_10K2) {    // enable analog output
+	/* not on the ZS Notebook: its GPIOs are set by snd_emu10k1_spi_dac_init() */
+	if ((card->chips & EMU_CHIPS_10K2) && !(card->chips & EMU_CHIPS_CARDBUS)) {    // enable analog output
 		/* v1.8: A_IOCFG is 16-bit only */
 		uint16_t tmp = inw(card->iobase + A_IOCFG);
 		outw(card->iobase + A_IOCFG, tmp | A_IOCFG_GPOUT0);
@@ -328,7 +465,9 @@ static void snd_emu10k1_hw_init( struct emu10k1_card *card, struct audioout_info
 	//Enable the audio bit
 	outl(card->iobase + HCFG, inl(card->iobase + HCFG) | HCFG_AUDIOENABLE);
 
-	if ( card->chips & EMU_CHIPS_10K2 ) {
+	/* not on the ZS Notebook: spi_dac_init() already set A_IOCFG to 0x76, and
+	 * the Audigy 2 Value unmute values below are wrong for this board */
+	if (( card->chips & EMU_CHIPS_10K2 ) && !(card->chips & EMU_CHIPS_CARDBUS)) {
 		/* v1.8: A_IOCFG is 16-bit only */
 		//uint32_t tmp = inl(card->iobase + A_IOCFG);
 		uint16_t tmp = inw(card->iobase + A_IOCFG);
@@ -567,7 +706,11 @@ static void snd_emu10kx_fx_init( struct emu10k1_card *card, struct globalvars co
 			snd_emu10kx_set_control_gpr( card, 8, i );
 			snd_emu10kx_set_control_gpr( card, 9, i );
 
-			snd_emu_ac97_mute(card,AC97_MASTER_VOL_STEREO); // for Audigy, we mute ac97 and use the philips 6 channel DAC instead
+			/* The ZS Notebook has no ac97 codec at all (SPI DAC + I2C ADC).
+			 * snd_emu_ac97_mute() READS AC97DATA, and with no codec on the
+			 * ac97 link that read never completes -> hard hang. */
+			if (!(card->chips & EMU_CHIPS_CARDBUS))
+				snd_emu_ac97_mute(card,AC97_MASTER_VOL_STEREO); // for Audigy, we mute ac97 and use the philips 6 channel DAC instead
 		}
 
 	} else { // SB Live
@@ -1319,7 +1462,9 @@ static const struct pci_device_s creative_devices[] = {
 static const struct emu_card_version_s emucard_versions[] = {
  {"Audigy 4 [SB0610]"          ,0x0008,0,0x10211102,EMU_CHIPS_10K2|EMU_CHIPS_0108,8},
  {"Audigy 2 Value [SB0400]"    ,0x0008,0,0x10011102,EMU_CHIPS_10K2|EMU_CHIPS_0108,8},
- //{"Audigy 2 ZS Notebook [SB0530]",0x0008,0,0x20011102,EMU_CHIPS_10K2|EMU_CHIPS_0108,8},
+ /* CardBus board: needs the port+0x38 wake-up, and has no ac97 codec
+  * (ALSA: spi_dac + i2c_adc, and notably NO ac97_chip). */
+ {"Audigy 2 ZS Notebook [SB0530]",0x0008,0,0x20011102,EMU_CHIPS_10K2|EMU_CHIPS_0108|EMU_CHIPS_CARDBUS,8},
  {"Audigy 2 Value [unknown]"   ,0x0008,0,0         ,EMU_CHIPS_10K2|EMU_CHIPS_0108,6},
  //{"E-mu 1212m [4001]"          ,0x0004,0,0x40011102,EMU_CHIPS_10K2|EMU_CHIPS_0102,6},
 
@@ -1444,6 +1589,12 @@ static int SBALL_adetect( struct audioout_info_s *aui )
 	}
 
 	card->chip_select = card->chips = card->card_capabilities->chips;
+
+	/* MUST come before any other I/O register access: on the CardBus board
+	 * the register file is inert until this runs, and a read would hang the
+	 * machine outright. */
+	if (card->chips & EMU_CHIPS_CARDBUS)
+		snd_emu10k1_cardbus_init(card);
 
 	/* check the 5 "families": 10k1, 10k2, p16v, audigyls, live24 */
 	for ( i = 0; i < 5; i++ ) {

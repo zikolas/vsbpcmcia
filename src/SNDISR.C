@@ -609,6 +609,22 @@ static int SNDISR_Interrupt( void )
             count = cv_rate( isr.pPCM + IdxSm * 2, count * channels, channels, SB_Rate, freq );
         if( channels == 1) //should be the last step
             cv_channels_1_to_2( isr.pPCM + IdxSm * 2, count);
+        else if ( samplesize == 1 ) {
+            /* SB Pro stereo quirk: on real hardware the FIRST byte of a stereo
+             * frame comes out the RIGHT channel, and games pre-compensate for
+             * that -- so rendering the guest stream straight as [L,R] gives a
+             * mirrored image (Duke3D with its own "reverse stereo" set OFF).
+             * The ES1688 passthrough already handles this in es_fifo_pump()
+             * (swap2); software-rendered cards need the same flip here.
+             * Gated to 8-bit stereo, i.e. SB Pro mode -- same condition the
+             * passthrough uses (es_pt_bits < 16); SB16 16-bit stereo has no
+             * such quirk. Passthrough never reaches this code (pt_block). */
+            PCM_CV_TYPE_S *sw = isr.pPCM + IdxSm * 2;
+            int n;
+            for ( n = count; n; n--, sw += 2 ) {
+                PCM_CV_TYPE_S t = sw[0]; sw[0] = sw[1]; sw[1] = t;
+            }
+        }
 #ifndef NOES1688
         }
 #endif
