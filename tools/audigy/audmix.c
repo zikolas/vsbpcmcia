@@ -286,7 +286,7 @@ int main(int argc, char **argv)
     taper_init();
 
     /* seat the sliders from the hardware where it can be read back */
-    sl[0].step = 0xC0 * STEPS / 255;            /* ZSNB_DAC_VOLUME default */
+    sl[0].step = 0xEF * STEPS / 255;            /* ZSNB_DAC_VOLUME default */
     sl[1].step = taper_nearest(gpr_read(8));
     sl[2].step = taper_nearest(gpr_read(10));
     sl[3].step = taper_nearest(gpr_read(11));
