@@ -34,7 +34,15 @@
  * Currently no problem, though, because PCI functions are called during init
  * only.
  */
+#ifdef CARD_AUDIGY
+/* The hot-enabled CardBus card lives on a secondary bus some BIOSes refuse
+ * to admit exists (ThinkPad 560X: lastbus=00 with the card on bus 4, so the
+ * INT 1A services can neither find nor access it). Talk to config space with
+ * I/O instructions directly, the same way the enabler does. */
+#define PCIBIOSACCESS 0
+#else
 #define PCIBIOSACCESS 1 /* 0=access PCI config space with I/O instructions */
+#endif
 
 extern void fatal_error( int );
 
@@ -67,6 +75,33 @@ static uint8_t pcibios_GetBus(void)
 	return 1;
 }
 
+#if !PCIBIOSACCESS
+static uint32_t PCI_ReadDWord(uint8_t bus, uint8_t dev, uint8_t func, uint8_t reg);
+
+/* When the BIOS FIND fails (a bus beyond its lastbus), scan buses 1..7
+ * directly. Measured necessity on the ThinkPad 560X. */
+static uint8_t pcibios_DirectFind(uint16_t wVendor, uint16_t wDevice, struct pci_config_s *ppkey)
+{
+	uint8_t bus, dev;
+	for (bus = 1; bus <= 7; bus++) {
+		for (dev = 0; dev < 32; dev++) {
+			uint32_t id = PCI_ReadDWord(bus, dev, 0, 0);
+			if ((uint16_t)id == wVendor && (uint16_t)(id >> 16) == wDevice) {
+				if (ppkey) {
+					ppkey->bBus  = bus;
+					ppkey->bDev  = dev;
+					ppkey->bFunc = 0;
+					ppkey->vendor_id = wVendor;
+					ppkey->device_id = wDevice;
+				}
+				return PCI_SUCCESSFUL;
+			}
+		}
+	}
+	return PCI_DEVICE_NOTFOUND;
+}
+#endif
+
 uint8_t pcibios_FindDevice(uint16_t wVendor, uint16_t wDevice, struct pci_config_s *ppkey)
 //////////////////////////////////////////////////////////////////////////////////////////
 {
@@ -88,6 +123,11 @@ uint8_t pcibios_FindDevice(uint16_t wVendor, uint16_t wDevice, struct pci_config
 		ppkey->vendor_id = wVendor;
 		ppkey->device_id = wDevice;
 	}
+
+#if !PCIBIOSACCESS
+	if (regs.h.ah != PCI_SUCCESSFUL)
+		return pcibios_DirectFind(wVendor, wDevice, ppkey);
+#endif
 
 	return regs.h.ah;
 }
