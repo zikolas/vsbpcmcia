@@ -32,6 +32,9 @@
 #include "SC_SBLIV.H"
 #ifdef CARD_AUDIGY
 #include "emu_wt.h"
+#include <go32.h>       /* AUDTIMER RTC pump: go32 vector shim + telemetry pokes */
+#include <sys/farptr.h>
+#include <dpmi.h>
 #endif
 
 #ifdef CARD_AUDIGY
@@ -135,6 +138,158 @@ static uint32_t emu10k1_ptr20_read( struct emu10k1_card *card, uint32_t reg, uin
 	val = inl(card->iobase + DATA2);
 	return val;
 }
+
+#ifdef CARD_AUDIGY
+/* =========================================================================
+ * AUDTIMER=1 -- RTC (IRQ8) pump mode for interrupt-dead CardBus hosts.
+ *
+ * On bridges whose INTA never reaches the PIC (X60s: Ricoh RL5C476-II on
+ * ICH7 -- no parallel-ISA route exists at all), the backend lies
+ * card_irq = 8 and the generic engine follows: the vector hook (sndisr.c),
+ * VPIC guest protection of IRQ8, the slave-PIC trap and the cascade unmask
+ * are all keyed off AU_getirq. The Audigy engine tolerates any tick rate
+ * because pacing is position-based (AU_cardbuf_space reads CCCA_CURRADDR
+ * against card_dmalastput), never IRQ-count-based. In this mode the card's
+ * own interrupts stay fully disabled -- INTENABLE=0, no CLIEL, no dummy
+ * voice 2 -- so INTA never asserts and a dead or floating line can't storm
+ * either.
+ *
+ * The machinery is a transplant of the fleet-proven PCMCIA recipe: RTC
+ * helpers from sc_es1688.c, verify-before-revive watchdog + tick counter
+ * from sc_vew211.c, chained IRQ0 heartbeat as the guest-proof watchdog
+ * host. Everything is static on purpose: sc_es1688.c is linked into this
+ * build too and keeps its own private copies of the same names.
+ * ========================================================================= */
+static int                aud_timer;        /* AUDTIMER=1: pump mode armed */
+static unsigned char      aud_rtc_rs = 6;   /* SBERTC=3..15 rate select; 6 = 1024 Hz */
+static unsigned           aud_wt_div = 12;  /* EMUWT_Poll runs every Nth tick (~83 Hz) */
+static volatile uint32_t  aud_tick_seq;     /* ++ per delivered RTC tick */
+
+/* go32 shim, same shape as sc_es1688.c's (statics there too) */
+typedef struct { int intno; _go32_dpmi_seginfo si, oldsi; } DPMI_ISR_HANDLE;
+static int DPMI_InstallISR(int intno, void (*isr)(void), DPMI_ISR_HANDLE *h, int chain)
+{
+	h->intno = intno;
+	if (_go32_dpmi_get_protected_mode_interrupt_vector(intno, &h->oldsi)) return -1;
+	h->si.pm_offset = (unsigned long)isr;
+	h->si.pm_selector = _go32_my_cs();
+	if (chain)
+		return _go32_dpmi_chain_protected_mode_interrupt_vector(intno, &h->si) ? -1 : 0;
+	if (_go32_dpmi_allocate_iret_wrapper(&h->si)) return -1;
+	return _go32_dpmi_set_protected_mode_interrupt_vector(intno, &h->si) ? -1 : 0;
+}
+static void DPMI_UninstallISR(DPMI_ISR_HANDLE *h)
+{ _go32_dpmi_set_protected_mode_interrupt_vector(h->intno, &h->oldsi); }
+static uint8_t DPMI_DisableInterrupt(void)
+{
+	unsigned f;
+	__asm__ __volatile__("pushfl; popl %0" : "=r"(f));           /* capture virtual IF */
+	__asm__ __volatile__("movw $0x0900,%%ax; int $0x31" ::: "eax","cc");
+	return (f & 0x200) ? 1 : 0;
+}
+static void DPMI_RestoreInterrupt(uint8_t prev)
+{ if (prev) __asm__ __volatile__("movw $0x0901,%%ax; int $0x31" ::: "eax","cc"); }
+
+/* RTC periodic arm/disarm (sc_es1688.c, verbatim except the rate variable) */
+static void rtc_enable(void)
+{
+	uint8_t f = DPMI_DisableInterrupt();
+	outportb(0x70,0x8A); { unsigned char a=(unsigned char)inportb(0x71); outportb(0x70,0x8A); outportb(0x71,(a&0xF0)|aud_rtc_rs); }
+	outportb(0x70,0x8B); { unsigned char b=(unsigned char)inportb(0x71); outportb(0x70,0x8B); outportb(0x71,b|0x40); }
+	outportb(0x70,0x0C); inportb(0x71);
+	DPMI_RestoreInterrupt(f);
+}
+static void rtc_disable(void)
+{
+	uint8_t f = DPMI_DisableInterrupt();
+	outportb(0x70,0x8B); { unsigned char b=(unsigned char)inportb(0x71); outportb(0x70,0x8B); outportb(0x71,b&~0x40); }
+	outportb(0x70,0x0C); inportb(0x71);
+	DPMI_RestoreInterrupt(f);
+}
+
+/* Verify-before-revive watchdog (sc_vew211.c design). Trigger on OUR tick
+ * counter going stale, then fix only what is provably wrong: PIE killed
+ * (the Theme Hospital class), IRQ8 masked at the slave PIC, and -- only
+ * after 1-2 s of confirmed silence measured on the RTC seconds register,
+ * the one guest-proof wall clock -- the destructive reg-C heal. A blind
+ * reg-C read STEALS the pending tick (the VEW211 revival-storm lesson:
+ * 141 spurious revives in one load screen, measured). */
+static void aud_watchdog(void)
+{
+	static unsigned char aud_tel_revive;
+	static uint32_t wd_seq;
+	static unsigned char wd_stale, wd_sec, wd_secchg;
+	unsigned char b, sec;
+	uint8_t f;
+	uint32_t seq = aud_tick_seq;
+	if (seq != wd_seq) { wd_seq = seq; wd_stale = 0; wd_secchg = 0; return; }
+	if (++wd_stale < 2) return;                       /* debounce one visit */
+	wd_stale = 0;
+	f = DPMI_DisableInterrupt();
+	outportb(0x70,0x8B); b   = (unsigned char)inportb(0x71);
+	outportb(0x70,0x80); sec = (unsigned char)inportb(0x71);
+	DPMI_RestoreInterrupt(f);
+	if (!(b & 0x40)) {                                /* PIE killed */
+		rtc_enable();
+		_farpokeb(_dos_ds, 0x4F4, ++aud_tel_revive);
+		return;
+	}
+	if (inportb(0xA1) & 0x01) {                       /* IRQ8 masked at the slave PIC */
+		f = DPMI_DisableInterrupt();
+		outportb(0xA1, (unsigned char)(inportb(0xA1) & ~0x01));
+		DPMI_RestoreInterrupt(f);
+		_farpokeb(_dos_ds, 0x4F4, ++aud_tel_revive);
+		return;
+	}
+	if (sec != wd_sec) {                              /* armed yet silent: confirm by */
+		wd_sec = sec;                                 /* real elapsed time before the */
+		if (++wd_secchg >= 2) {                       /* PF-eating reg-C heal         */
+			wd_secchg = 0;
+			f = DPMI_DisableInterrupt();
+			outportb(0x70,0x0C); (void)inportb(0x71);
+			DPMI_RestoreInterrupt(f);
+			_farpokeb(_dos_ds, 0x4F4, ++aud_tel_revive);
+		}
+	}
+}
+
+/* Chained IRQ0 heartbeat: the guest-independent watchdog host. During a
+ * guest's silent IRQ-wait (DOOM's I_StartupSound does 5-6 s of NO port
+ * I/O) none of our other code runs -- the PIT always ticks, so a dead
+ * pump can never stay dead longer than one timer tick. */
+static DPMI_ISR_HANDLE aud_i8_handle;
+static int aud_i8_on;
+static void aud_irq0_isr(void)
+{
+	aud_watchdog();
+}
+static void aud_i8_install(void)
+{
+	if (aud_i8_on) return;
+	if (getenv("AUDNOI8")) return;   /* diagnostic kill-switch, like ESNOI8 */
+	if (DPMI_InstallISR(0x08, &aud_irq0_isr, &aud_i8_handle, 1) != 0) return;
+	aud_i8_on = 1;
+}
+static void aud_i8_remove(void)
+{
+	if (!aud_i8_on) return;
+	DPMI_UninstallISR(&aud_i8_handle);
+	aud_i8_on = 0;
+}
+
+/* EMUWT_Poll cadence gate for sndisr.c: the envelope stepper hard-assumes
+ * the ~83 Hz loop-interrupt tick (~12 ms per step, emu_wt.c) -- run it at
+ * the raw RTC rate and every fade lands ~12x too fast. Unity outside
+ * timer mode. */
+int SBALL_WTTick(void)
+{
+	static unsigned n;
+	if (!aud_timer) return 1;
+	if (++n < aud_wt_div) return 0;
+	n = 0;
+	return 1;
+}
+#endif /* CARD_AUDIGY */
 
 /* Audigy 2 ZS Notebook [SB0530] wake-up.
  *
@@ -1287,10 +1442,16 @@ static void snd_emu10kx_pcm_start_playback( struct emu10k1_card *card)
 	snd_emu10k1_playback_start_voice(card,0,VOICE_FLAGS_MASTER);
 	snd_emu10k1_playback_start_voice(card,1,0);
 #if LOOPINT
+#ifdef CARD_AUDIGY
+	if (!aud_timer) {   /* pump mode: no CLIEL, no dummy voice -- INTA must never assert */
+#endif
 	/* v1.9: dummy voice just for interrupt generation */
 	emu10k1_writeptr( card, PTRX, 2, 0); /* set volume to 0 */
 	snd_emu10k1_playback_start_voice(card,2,VOICE_FLAGS_MASTER);
 	emu10k1_writeptr(card, CLIEL, 0, 1 << 2);
+#ifdef CARD_AUDIGY
+	}
+#endif
 #endif
 	return;
 }
@@ -1781,6 +1942,27 @@ static int SBALL_adetect( struct audioout_info_s *aui )
 
 	SBALL_select_mixer(card);
 
+#ifdef CARD_AUDIGY
+	/* AUDTIMER=1: interrupt-dead host (X60s class) -- drive the whole engine
+	 * from RTC IRQ8 instead of the card's INTA. The card_irq lie re-points
+	 * the vector hook, VPIC IRQ8 protection, slave-PIC trap and cascade
+	 * unmask, all downstream of AU_getirq. SBERTC=3..15 picks the tick rate
+	 * (32768 >> (rs-1) Hz): default 6 = 1024 Hz, 7 = 512 Hz buys CPU
+	 * headroom on slow hosts. Without the env var the interrupt path is
+	 * untouched. */
+	{
+		const char *e = getenv("AUDTIMER");
+		if (e && *e == '1') {
+			const char *t = getenv("SBERTC");
+			if (t) { int rs = atoi(t); if (rs >= 3 && rs <= 15) aud_rtc_rs = (unsigned char)rs; }
+			aud_wt_div = ((32768u >> (aud_rtc_rs - 1)) * 12u + 500u) / 1000u;
+			if (!aud_wt_div) aud_wt_div = 1;
+			aud_timer = 1;
+			aui->card_irq = 8;
+		}
+	}
+#endif
+
 	return 1;
 
 err_adetect:
@@ -1793,6 +1975,13 @@ static void SBALL_close( struct audioout_info_s *aui )
 {
 	struct emu10k1_card *card = aui->card_private_data;
 
+#ifdef CARD_AUDIGY
+	if (aud_timer) {
+		rtc_disable();
+		aud_i8_remove();
+		aud_timer = 0;
+	}
+#endif
 	if ( card ) {
 		if (card->iobase)
 			if ( card->driver_funcs->hw_close )
@@ -1823,6 +2012,20 @@ static void SBALL_start( struct audioout_info_s *aui )
 {
 	struct emu10k1_card *card = aui->card_private_data;
 
+#ifdef CARD_AUDIGY
+	if (aud_timer) {
+		/* Pump mode: no card interrupts at all. This runs after the CardBus
+		 * 0x38 wake-up (adetect) and before any unmask; INTENABLE=0 plus
+		 * the no-CLIEL/no-dummy-voice start_playback means INTA never
+		 * asserts on the dead line. */
+		emu10k1_writefn0(card, EMU10K_INTENABLE, 0 );
+		if ( card->driver_funcs->start_playback )
+			card->driver_funcs->start_playback( card );
+		rtc_enable();
+		aud_i8_install();
+		return;
+	}
+#endif
 	//emu10k1_writefn0(card, EMU10K_INTENABLE, INTE_FXDSPENABLE | INTE_INTERVALTIMERENB );
 #if !LOOPINT
 	emu10k1_writefn0(card, EMU10K_INTENABLE, INTE_SAMPLERATETRACKER | INTE_INTERVALTIMERENB );
@@ -1852,6 +2055,9 @@ static void SBALL_stop( struct audioout_info_s *aui )
 	if ( card->driver_funcs->stop_playback )
 		card->driver_funcs->stop_playback( card );
 
+	/* AUDTIMER: the RTC pump deliberately stays armed here -- stop fires on
+	 * EVERY rate change, and killing the pump there deadlocked the ES
+	 * backend once. Teardown lives in SBALL_close only. */
 	return;
 }
 
@@ -1916,6 +2122,23 @@ static int SBALL_IRQRoutine( struct audioout_info_s *aui )
 {
 	//dbgprintf(("SBALL_IRQRoutine\n"));
 	struct emu10k1_card *card = aui->card_private_data;
+#ifdef CARD_AUDIGY
+	if (aud_timer) {
+		uint8_t f;
+		++aud_tick_seq;
+		aud_watchdog();
+		f = DPMI_DisableInterrupt();               /* cli: the IRQ0 heartbeat must not */
+		outportb(0x70,0x0C); (void)inportb(0x71);  /* land between CMOS index and data */
+		DPMI_RestoreInterrupt(f);
+		/* belt and braces: we never enable an interrupt source, but an IPR
+		 * bit latched before INTENABLE=0 must not sit asserting a (possibly
+		 * floating) INTA forever. No CLIPL service -- no loop ints here. */
+		{ uint32_t ipr = inl(card->iobase + IPR);
+		  if (ipr) emu10k1_writefn0(card, IPR, ipr); }
+		return 1;   /* every IRQ8 is ours by construction; returning 0 would
+		             * chain SNDISR into the BIOS INT 70h handler */
+	}
+#endif
 	return card->driver_funcs->interrupt_isr( card );
 }
 

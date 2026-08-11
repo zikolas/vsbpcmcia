@@ -834,8 +834,14 @@ static int SNDISR_Interrupt( void )
     /* hardware wavetable: the EMU10K2 renders on its own voices, so only the
      * MIDI ring needs pumping -- integer-only, no FPU state to save */
     else if ( EMUWT_Active() ) {
+        extern int SBALL_WTTick(void);
         VMPU_Process_Messages();
-        EMUWT_Poll();
+        /* AUDTIMER pump: envelope stepping assumes the ~83 Hz loop-
+         * interrupt cadence -- SBALL_WTTick divides the RTC tick rate
+         * back down to it (unity in interrupt mode). MIDI parsing
+         * stays every tick: finer timing is strictly better. */
+        if ( SBALL_WTTick() )
+            EMUWT_Poll();
     }
 #endif
 #endif
