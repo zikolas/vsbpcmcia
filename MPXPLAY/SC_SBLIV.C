@@ -234,7 +234,10 @@ static const unsigned int spi_dac_init[] = {
  * 0xC0 measured by ear on a ThinkPad 235 into headphones. /VOL still works as
  * a fader on top of this, and DACVOL.EXE can retune it live.
  */
-#define ZSNB_DAC_VOLUME   0xC0
+/* Reference level set by ear through AUDMIX against SPEAKERS (2026-08-11);
+ * the old 0xC0 was tuned on sensitive reference headphones and left speaker
+ * users short. 0xEF = 93% on AUDMIX's MAIN slider. */
+#define ZSNB_DAC_VOLUME   0xEF
 #define ZSNB_DAC_UPDATE   0x0100
 
 static const unsigned int spi_dac_vol_regs[] = {
