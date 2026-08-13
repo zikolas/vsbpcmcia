@@ -9,6 +9,8 @@ The guest's Sound Blaster audio is intercepted and pushed to the real card's
 FIFO by programmed I/O — a passthrough: the chip plays the guest's native
 rate/format, nothing is resampled. FM (AdLib) rides the card's real ESFM
 directly at 0x388, untrapped.
+Validated from a Pentium MMX down to a 386-bus 486SLC/25 (HP OmniBook 425) —
+see COMPATIBILITY.md for the measured floor and slow-CPU tuning.
 
 Supported Sound cards:
  * ES1688-class PCMCIA cards: Ratoc REX-5571/5572, Panasonic KXL-C101
