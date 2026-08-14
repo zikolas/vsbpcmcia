@@ -38,15 +38,22 @@ issue with your game, machine, card and symptoms.
 | Cannon Fodder | ❌ | P-MMX | not yet triaged |
 | Worms | ❌ | P-MMX | not yet triaged |
 
-## Measured performance floor (486SLC/25, HP OmniBook 425)
+## Measured performance (DOOM v1.2 `-timedemo demo1`, 1667 gametics, VSBPCM v0.6)
 
-DOOM v1.2 `-timedemo demo1` (1667 gametics), VSBPCM v0.6, KXL-C101, 6MB RAM:
+HP OmniBook 425 (486SLC/25, KXL-C101, 6MB RAM):
 
 | configuration | realtics | fps | audio share of CPU |
 |---|---|---|---|
 | no sound | 9,966 | 5.9 | — |
 | SB 2.0 mono (`/T3`) | 17,480 | 3.3 | 43% |
 | SB Pro stereo (default) | 26,520 | 2.2 | 62% |
+
+IBM ThinkPad (486DX2-50):
+
+| configuration | realtics | fps | audio share of CPU |
+|---|---|---|---|
+| no sound | 3,140 | 18.6 | — |
+| SB 2.0 mono (`/T3`) | 4,171 | 14.0 | 25% |
 
 Audio cost scales almost linearly with the output byte rate, so on very slow
 CPUs the levers that matter are the emulated card type and the rate: running
@@ -56,6 +63,10 @@ panning. `DACRATE=11025` is the other half of the same lever. The resident
 is already size-optimized (`-Os`) and the passthrough adds no per-sample
 processing — below this class of CPU, the remaining costs are the game's own
 mixing and the port-trap round trips, which no configuration removes.
+Across machines the absolute audio cost falls faster than clock speed alone
+suggests (the DX2-50's mono audio bill is ~7x smaller than the SLC/25's):
+the cost is I/O- and memory-shaped, so bus width and cache matter as much
+as MHz.
 
 FM-only ESS-native players (e.g. ESFMPLAY) probe the BLASTER variable:
 point it at the REAL chip base (`SET BLASTER=A220 I5 D1`) for such tools --
