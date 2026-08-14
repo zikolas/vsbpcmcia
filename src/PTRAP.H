@@ -31,6 +31,12 @@ bool PTRAP_Uninstall_PM_PortTraps( void );
 void    PTRAP_UntrappedIO_OUT(uint16_t port, uint8_t value);
 uint8_t PTRAP_UntrappedIO_IN(uint16_t port);
 
+#ifdef CARD_TP755
+/* OPL write ring (v86 stub producer, see rmcode1.asm/ptrap.c) */
+void PTRAP_SetOplRing( uint32_t linear );   /* paragraph-aligned DOS memory, 32 bytes */
+void PTRAP_DrainOplRing( void );
+#endif
+
 #if PT0V86
 /* v1.8: physical address v86 pagetab 0 */
 uint32_t PTRAP_GetPageTab0v86( void );

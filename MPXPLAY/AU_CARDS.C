@@ -26,7 +26,9 @@
 
 extern uint8_t bOMode;
 
-#ifndef NOES1688
+#ifdef CARD_TP755
+extern struct sndcard_info_s TP755_sndcard_info;
+#elif !defined(NOES1688)
 extern struct sndcard_info_s ES1688_sndcard_info;
 #endif
 #ifndef NOES1371
@@ -46,7 +48,9 @@ extern struct sndcard_info_s SBALL_sndcard_info;
 #endif
 
 static const struct sndcard_info_s *sndcard_info_table[] = {
-#ifndef NOES1688
+#ifdef CARD_TP755
+	&TP755_sndcard_info,    /* TP755C planar CS4248, 8237-ch0 DMA ring; no PCI, tried first */
+#elif !defined(NOES1688)
 	&ES1688_sndcard_info,   /* PCMCIA ES1688 passthrough (PC110/235); no PCI, tried first */
 #endif
 #ifndef NOES1371

@@ -40,7 +40,7 @@
 //  SBEMU feeds 16-bit stereo; we down-mix to 8-bit mono into the ring in
 //  ES1688_writedata. The SB must be brought up at its base by ES1688GO first.
 //**************************************************************************
-#ifndef NOES1688   /* VSBHDA inclusion convention (was crazii AU_CARDS_LINK_ES1688) */
+#if !defined(NOES1688) && !defined(CARD_TP755)   /* VSBHDA inclusion convention; self-excluded when another backend owns the build */
 
 #include <string.h>
 #include <stdint.h>

@@ -45,9 +45,15 @@ OBJFILES=\
 	$(OUTD)/vsb.o		$(OUTD)/vdma.o		$(OUTD)/virq.o		$(OUTD)/vopl3.o		$(OUTD)/vmpu.o		$(OUTD)/tsf.o\
 	$(OUTD)/au_cards.o\
 	$(OUTD)/dmabuff.o	$(OUTD)/physmem.o	$(OUTD)/timer.o\
-	$(OUTD)/sc_es1688.o\
+	$(OUTD)/sc_es1688.o	$(OUTD)/sc_tp755.o\
 	$(OUTD)/stackio.o	$(OUTD)/stackisr.o	$(OUTD)/sbisr.o		$(OUTD)/int31.o		$(OUTD)/rmwrap.o	$(OUTD)/mixer.o\
 	$(OUTD)/hapi.o		$(OUTD)/dprintf.o	$(OUTD)/vioout.o	$(OUTD)/djdpmi.o	$(OUTD)/uninst.o	$(OUTD)/fileacc.o
+
+# CARD_TP755: the 755C build keeps the OPL3 emulation (no FM hardware on
+# that machine -- see config.h), so dbopl.o comes back for it only.
+ifneq (,$(findstring CARD_TP755,$(CFLAGS)))
+OBJFILES+= $(OUTD)/dbopl.o
+endif
 
 INCLUDE_DIRS=src mpxplay
 SRC_DIRS=src mpxplay
@@ -62,7 +68,10 @@ LD_EXTRA_FLAGS=-Map $(OUTD)/$(NAME).map
 INCLUDES=$(addprefix -I,$(INCLUDE_DIRS))
 LIBS=$(addprefix -l,stdcxx m)
 
-COMPILE.asm.o=jwasm.exe -q -djgpp -Istartup -D?MODEL=small -DDJGPP $(A_DEBUG_FLAGS) -Fo=$@ $<
+# $(CFLAGS) carries the CARD_xxx define to the ASM side too (rmcode1.asm's
+# v86 OPL fast-path is CARD_TP755-gated); with CFLAGS empty the command
+# lines are unchanged and the default build stays byte-identical.
+COMPILE.asm.o=jwasm.exe -q -djgpp -Istartup -D?MODEL=small -DDJGPP $(CFLAGS) $(A_DEBUG_FLAGS) -Fo=$@ $<
 COMPILE.c.o=gcc $(C_DEBUG_FLAGS) $(C_OPT_FLAGS) $(C_EXTRA_FLAGS) $(CFLAGS) $(INCLUDES) -c $< -o $@
 COMPILE.cpp.o=gcc $(C_DEBUG_FLAGS) $(C_OPT_FLAGS) $(C_EXTRA_FLAGS) $(CPPFLAGS) $(INCLUDES) -c $< -o $@
 
@@ -96,8 +105,8 @@ $(OUTD)/$(NAME).ar:: $(OBJFILES)
 # is included in binary format into rmwrap.asm.
 
 $(OUTD)/rmwrap.o:: rmwrap.asm rmcode1.asm rmcode2.asm
-	jwasm.exe -q -bin -Fl$(OUTD)/ -Fo$(OUTD)/rmcode1.bin src/rmcode1.asm
-	jwasm.exe -q -bin -Fl$(OUTD)/ -Fo$(OUTD)/rmcode2.bin src/rmcode2.asm
+	jwasm.exe -q -bin $(CFLAGS) -Fl$(OUTD)/ -Fo$(OUTD)/rmcode1.bin src/rmcode1.asm
+	jwasm.exe -q -bin $(CFLAGS) -Fl$(OUTD)/ -Fo$(OUTD)/rmcode2.bin src/rmcode2.asm
 	jwasm.exe -q -djgpp -D?MODEL=small -DOUTD=$(OUTD) -Fo$@ src/rmwrap.asm
 
 $(OUTD)/ac97mix.o::  ac97mix.c   mpxplay.h au_cards.h ac97mix.h
@@ -111,7 +120,8 @@ $(OUTD)/sc_inthd.o:: sc_inthd.c  mpxplay.h au_cards.h dmabuff.h pcibios.h sc_int
 $(OUTD)/sc_sbl24.o:: sc_sbl24.c  mpxplay.h au_cards.h dmabuff.h pcibios.h ac97mix.h sc_sbl24.h emu10k1.h
 $(OUTD)/sc_sbliv.o:: sc_sbliv.c  mpxplay.h au_cards.h dmabuff.h pcibios.h ac97mix.h sc_sbliv.h emu10k1.h
 $(OUTD)/sc_via82.o:: sc_via82.c  mpxplay.h au_cards.h dmabuff.h pcibios.h ac97.h
-$(OUTD)/sc_es1688.o:: sc_es1688.c au_cards.h
+$(OUTD)/sc_es1688.o:: sc_es1688.c au_cards.h config.h
+$(OUTD)/sc_tp755.o:: sc_tp755.c au_cards.h dmabuff.h config.h
 $(OUTD)/timer.o::    timer.c     mpxplay.h au_cards.h timer.h
 
 $(OUTD)/dbopl.o::    dbopl.cpp   dbopl.h

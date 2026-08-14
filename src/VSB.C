@@ -386,7 +386,14 @@ static void DSP_Reset( uint8_t value )
          * (the 'pinball -> idle -> pinball silent' case). Every guest DSP
          * reset lands here, i.e. before any game's SB detect. */
         { extern int ES1688_PT; extern void ES1688_PT_Watchdog(void);
-          if ( ES1688_PT ) ES1688_PT_Watchdog(); }
+#ifdef CARD_TP755
+          /* TP755: render build (PT stays 0), but the hook doubles as the
+           * stuck-INT/masked-ch0 heal -- call it on every DSP reset. */
+          ES1688_PT_Watchdog();
+#else
+          if ( ES1688_PT ) ES1688_PT_Watchdog();
+#endif
+        }
 #endif
         /* v1.5: bits 4-7 are rsvd, set to 1? DosBox sets to 0 - check a real SB16! */
         /* v1.7: now done in VSB_Init() - INT_SETUP and DMA_SETUP are r/o registers */
@@ -1038,6 +1045,17 @@ void VSB_SetIRQStatus( uint8_t flag )
 {
     vsb.MixerRegs[SB_MIXERREG_IRQ_STATUS] |= flag;
 }
+
+#ifdef CARD_TP755
+/* revival squelch (sndisr.c): a completion latched BEFORE an engine freeze
+ * must be dropped outright on heal, not delivered into seconds-stale guest
+ * state (SetIRQStatus only ORs, so a dedicated clear is needed). */
+void VSB_ClearIRQStatus( void )
+///////////////////////////////
+{
+    vsb.MixerRegs[SB_MIXERREG_IRQ_STATUS] &= ~( SB_MIXERREG_IRQ_STAT8BIT | SB_MIXERREG_IRQ_STAT16BIT );
+}
+#endif
 
 int VSB_GetIRQStatus( void )
 ////////////////////////////

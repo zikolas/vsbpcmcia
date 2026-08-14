@@ -19,7 +19,13 @@
 #define NOSBLIVE  1
 #define NOVIA82   1
 
+/* CARD_TP755 (tools/build.sh CARD=TP755 -> VSBPCMT.EXE): the 755C internal
+ * CS4248 card has NO FM chip anywhere, so that build keeps the DOSBox OPL3
+ * emulation (0x388 trapped, dbopl rendered into the codec stream) or AdLib
+ * music is simply silent. Every other build leaves 0x388 to real hardware. */
+#ifndef CARD_TP755
 #define NOFM      1   /* strip DOSBox OPL3 emulation; leave 0x388 to the hardware */
+#endif
 
 #define SB16      1   /* 1=support SB16 */
 #define ADPCM     1   /* 1=support ADPCM */

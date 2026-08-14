@@ -35,7 +35,16 @@
 #define HDPMI_MAXRANGE 8 /* hdpmi is restricted to 8 port ranges */
 
 // next 2 defines must match EQUs in rmcode1.asm!
+#ifdef CARD_TP755
+/* TP755: no FM hardware anywhere, dbopl carries AdLib -- and era drivers pad
+ * every OPL register write with 6-24 status/data-port reads (pure delay).
+ * Each one is a full V86 monitor round-trip on the 486 = the FM "trap tax"
+ * that wedged DOOM/MI2 (bench 2026-08-14). The dormant v86 stub answers
+ * those reads in real mode with zero round-trips; writes stay fully trapped. */
+#define HANDLE_IN_388H_DIRECTLY 1
+#else
 #define HANDLE_IN_388H_DIRECTLY 0
+#endif
 #define RMPICTRAPDYN 0 /* 1=trap PIC for v86-mode dynamically when needed */
 
 extern struct globalvars gvars;
@@ -85,7 +94,19 @@ static const uint8_t ChannelPageMap[] = { 0x87, 0x83, 0x81, 0x82, -1, 0x8b, 0x89
 static uint16_t PortTable[] = {
 	0x388, 0x389, 0x38A, 0x38B | 0x8000,
 	0x20, 0x21 | 0x8000,
+#ifdef CARD_TP755
+	/* 0xA0 is trapped ONLY so multi-byte accesses that START there reach our
+	 * decomposer: the CPU faults a word/dword access if ANY of its bytes has
+	 * an IOPM bit set, but both Jemm (v5.84+ raw-splits unmatched accesses to
+	 * real hardware) and hdpmi report just the STARTING port. A guest 16-bit
+	 * "OUT 0A0h,AX" (OCW+IMR in one instruction) therefore put AH on the REAL
+	 * slave IMR behind VPIC's back -- masking IRQ10, the TP755 engine clock
+	 * (bench 2026-08-14, the MI1 resurrection). Byte content on 0xA0 is never
+	 * virtualized: VPIC_PassAcc, and the v86 stub short-circuits it. */
+	0xA0, 0xA1 | 0x8000,
+#else
 	0xA1 | 0x8000,
+#endif
 	0x02, 0x03,                   /* ch 1; will be modified if LDMA != 1 */
 	0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F | 0x8000,
 #if SB16
@@ -113,7 +134,12 @@ static uint16_t PortTable[] = {
 static PORT_TRAP_HANDLER PortHandler[] = {
 	VOPL3_388, VOPL3_389, VOPL3_38A, VOPL3_38B,
 	VPIC_Acc, VPIC_Acc,    /* 0x20, 0x21 */
+#ifdef CARD_TP755
+	VPIC_PassAcc,          /* 0xA0: passthrough (trapped for the decomposer) */
 	VPIC_Acc,              /* 0xA1 */
+#else
+	VPIC_Acc,              /* 0xA1 */
+#endif
 	VDMA_Acc, VDMA_Acc,    /* base+cnt for ch 1; will be modified if LDMA != 1 */
 	VDMA_Acc, VDMA_Acc, VDMA_Acc, VDMA_Acc, VDMA_Acc, VDMA_Acc, VDMA_Acc, VDMA_Acc, /* 0x08-0x0F */
 	VDMA_Acc,              /* page reg for ch 1; will be modified if LDMA != 1 */
@@ -138,6 +164,55 @@ static PORT_TRAP_HANDLER PortHandler[] = {
 /* state of trapped ports */
 static uint16_t PortState[countof(PortHandler)];
 
+#ifdef CARD_TP755
+#if HANDLE_IN_388H_DIRECTLY
+static void SyncOplStatusCache( void );
+static int IsOplHandler( PORT_TRAP_HANDLER h );
+void PTRAP_DrainOplRing( void );
+/* TP755's rmcode1 stub outgrew the 160 bytes of PSP after 0x60 (the write
+ * ring pushed it to ~180), so the whole real-mode home moves into DOS-block
+ * slack that sc_tp755 allocates: [0..191 stub][192..223 OPL ring][224..255
+ * SB-ISR stub]. 0 = not registered (fall back to the PSP home). */
+static uint32_t RMStubLinear;
+
+/* Ring size. MUST match OPLRING_ENTRIES in rmcode1.asm, and sc_tp755's
+ * TP_RMHOME_PARA must cover 192 + OPLRING_ENTRIES*2 + 32 bytes. */
+#define OPLRING_ENTRIES 1024
+#define OPLRING_MASK    (OPLRING_ENTRIES - 1)
+/* where the ring starts inside the real-mode home. The stub blob (vars +
+ * code) has to fit below this: it is 186 bytes today, so 192 left only 6
+ * bytes of slack -- one more instruction in rmcode1.asm and the stub would
+ * have silently written over ring entry 0. Prepare_RM_PortTrap now checks
+ * the copied length against this and refuses to arm the ring if it ever
+ * does overrun (rseg 0 = the stub's pre-ring synchronous path). */
+#define OPLRING_OFF     256
+#endif
+
+/* One byte of a decomposed multi-byte access: route it through the port's
+ * registered handler if the port is trapped, else to real hardware. */
+static uint8_t PTRAP_TrapByte( uint16_t port, uint8_t val, uint16_t flags )
+{
+    int i;
+    for ( i = 0; i < maxports; i++ )
+        if ( PortTable[i] == port ) {
+#if HANDLE_IN_388H_DIRECTLY
+            if ( IsOplHandler( PortHandler[i] ) ) {
+                PTRAP_DrainOplRing();       /* ring entries are older: first */
+                val = PortHandler[i]( port, val, flags );
+                SyncOplStatusCache();
+                return val;
+            }
+#endif
+            return PortHandler[i]( port, val, flags );
+        }
+    if ( flags & TRAPF_OUT ) {
+        UntrappedIO_OUT( port, val );
+        return val;
+    }
+    return UntrappedIO_IN( port );
+}
+#endif
+
 /* real-mode port trap handler;
  * called by SwitchStackIOrmcb().
  */
@@ -154,8 +229,43 @@ static void RM_TrapHandler( __dpmi_regs * regs)
      * regs.x.ch:
      * bit[1]: IF
      */
+#ifdef CARD_TP755
+    /* Jemm's v86 monitor size bits: CL.3=word, CL.4=dword (QPIEMU passes CL
+     * through). Decompose byte-wise, low byte first (Jemm's own Simulate_IO
+     * order), so e.g. the IMR half of a word "OUT 0A0h,AX" goes through
+     * VPIC_Write's engine-IRQ filter and a word OUT to 0x388 delivers BOTH
+     * the index and the data byte (the old code fed AL to the start port's
+     * handler and silently dropped AH). */
+    if ( regs->x.cx & 0x18 ) {
+        uint16_t fl = regs->x.cx & ~0x18;
+        int n = ( regs->x.cx & 0x10 ) ? 4 : 2;
+        if ( fl & TRAPF_OUT ) {
+            for ( i = 0; i < n; i++ )
+                PTRAP_TrapByte( port + i, (uint8_t)(regs->d.eax >> (8*i)), fl );
+        } else {
+            uint32_t v = 0;
+            for ( i = 0; i < n; i++ )
+                v |= (uint32_t)PTRAP_TrapByte( port + i, 0, fl ) << (8*i);
+            if ( n == 2 )
+                regs->x.ax = (uint16_t)v;   /* client EAX.hi round-trips */
+            else
+                regs->d.eax = v;
+        }
+        regs->x.flags &= ~CPU_CFLAG;
+        return;
+    }
+#endif
     for ( i = 0; i < maxports; i++ ) {
         if( PortTable[i] == port ) {
+#if defined(CARD_TP755) && HANDLE_IN_388H_DIRECTLY
+            if ( IsOplHandler( PortHandler[i] ) ) {
+                PTRAP_DrainOplRing();       /* buffered writes are older */
+                regs->h.al = PortHandler[i]( port, regs->h.al, regs->x.cx );
+                SyncOplStatusCache();
+                regs->x.flags &= ~CPU_CFLAG;
+                return;
+            }
+#endif
             regs->h.al = PortHandler[i]( port, regs->h.al, regs->x.cx );
             regs->x.flags &= ~CPU_CFLAG; /* clear carry flag, indicates that access was handled */
             return;
@@ -190,6 +300,53 @@ static void RM_TrapHandler( __dpmi_regs * regs)
  * called by SwitchStackIO();
  */
 
+#ifdef CARD_TP755
+/* hdpmi's errcode size bits differ from Jemm's: 10h=word, 20h=dword (see
+ * stackio.asm, which already stores AX/EAX back for them). Return widened to
+ * uint32_t so a decomposed word/dword IN reaches the client; the asm side
+ * reads AL for byte accesses either way, so the ABI is unchanged. */
+uint32_t PTRAP_PM_TrapHandler( uint16_t port, uint16_t flags, uint32_t value )
+//////////////////////////////////////////////////////////////////////////////
+{
+    int i;
+    if ( flags & 0x30 ) {
+        uint16_t fl = flags & ~0x30;
+        int n = ( flags & 0x20 ) ? 4 : 2;
+        uint32_t v = 0;
+        for ( i = 0; i < n; i++ ) {
+            if ( fl & TRAPF_OUT )
+                PTRAP_TrapByte( port + i, (uint8_t)(value >> (8*i)), fl );
+            else
+                v |= (uint32_t)PTRAP_TrapByte( port + i, 0, fl ) << (8*i);
+        }
+        return v;
+    }
+    for( i = 0; i < maxports; i++ )
+        if( PortTable[i] == port) {
+#if HANDLE_IN_388H_DIRECTLY
+            /* drain-first + keep the v86 stub's 0x388 status cache fresh
+             * across worlds (a PM game's OPL writes must be visible to a
+             * later v86 read, and must not overtake buffered v86 writes) */
+            if ( IsOplHandler( PortHandler[i] ) ) {
+                PTRAP_DrainOplRing();
+                value = PortHandler[i](port, (uint8_t)value, flags );
+                SyncOplStatusCache();
+                return value;
+            }
+#endif
+            return PortHandler[i](port, (uint8_t)value, flags );
+        }
+
+    /* ports that are trapped, but not handled; this may happen, since
+     * hdpmi32i's support for port trapping is limited to 8 ranges.
+     */
+    if ( flags & TRAPF_OUT) {
+        UntrappedIO_OUT( port, (uint8_t)value );
+        return value;
+    } else
+        return UntrappedIO_IN( port );
+}
+#else
 uint8_t PTRAP_PM_TrapHandler( uint16_t port, uint16_t flags, uint8_t value )
 ////////////////////////////////////////////////////////////////////////////
 {
@@ -208,6 +365,7 @@ uint8_t PTRAP_PM_TrapHandler( uint16_t port, uint16_t flags, uint8_t value )
     } else
         return UntrappedIO_IN( port );
 }
+#endif
 
 
 //https://www.cs.cmu.edu/~ralf/papers/qpi.txt
@@ -300,13 +458,118 @@ void PTRAP_InitPortMax( void )
 
 struct rmcode1 {   /* structure must match definitions in rmcode1.asm! */
     uint32_t rmcb; /* realmode callback */
-    uint16_t data; /* port 0x388/0x389 access optimization (not active) */
+    uint16_t data; /* LOW byte: current OPL index shadow; HIGH: 0x388 status cache */
     uint16_t wPort; /* used for PIC port trapping; contains either 0x0020 or 0xffff */
     uint32_t qpi;  /* QPI entry */
+#if defined(CARD_TP755) && HANDLE_IN_388H_DIRECTLY
+    uint16_t rseg;  /* OPL write ring: real-mode segment (paragraph-aligned) */
+    uint16_t rhead; /*   producer slot (v86 stub) */
+    uint16_t rtail; /*   consumer slot (PTRAP_DrainOplRing) */
+    uint8_t rfull;  /*   ring-full events counted by the stub (wraps) */
+    uint8_t rpad;   /*   keeps codev86 even -- see rmcode1.asm */
+#endif
     uint8_t codev86[]; /* v86 code */
 };
 
+#if defined(CARD_TP755) && HANDLE_IN_388H_DIRECTLY
+/* The v86 stub answers byte reads of 0x388 from rmcode1.data's high byte
+ * (vars._0005) with ZERO logic of its own; this refresh -- run after every
+ * OPL trap the C side handles -- makes vopl3.cpp the single source of truth
+ * for timer semantics (mask bits, RST, both-timers OR). The stub can never
+ * diverge again the way the old in-stub start-bit test did. */
+static struct rmcode1 *RMStub( void )
+{
+    return RMStubLinear ? (struct rmcode1 *)NearPtr(RMStubLinear)
+                        : (struct rmcode1 *)NearPtr(_my_psp() + DOSMEMSTART);
+}
+
+static void SyncOplStatusCache( void )
+{
+    struct rmcode1 *dm = RMStub();
+    dm->data = (dm->data & 0xFF) | ((uint16_t)VOPL3_388( 0x388, 0, 0 ) << 8);
+}
+
+/* ---- the OPL write ring (see rmcode1.asm for the producer side) ----
+ * The v86 stub buffers non-timer OPL register writes as (index,value)
+ * entries so the guest's music handler stops paying an RMCB mode switch
+ * per write -- the DX4/75 FM killer (IRQ0 monopoly; saturation meter 4FD).
+ * This side replays them into vopl3 in exact write order: once per SNDISR
+ * tick, and always BEFORE any synchronous OPL access is applied. */
+
+static uint8_t *OplRing;    /* near ptr; 16 entries x 2 bytes (lo=val, hi=idx) */
+
+static uint8_t Drain_Cli(void)
+{
+    uint32_t f;
+    __asm__ __volatile__("pushfl; popl %0; cli":"=r"(f)::"memory");
+    return (uint8_t)((f >> 9) & 1);
+}
+static void Drain_Sti(uint8_t on)
+{
+    if (on) __asm__ __volatile__("sti":::"memory");
+}
+
+static uint32_t OplRingLinear;   /* kept: copyrmcode() re-zeroes the stub struct */
+
+/* Register the real-mode home: TP_RMHOME_PARA paragraphs of DOS-block slack
+ * (sc_tp755 allocates them). Layout owned here:
+ *   [0..255 stub][256..2303 ring, OPLRING_ENTRIES entries][2304..2335 spare]
+ * Must run BEFORE PTRAP_Prepare_RM_PortTrap (card detect precedes traps). */
+void PTRAP_SetOplRing( uint32_t base )
+{
+    RMStubLinear  = base;
+    OplRingLinear = base + OPLRING_OFF;
+    OplRing = NearPtr( OplRingLinear );
+    memset( OplRing, 0, OPLRING_ENTRIES * 2 );
+}
+
+void PTRAP_DrainOplRing( void )
+{
+    struct rmcode1 *dm;
+    uint16_t head, tail;
+    uint8_t f;
+    if ( !OplRing ) return;
+    dm = RMStub();
+    if ( dm->rhead == dm->rtail ) return;
+    /* two contexts drain (SNDISR tick + trap-path drain-before-sync); the
+     * cli guard makes consumption single-file, but a full-ring drain under
+     * one cli would stall IRQ4 past the 16550 FIFO (COMRADE) -- so consume
+     * in 32-entry chunks with interrupt windows between them. */
+    {   /* ring telemetry (BIOS IAC): 4F7 = stub-side ring-full events,
+         * 4FE = occupancy high-water in units of 4 entries (the ring
+         * outgrew a byte: 255 here = 1020 = full), 4FF = drain calls */
+        uint8_t *iac = NearPtr(0x4F0);
+        uint16_t occ = (uint16_t)((dm->rhead - dm->rtail) & OPLRING_MASK);
+        if ( (occ >> 2) > iac[0x0E] ) iac[0x0E] = (uint8_t)(occ >> 2);
+        iac[0x07] = dm->rfull;
+        iac[0x0F]++;
+    }
+    do {
+        int n = 32;
+        f = Drain_Cli();
+        head = dm->rhead;
+        tail = dm->rtail;
+        while ( tail != head && n-- ) {
+            VOPL3_388( 0x388, OplRing[tail*2+1], TRAPF_OUT );
+            VOPL3_389( 0x389, OplRing[tail*2],   TRAPF_OUT );
+            tail = (uint16_t)(( tail + 1 ) & OPLRING_MASK);
+        }
+        dm->rtail = tail;
+        Drain_Sti(f);
+    } while ( tail != head );
+    SyncOplStatusCache();
+}
+
+
+/* is this table slot one of the OPL handlers? (covers the 0x220/0x228 SB
+ * FM aliases too, which must not overtake buffered writes either) */
+static int IsOplHandler( PORT_TRAP_HANDLER h )
+{
+    return h == VOPL3_388 || h == VOPL3_389 || h == VOPL3_38A || h == VOPL3_38B;
+}
 #endif
+
+#endif /* HANDLE_IN_388H_DIRECTLY || !RMPICTRAPDYN */
 
 bool PTRAP_Prepare_RM_PortTrap()
 ////////////////////////////////
@@ -314,6 +577,7 @@ bool PTRAP_Prepare_RM_PortTrap()
     static __dpmi_regs TrapHandlerREG; /* static RMCS for RMCB */
 #if HANDLE_IN_388H_DIRECTLY || !RMPICTRAPDYN
     struct rmcode1 *dosmem;
+    uint32_t stubbytes;
 #endif
 
     QPI_regs.x.ax = 0x1A06;
@@ -329,9 +593,41 @@ bool PTRAP_Prepare_RM_PortTrap()
         return false;
 
 #if HANDLE_IN_388H_DIRECTLY || !RMPICTRAPDYN
-    /* copy 16-bit code to DOS memory (PSP:60h) */
+    /* copy 16-bit code to DOS memory (PSP:60h -- or the registered
+     * DOS-block home when the TP755 write-ring build outgrew the PSP) */
+#if defined(CARD_TP755) && HANDLE_IN_388H_DIRECTLY
+    dosmem = RMStubLinear ? NearPtr(RMStubLinear)
+                          : NearPtr(_my_psp() + DOSMEMSTART);
+    dosheap = copyrmcode( (void *)dosmem, 0 );
+    stubbytes = (uint32_t)((uint8_t *)dosheap - (uint8_t *)dosmem);
+    if ( RMStubLinear ) {
+        /* the SB-ISR stub must stay INSIDE the PSP: _SB_InstallISR builds
+         * its real-mode vector as PSPseg:(ptr - PSP), so anything farther
+         * than 64K yields a garbage INT 0Fh vector (DOOM/MI2 crashed on
+         * the first injected SB interrupt). rmcode1's move to the DOS
+         * block freed PSP:60h -- the 17-byte stub goes right back there. */
+        dosheap = NearPtr(_my_psp() + DOSMEMSTART);
+        /* copyrmcode just wrote the template: re-arm the OPL write ring.
+         * If the stub ever grows past OPLRING_OFF it would be writing its
+         * own tail over ring entries, so leave the ring disarmed instead --
+         * rseg 0 sends the stub down its synchronous path (slower FM, but
+         * correct) rather than corrupting the buffered writes. */
+        if ( OplRingLinear ) {
+            if ( stubbytes > OPLRING_OFF ) {
+                dosmem->rseg = 0;
+                printf("CS4248: rmcode1 stub is %lu bytes, OPL ring starts at %u"
+                       " -- ring DISABLED (raise OPLRING_OFF)\n",
+                       (unsigned long)stubbytes, OPLRING_OFF );
+            } else {
+                dosmem->rhead = dosmem->rtail = 0;
+                dosmem->rseg = (uint16_t)(OplRingLinear >> 4);
+            }
+        }
+    }
+#else
     dosmem = NearPtr(_my_psp() + DOSMEMSTART);
     dosheap = copyrmcode( (void *)dosmem, 0 );
+#endif
 
     /* the code starts with a rmcode1 struct, now to be initialized...  */
     dosmem->rmcb = rmcb.segofs;
@@ -341,7 +637,12 @@ bool PTRAP_Prepare_RM_PortTrap()
     /* set new trap handler ES:DI */
     //r.x.di = 4+2+2+4;
     QPI_regs.x.di = offsetof(struct rmcode1, codev86);
+#if defined(CARD_TP755) && HANDLE_IN_388H_DIRECTLY
+    QPI_regs.x.es = RMStubLinear ? (uint16_t)(RMStubLinear >> 4)
+                                 : ((_my_psp() + DOSMEMSTART) >> 4);
+#else
     QPI_regs.x.es = (_my_psp() + DOSMEMSTART) >> 4;
+#endif
 #else
     QPI_regs.x.di = rmcb.v86.offset;
     QPI_regs.x.es = rmcb.v86.segment;
@@ -427,7 +728,12 @@ void PTRAP_SetPICPortTrap( int bSet )
         /* patch the 16-bit real-mode code stored in the PSP;
          * see rmcode1.asm, wPICp.
          */
+#if defined(CARD_TP755) && HANDLE_IN_388H_DIRECTLY
+        struct rmcode1 *dosmem = RMStubLinear ? NearPtr(RMStubLinear)
+                                              : NearPtr(_my_psp() + DOSMEMSTART);
+#else
         struct rmcode1 *dosmem = NearPtr(_my_psp() + DOSMEMSTART);
+#endif
         //WriteLinearW( dosmem, bSet ? 0xffff : 0x0020 );
         dosmem->wPort = (bSet ? 0xffff : 0x0020);
 #endif
@@ -578,7 +884,11 @@ void PTRAP_Prepare( int opl, int sbaddr, int dma, int hdma, int sndirq )
     PortTable[portranges[DMAPG_PDT]] = ChannelPageMap[ dma ];
     /* if the sound hw IRQ is < 8, the slave PIC doesn't need to be trapped */
     if ( sndirq < 8 ) {
+#ifdef CARD_TP755
+        PDT_DelEntries( portranges[SPIC_PDT], maxports, 2 );  /* 0xA0 + 0xA1 */
+#else
         PDT_DelEntries( portranges[SPIC_PDT], maxports, 1 );
+#endif
     }
 #if SB16
     if ( hdma ) {
