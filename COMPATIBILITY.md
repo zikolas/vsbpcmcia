@@ -23,7 +23,7 @@ issue with your game, machine, card and symptoms.
 | Rise of the Triad | ✅ | 486 | |
 | The Lion King | ✅ | 486DX4 | |
 | SimCity 2000 | ✅ | 486DX4 | |
-| Dune II | ✅ | P-MMX | |
+| Dune II | ⚠️ | 486DX4, P-MMX | fine on the P-MMX. On the DX4 it loads and plays, but moving the mouse halts it with a DOS internal stack overflow — the same signature as Cannon Fodder's setup, and it survives `STACKS=32,512`; untriaged |
 | Quake | ✅ | Am5x86/75 (Libretto 20) | |
 | Raptor: Call of the Shadows | ✅ | P-MMX | |
 | Impulse Tracker | ✅ | P-MMX | tracker/editor, SB digital out |
@@ -32,10 +32,11 @@ issue with your game, machine, card and symptoms.
 | Warcraft II | ✅ | P-MMX | native ESFM ("ESFM Enhanced") with ES1688GO 1.4+ |
 | Tomb Raider | ✅ | P-MMX | |
 | Sam & Max Hit the Road (talkie) | ❌ | 486SX/33 | crashes in the HDPMI DPMI host itself (also without VSBPCMCIA loaded); runs on a bare boot |
-| Pinball Fantasies | ⚠️ | 486SX/33, 486 | game freezes (on load on the SX/33); not yet triaged |
-| Duke Nukem II | ❌ | 486 | game's SB detection fails; not yet triaged |
+| Pinball Fantasies | ❌ | 486SX/33, 486DX4 | graphics corruption, then a wedge, on the DX4 (freeze on load on the SX/33). Isolated to VSBPCMCIA: with ES1688GO alone and the game set to AdLib — no VSBPCMCIA loaded — it runs clean with no corruption |
+| Duke Nukem II | ✅ | 486DX4 | needs the SB-base FM alias fix (v0.6.1-pre1+): its SB probe runs an AdLib timer test at base+8 and never touches the DSP unless it passes. Also put the emulated SB **below** the real chip (`ES1688GO /SB=240` + `VSBPCM /A220`) — it scans 0x220 first, and with the real card there it selects real silicon, which has no DMA on a PCMCIA socket |
 | Earthworm Jim 2 | ⚠️ | 486SX/33 | audio distortion; suspected CPU limit, untested on faster machines |
-| Cannon Fodder | ❌ | P-MMX | not yet triaged |
+| Flashback | ❌ | 486DX4 | wedges to a flashing cursor in-game; untriaged, not yet retested without VSBPCMCIA loaded |
+| Cannon Fodder | ❌ | 486DX4, P-MMX | the setup's sound test dies in a repeating ring-0 exception 0Dh inside the DPMI host (faults on `mov gs, ss:[esi]`, byte-identical registers every run). Not the FM alias fix — the pre-fix binary faults identically. `/CF4` stops the fault repeating but not the fault itself; untriaged |
 | Worms | ❌ | P-MMX | not yet triaged |
 
 ## Measured performance (DOOM v1.2 `-timedemo demo1`, 1667 gametics, VSBPCM v0.6)
