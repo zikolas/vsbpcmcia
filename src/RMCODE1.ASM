@@ -62,14 +62,18 @@ else
 vars rmcode1 <0,0,0,20h,0>
 endif
 
-if HANDLE_IN_388H_DIRECTLY
+;--- Multi-byte gate + the 0A0h short-circuit: BOTH builds need these, so
+;--- they sit outside HANDLE_IN_388H_DIRECTLY. 0A0h is trapped purely so a
+;--- word/dword access STARTING there reaches ptrap.c's decomposer (Jemm and
+;--- hdpmi report only the start port, so the second byte -- the slave IMR --
+;--- would otherwise hit real hardware behind VPIC's back and mask the engine
+;--- IRQ). A plain BYTE access to 0A0h is pure passthrough and must never pay
+;--- an RMCB round-trip: without this short-circuit every guest slave-PIC EOI
+;--- on an IRQ>=8 box (the whole RTC-pump fleet) would switch worlds.
 	test cl, 38h		; word/dword/string access? in-stub paths are
 	jnz normal			; byte-only: ptrap.c decomposes those per-port
-						; (Jemm reports only the START port of a multi-
-						; byte access -- see the 0xA0/IMR clobber notes)
 	cmp dx, 0A0h		; slave PIC cmd port, trapped ONLY for that
 	je is20				; decomposer: byte access = passthrough (QPI sim)
-endif
 
 ife RMPICTRAPDYN
 	cmp dx, [vars.wPICp]
@@ -81,9 +85,9 @@ if HANDLE_IN_388H_DIRECTLY
 	je is388
 	cmp dx, 389h
 	je is389
-normal:
 endif
 
+normal:
 	jmp [vars.rmcb]
 
 if HANDLE_IN_388H_DIRECTLY

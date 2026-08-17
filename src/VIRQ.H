@@ -10,9 +10,7 @@ extern "C"
 #endif
 
 uint8_t VPIC_Acc(uint16_t port, uint8_t val, uint16_t out);
-#ifdef CARD_TP755
 uint8_t VPIC_PassAcc(uint16_t port, uint8_t val, uint16_t out);  /* 0xA0 passthrough */
-#endif
 void VPIC_Init( uint8_t );
 
 void VIRQ_Invoke( void );

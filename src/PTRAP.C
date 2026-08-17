@@ -95,7 +95,6 @@ static const uint8_t ChannelPageMap[] = { 0x87, 0x83, 0x81, 0x82, -1, 0x8b, 0x89
 static uint16_t PortTable[] = {
 	0x388, 0x389, 0x38A, 0x38B | 0x8000,
 	0x20, 0x21 | 0x8000,
-#ifdef CARD_TP755
 	/* 0xA0 is trapped ONLY so multi-byte accesses that START there reach our
 	 * decomposer: the CPU faults a word/dword access if ANY of its bytes has
 	 * an IOPM bit set, but both Jemm (v5.84+ raw-splits unmatched accesses to
@@ -105,9 +104,6 @@ static uint16_t PortTable[] = {
 	 * (bench 2026-08-14, the MI1 resurrection). Byte content on 0xA0 is never
 	 * virtualized: VPIC_PassAcc, and the v86 stub short-circuits it. */
 	0xA0, 0xA1 | 0x8000,
-#else
-	0xA1 | 0x8000,
-#endif
 	0x02, 0x03,                   /* ch 1; will be modified if LDMA != 1 */
 	0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F | 0x8000,
 #if SB16
@@ -135,12 +131,8 @@ static uint16_t PortTable[] = {
 static PORT_TRAP_HANDLER PortHandler[] = {
 	VOPL3_388, VOPL3_389, VOPL3_38A, VOPL3_38B,
 	VPIC_Acc, VPIC_Acc,    /* 0x20, 0x21 */
-#ifdef CARD_TP755
 	VPIC_PassAcc,          /* 0xA0: passthrough (trapped for the decomposer) */
 	VPIC_Acc,              /* 0xA1 */
-#else
-	VPIC_Acc,              /* 0xA1 */
-#endif
 	VDMA_Acc, VDMA_Acc,    /* base+cnt for ch 1; will be modified if LDMA != 1 */
 	VDMA_Acc, VDMA_Acc, VDMA_Acc, VDMA_Acc, VDMA_Acc, VDMA_Acc, VDMA_Acc, VDMA_Acc, /* 0x08-0x0F */
 	VDMA_Acc,              /* page reg for ch 1; will be modified if LDMA != 1 */
@@ -165,7 +157,6 @@ static PORT_TRAP_HANDLER PortHandler[] = {
 /* state of trapped ports */
 static uint16_t PortState[countof(PortHandler)];
 
-#ifdef CARD_TP755
 #if HANDLE_IN_388H_DIRECTLY
 static void SyncOplStatusCache( void );
 static int IsOplHandler( PORT_TRAP_HANDLER h );
@@ -212,7 +203,6 @@ static uint8_t PTRAP_TrapByte( uint16_t port, uint8_t val, uint16_t flags )
     }
     return UntrappedIO_IN( port );
 }
-#endif
 
 /* real-mode port trap handler;
  * called by SwitchStackIOrmcb().
@@ -230,7 +220,6 @@ static void RM_TrapHandler( __dpmi_regs * regs)
      * regs.x.ch:
      * bit[1]: IF
      */
-#ifdef CARD_TP755
     /* Jemm's v86 monitor size bits: CL.3=word, CL.4=dword (QPIEMU passes CL
      * through). Decompose byte-wise, low byte first (Jemm's own Simulate_IO
      * order), so e.g. the IMR half of a word "OUT 0A0h,AX" goes through
@@ -255,10 +244,9 @@ static void RM_TrapHandler( __dpmi_regs * regs)
         regs->x.flags &= ~CPU_CFLAG;
         return;
     }
-#endif
     for ( i = 0; i < maxports; i++ ) {
         if( PortTable[i] == port ) {
-#if defined(CARD_TP755) && HANDLE_IN_388H_DIRECTLY
+#if HANDLE_IN_388H_DIRECTLY
             if ( IsOplHandler( PortHandler[i] ) ) {
                 PTRAP_DrainOplRing();       /* buffered writes are older */
                 regs->h.al = PortHandler[i]( port, regs->h.al, regs->x.cx );
@@ -301,7 +289,6 @@ static void RM_TrapHandler( __dpmi_regs * regs)
  * called by SwitchStackIO();
  */
 
-#ifdef CARD_TP755
 /* hdpmi's errcode size bits differ from Jemm's: 10h=word, 20h=dword (see
  * stackio.asm, which already stores AX/EAX back for them). Return widened to
  * uint32_t so a decomposed word/dword IN reaches the client; the asm side
@@ -347,26 +334,6 @@ uint32_t PTRAP_PM_TrapHandler( uint16_t port, uint16_t flags, uint32_t value )
     } else
         return UntrappedIO_IN( port );
 }
-#else
-uint8_t PTRAP_PM_TrapHandler( uint16_t port, uint16_t flags, uint8_t value )
-////////////////////////////////////////////////////////////////////////////
-{
-    int i;
-    for( i = 0; i < maxports; i++ )
-        if( PortTable[i] == port) {
-            return PortHandler[i](port, value, flags );
-        }
-
-    /* ports that are trapped, but not handled; this may happen, since
-     * hdpmi32i's support for port trapping is limited to 8 ranges.
-     */
-    if ( flags & TRAPF_OUT) {
-        UntrappedIO_OUT( port, value );
-        return value;
-    } else
-        return UntrappedIO_IN( port );
-}
-#endif
 
 
 //https://www.cs.cmu.edu/~ralf/papers/qpi.txt
@@ -462,7 +429,7 @@ struct rmcode1 {   /* structure must match definitions in rmcode1.asm! */
     uint16_t data; /* LOW byte: current OPL index shadow; HIGH: 0x388 status cache */
     uint16_t wPort; /* used for PIC port trapping; contains either 0x0020 or 0xffff */
     uint32_t qpi;  /* QPI entry */
-#if defined(CARD_TP755) && HANDLE_IN_388H_DIRECTLY
+#if HANDLE_IN_388H_DIRECTLY
     uint16_t rseg;  /* OPL write ring: real-mode segment (paragraph-aligned) */
     uint16_t rhead; /*   producer slot (v86 stub) */
     uint16_t rtail; /*   consumer slot (PTRAP_DrainOplRing) */
@@ -472,7 +439,7 @@ struct rmcode1 {   /* structure must match definitions in rmcode1.asm! */
     uint8_t codev86[]; /* v86 code */
 };
 
-#if defined(CARD_TP755) && HANDLE_IN_388H_DIRECTLY
+#if HANDLE_IN_388H_DIRECTLY
 /* The v86 stub answers byte reads of 0x388 from rmcode1.data's high byte
  * (vars._0005) with ZERO logic of its own; this refresh -- run after every
  * OPL trap the C side handles -- makes vopl3.cpp the single source of truth
@@ -596,7 +563,7 @@ bool PTRAP_Prepare_RM_PortTrap()
 #if HANDLE_IN_388H_DIRECTLY || !RMPICTRAPDYN
     /* copy 16-bit code to DOS memory (PSP:60h -- or the registered
      * DOS-block home when the TP755 write-ring build outgrew the PSP) */
-#if defined(CARD_TP755) && HANDLE_IN_388H_DIRECTLY
+#if HANDLE_IN_388H_DIRECTLY
     dosmem = RMStubLinear ? NearPtr(RMStubLinear)
                           : NearPtr(_my_psp() + DOSMEMSTART);
     dosheap = copyrmcode( (void *)dosmem, 0 );
@@ -638,7 +605,7 @@ bool PTRAP_Prepare_RM_PortTrap()
     /* set new trap handler ES:DI */
     //r.x.di = 4+2+2+4;
     QPI_regs.x.di = offsetof(struct rmcode1, codev86);
-#if defined(CARD_TP755) && HANDLE_IN_388H_DIRECTLY
+#if HANDLE_IN_388H_DIRECTLY
     QPI_regs.x.es = RMStubLinear ? (uint16_t)(RMStubLinear >> 4)
                                  : ((_my_psp() + DOSMEMSTART) >> 4);
 #else
@@ -729,7 +696,7 @@ void PTRAP_SetPICPortTrap( int bSet )
         /* patch the 16-bit real-mode code stored in the PSP;
          * see rmcode1.asm, wPICp.
          */
-#if defined(CARD_TP755) && HANDLE_IN_388H_DIRECTLY
+#if HANDLE_IN_388H_DIRECTLY
         struct rmcode1 *dosmem = RMStubLinear ? NearPtr(RMStubLinear)
                                               : NearPtr(_my_psp() + DOSMEMSTART);
 #else
@@ -921,11 +888,7 @@ void PTRAP_Prepare( int opl, int sbaddr, int dma, int hdma, int sndirq )
     PortTable[portranges[DMAPG_PDT]] = ChannelPageMap[ dma ];
     /* if the sound hw IRQ is < 8, the slave PIC doesn't need to be trapped */
     if ( sndirq < 8 ) {
-#ifdef CARD_TP755
         PDT_DelEntries( portranges[SPIC_PDT], maxports, 2 );  /* 0xA0 + 0xA1 */
-#else
-        PDT_DelEntries( portranges[SPIC_PDT], maxports, 1 );
-#endif
     }
 #if SB16
     if ( hdma ) {

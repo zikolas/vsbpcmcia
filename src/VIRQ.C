@@ -152,7 +152,6 @@ uint8_t VPIC_Acc(uint16_t port, uint8_t val, uint16_t flags)
     return (flags & TRAPF_OUT) ? (VPIC_Write(port, val), val) : VPIC_Read(port);
 }
 
-#ifdef CARD_TP755
 /* Slave PIC command port 0xA0: never virtualized (SB IRQ is on the master),
  * trapped ONLY so a multi-byte access starting there reaches the decomposer
  * in ptrap.c -- a guest 16-bit "OUT 0A0h,AX" carries an IMR byte for 0xA1
@@ -169,7 +168,6 @@ uint8_t VPIC_PassAcc(uint16_t port, uint8_t val, uint16_t flags)
     }
     return UntrappedIO_IN(port);
 }
-#endif
 
 void VPIC_Init( uint8_t hwirq )
 ///////////////////////////////
