@@ -10,6 +10,9 @@
 #define EMU_CHIPS_0106  8 // Live 24, Audigy LS
 #define EMU_CHIPS_0108 16 // Audigy2 Value
 #define EMU_CHIPS_0151 32 // P16V (Audigy 2,4)
+#define EMU_CHIPS_CARDBUS 64 // CardBus board (Audigy 2 ZS Notebook [SB0530]):
+                             // needs the port+0x38 wake-up before any other
+                             // register access, and has NO ac97 codec
 
 #define EMU_CHIPS_24BIT (EMU_CHIPS_0106 | EMU_CHIPS_0151)
 

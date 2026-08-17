@@ -23,6 +23,7 @@
 #include "LINEAR.H"
 #include "PTRAP.H"
 #include "VOPL3.H"
+#include "FMVOL.H"
 #include "VDMA.H"
 #include "VIRQ.H"
 #include "VSB.H"
@@ -578,10 +579,23 @@ static void PDT_DelEntries( int start, int end, int entries )
  *
  * The SB base is 16-byte aligned, so the low two bits of the port select the
  * OPL3 port pair for both alias windows (base+8/9 -> 388/389).
+ *
+ * With /FMVOL armed the real 0x388-0x38B are themselves trapped for carrier
+ * scaling, so alias traffic is routed through those same handlers -- writing
+ * straight to the chip here would sneak past the attenuation and play the FM
+ * alias at full volume.
  */
 static uint8_t FM_Alias( uint16_t port, uint8_t val, uint16_t flags )
 {
     uint16_t fm = 0x388 + (port & 3);
+    if ( FMVOL_Active() ) {
+        switch ( port & 3 ) {
+        case 0:  return FMVOL_388( fm, val, flags );
+        case 1:  return FMVOL_389( fm, val, flags );
+        case 2:  return FMVOL_38A( fm, val, flags );
+        default: return FMVOL_38B( fm, val, flags );
+        }
+    }
     if ( flags & TRAPF_OUT ) {
         UntrappedIO_OUT( fm, val );
         return val;
@@ -631,17 +645,29 @@ void PTRAP_Prepare( int opl, int sbaddr, int dma, int hdma, int sndirq )
 
     /* if no OPL3 emulation, skip ports 0x388-0x38b, 0x220-0x223 and 0x228-0x229 */
     if ( !opl ) {
-        int b;
-        PDT_DelEntries( portranges[OPL3_PDT], maxports, 4 );
-        /* 0x388-0x38B stay UNTRAPPED (guest AdLib rides the real ESFM direct),
-         * but the SB-base aliases are KEPT and forwarded -- see FM_Alias(). */
-        b = portranges[SB_PDT];
-        PortHandler[b+0] = FM_Alias;   /* base+0 */
-        PortHandler[b+1] = FM_Alias;   /* base+1 */
-        PortHandler[b+2] = FM_Alias;   /* base+2 */
-        PortHandler[b+3] = FM_Alias;   /* base+3 */
-        PortHandler[b+7] = FM_Alias;   /* base+8 */
-        PortHandler[b+8] = FM_Alias;   /* base+9 */
+        if ( FMVOL_Active() ) {
+            /* FMVOL: keep 0x388-0x38B trapped, but filtered+forwarded to the
+             * REAL OPL3 with carrier-level scaling.  Because these are the
+             * ordinary port traps (QPI for V86, HDPMI32i for PM), this is the
+             * FM volume protected-mode games get - the half a JLM can't reach.
+             * The 0x220-0x223/0x228-0x229 FM aliases still go: the CF-VEW211
+             * decodes FM at 0x388 only. */
+            int f = portranges[OPL3_PDT];
+            PortHandler[f+0] = FMVOL_388; PortHandler[f+1] = FMVOL_389;
+            PortHandler[f+2] = FMVOL_38A; PortHandler[f+3] = FMVOL_38B;
+        } else
+            PDT_DelEntries( portranges[OPL3_PDT], maxports, 4 );
+        /* The SB-base FM aliases are KEPT and forwarded to 0x388-0x38B rather
+         * than dropped -- games probe them to decide a Sound Blaster exists.
+         * See FM_Alias().  (The CF-VEW211 decodes FM at 0x388 only, which is
+         * exactly where these are sent.) */
+        { int b = portranges[SB_PDT];
+          PortHandler[b+0] = FM_Alias;   /* base+0 */
+          PortHandler[b+1] = FM_Alias;   /* base+1 */
+          PortHandler[b+2] = FM_Alias;   /* base+2 */
+          PortHandler[b+3] = FM_Alias;   /* base+3 */
+          PortHandler[b+7] = FM_Alias;   /* base+8 */
+          PortHandler[b+8] = FM_Alias; } /* base+9 */
     }
 
     /* delete empty port ranges */

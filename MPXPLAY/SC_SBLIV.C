@@ -30,8 +30,22 @@
 #include "AC97MIX.H"
 #include "EMU10K1.H"
 #include "SC_SBLIV.H"
+#ifdef CARD_AUDIGY
+#include "emu_wt.h"
+#include <go32.h>       /* AUDTIMER RTC pump: go32 vector shim + telemetry pokes */
+#include <sys/farptr.h>
+#include <dpmi.h>
+#endif
 
+#ifdef CARD_AUDIGY
+/* A soundfont's sample pool lives in this address space too, so 4 MB is not
+ * enough -- a 6 MB GM font alone needs 1408 pages. 8192 is the hardware
+ * maximum (MAP_PTI_MASK is 13 bits = 32 MB) and costs 28 kB more than the
+ * default, which only this build pays. */
+#define MAXPAGES        8192
+#else
 #define MAXPAGES        1024 /* true max is 8192, but 1024 wastes 28 kB less */
+#endif
 #define LOOPINT         1 /* v1.9: 1=use loop interrupt; 0=use timer interrupt */
 
 #define VOICE_FLAGS_MASTER   0x01
@@ -48,9 +62,26 @@
 
 static void snd_emu10kx_fx_init( struct emu10k1_card *card, struct globalvars const *gvars);
 
+#ifdef CARD_AUDIGY
+/* PTR is a shared index register and every access is a non-atomic multi-op
+ * sequence. The sound ISR runs with interrupts enabled (SETIF) and NESTS --
+ * stackisr.asm exists to support 16 levels of it -- so one level's PTR/DATA
+ * pair can be split by another level's, sending the DATA op to whatever
+ * register the nested pass selected. Harmless at upstream's handful of ops
+ * per interrupt; fatal once the wavetable's MIDI pump issues ~60 per note
+ * (CANYON.MID wedged the box at random points in proportion to note
+ * density). Guard the whole sequence in the primitive itself. */
+#define PTR_GUARD_ENTER()  uint32_t flags_; 	__asm__ __volatile__("pushfl; popl %0; cli" : "=r"(flags_) : : "memory")
+#define PTR_GUARD_LEAVE()  	__asm__ __volatile__("pushl %0; popfl" : : "r"(flags_) : "memory")
+#else
+#define PTR_GUARD_ENTER()
+#define PTR_GUARD_LEAVE()
+#endif
+
 static void emu10k1_writeptr( struct emu10k1_card *card, uint32_t reg, uint32_t channel, uint32_t data)
 ///////////////////////////////////////////////////////////////////////////////////////////////////////
 {
+	PTR_GUARD_ENTER();
 	outl(card->iobase + PTR, (reg << 16) | channel );
 	if ( reg & 0xff000000 ) {
 		uint32_t mask;
@@ -64,6 +95,7 @@ static void emu10k1_writeptr( struct emu10k1_card *card, uint32_t reg, uint32_t 
 		data |= inl(card->iobase + DATA) & ~mask;
 	}
 	outl(card->iobase + DATA, data);
+	PTR_GUARD_LEAVE();
 	return;
 }
 
@@ -72,6 +104,7 @@ static uint32_t emu10k1_readptr( struct emu10k1_card *card, uint32_t reg, uint32
 {
 	uint32_t val;
 
+	PTR_GUARD_ENTER();
 	outl(card->iobase + PTR, (reg << 16) | channel);
 	val = inl(card->iobase + DATA);
 	if ( reg & 0xff000000 ) {
@@ -82,8 +115,10 @@ static uint32_t emu10k1_readptr( struct emu10k1_card *card, uint32_t reg, uint32
 		offset = (reg >> 16) & 0x1f;
 		mask = ((1 << size) - 1) << offset;
 
+		PTR_GUARD_LEAVE();
 		return (val & mask) >> offset;
 	}
+	PTR_GUARD_LEAVE();
 	return val;
 }
 
@@ -102,6 +137,291 @@ static uint32_t emu10k1_ptr20_read( struct emu10k1_card *card, uint32_t reg, uin
 	outl(card->iobase + PTR2, (reg << 16) | chn);
 	val = inl(card->iobase + DATA2);
 	return val;
+}
+
+#ifdef CARD_AUDIGY
+/* =========================================================================
+ * AUDTIMER=1 -- RTC (IRQ8) pump mode for interrupt-dead CardBus hosts.
+ *
+ * On bridges whose INTA never reaches the PIC (X60s: Ricoh RL5C476-II on
+ * ICH7 -- no parallel-ISA route exists at all), the backend lies
+ * card_irq = 8 and the generic engine follows: the vector hook (sndisr.c),
+ * VPIC guest protection of IRQ8, the slave-PIC trap and the cascade unmask
+ * are all keyed off AU_getirq. The Audigy engine tolerates any tick rate
+ * because pacing is position-based (AU_cardbuf_space reads CCCA_CURRADDR
+ * against card_dmalastput), never IRQ-count-based. In this mode the card's
+ * own interrupts stay fully disabled -- INTENABLE=0, no CLIEL, no dummy
+ * voice 2 -- so INTA never asserts and a dead or floating line can't storm
+ * either.
+ *
+ * The machinery is a transplant of the fleet-proven PCMCIA recipe: RTC
+ * helpers from sc_es1688.c, verify-before-revive watchdog + tick counter
+ * from sc_vew211.c, chained IRQ0 heartbeat as the guest-proof watchdog
+ * host. Everything is static on purpose: sc_es1688.c is linked into this
+ * build too and keeps its own private copies of the same names.
+ * ========================================================================= */
+static int                aud_timer;        /* AUDTIMER=1: pump mode armed */
+static unsigned char      aud_rtc_rs = 6;   /* SBERTC=3..15 rate select; 6 = 1024 Hz */
+static unsigned           aud_wt_div = 12;  /* EMUWT_Poll runs every Nth tick (~83 Hz) */
+static volatile uint32_t  aud_tick_seq;     /* ++ per delivered RTC tick */
+
+/* go32 shim, same shape as sc_es1688.c's (statics there too) */
+typedef struct { int intno; _go32_dpmi_seginfo si, oldsi; } DPMI_ISR_HANDLE;
+static int DPMI_InstallISR(int intno, void (*isr)(void), DPMI_ISR_HANDLE *h, int chain)
+{
+	h->intno = intno;
+	if (_go32_dpmi_get_protected_mode_interrupt_vector(intno, &h->oldsi)) return -1;
+	h->si.pm_offset = (unsigned long)isr;
+	h->si.pm_selector = _go32_my_cs();
+	if (chain)
+		return _go32_dpmi_chain_protected_mode_interrupt_vector(intno, &h->si) ? -1 : 0;
+	if (_go32_dpmi_allocate_iret_wrapper(&h->si)) return -1;
+	return _go32_dpmi_set_protected_mode_interrupt_vector(intno, &h->si) ? -1 : 0;
+}
+static void DPMI_UninstallISR(DPMI_ISR_HANDLE *h)
+{ _go32_dpmi_set_protected_mode_interrupt_vector(h->intno, &h->oldsi); }
+static uint8_t DPMI_DisableInterrupt(void)
+{
+	unsigned f;
+	__asm__ __volatile__("pushfl; popl %0" : "=r"(f));           /* capture virtual IF */
+	__asm__ __volatile__("movw $0x0900,%%ax; int $0x31" ::: "eax","cc");
+	return (f & 0x200) ? 1 : 0;
+}
+static void DPMI_RestoreInterrupt(uint8_t prev)
+{ if (prev) __asm__ __volatile__("movw $0x0901,%%ax; int $0x31" ::: "eax","cc"); }
+
+/* RTC periodic arm/disarm (sc_es1688.c, verbatim except the rate variable) */
+static void rtc_enable(void)
+{
+	uint8_t f = DPMI_DisableInterrupt();
+	outportb(0x70,0x8A); { unsigned char a=(unsigned char)inportb(0x71); outportb(0x70,0x8A); outportb(0x71,(a&0xF0)|aud_rtc_rs); }
+	outportb(0x70,0x8B); { unsigned char b=(unsigned char)inportb(0x71); outportb(0x70,0x8B); outportb(0x71,b|0x40); }
+	outportb(0x70,0x0C); inportb(0x71);
+	DPMI_RestoreInterrupt(f);
+}
+static void rtc_disable(void)
+{
+	uint8_t f = DPMI_DisableInterrupt();
+	outportb(0x70,0x8B); { unsigned char b=(unsigned char)inportb(0x71); outportb(0x70,0x8B); outportb(0x71,b&~0x40); }
+	outportb(0x70,0x0C); inportb(0x71);
+	DPMI_RestoreInterrupt(f);
+}
+
+/* Verify-before-revive watchdog (sc_vew211.c design). Trigger on OUR tick
+ * counter going stale, then fix only what is provably wrong: PIE killed
+ * (the Theme Hospital class), IRQ8 masked at the slave PIC, and -- only
+ * after 1-2 s of confirmed silence measured on the RTC seconds register,
+ * the one guest-proof wall clock -- the destructive reg-C heal. A blind
+ * reg-C read STEALS the pending tick (the VEW211 revival-storm lesson:
+ * 141 spurious revives in one load screen, measured). */
+static void aud_watchdog(void)
+{
+	static unsigned char aud_tel_revive;
+	static uint32_t wd_seq;
+	static unsigned char wd_stale, wd_sec, wd_secchg;
+	unsigned char b, sec;
+	uint8_t f;
+	uint32_t seq = aud_tick_seq;
+	if (seq != wd_seq) { wd_seq = seq; wd_stale = 0; wd_secchg = 0; return; }
+	if (++wd_stale < 2) return;                       /* debounce one visit */
+	wd_stale = 0;
+	f = DPMI_DisableInterrupt();
+	outportb(0x70,0x8B); b   = (unsigned char)inportb(0x71);
+	outportb(0x70,0x80); sec = (unsigned char)inportb(0x71);
+	DPMI_RestoreInterrupt(f);
+	if (!(b & 0x40)) {                                /* PIE killed */
+		rtc_enable();
+		_farpokeb(_dos_ds, 0x4F4, ++aud_tel_revive);
+		return;
+	}
+	if (inportb(0xA1) & 0x01) {                       /* IRQ8 masked at the slave PIC */
+		f = DPMI_DisableInterrupt();
+		outportb(0xA1, (unsigned char)(inportb(0xA1) & ~0x01));
+		DPMI_RestoreInterrupt(f);
+		_farpokeb(_dos_ds, 0x4F4, ++aud_tel_revive);
+		return;
+	}
+	if (sec != wd_sec) {                              /* armed yet silent: confirm by */
+		wd_sec = sec;                                 /* real elapsed time before the */
+		if (++wd_secchg >= 2) {                       /* PF-eating reg-C heal         */
+			wd_secchg = 0;
+			f = DPMI_DisableInterrupt();
+			outportb(0x70,0x0C); (void)inportb(0x71);
+			DPMI_RestoreInterrupt(f);
+			_farpokeb(_dos_ds, 0x4F4, ++aud_tel_revive);
+		}
+	}
+}
+
+/* Chained IRQ0 heartbeat: the guest-independent watchdog host. During a
+ * guest's silent IRQ-wait (DOOM's I_StartupSound does 5-6 s of NO port
+ * I/O) none of our other code runs -- the PIT always ticks, so a dead
+ * pump can never stay dead longer than one timer tick. */
+static DPMI_ISR_HANDLE aud_i8_handle;
+static int aud_i8_on;
+static void aud_irq0_isr(void)
+{
+	aud_watchdog();
+}
+static void aud_i8_install(void)
+{
+	if (aud_i8_on) return;
+	if (getenv("AUDNOI8")) return;   /* diagnostic kill-switch, like ESNOI8 */
+	if (DPMI_InstallISR(0x08, &aud_irq0_isr, &aud_i8_handle, 1) != 0) return;
+	aud_i8_on = 1;
+}
+static void aud_i8_remove(void)
+{
+	if (!aud_i8_on) return;
+	DPMI_UninstallISR(&aud_i8_handle);
+	aud_i8_on = 0;
+}
+
+/* EMUWT_Poll cadence gate for sndisr.c: the envelope stepper hard-assumes
+ * the ~83 Hz loop-interrupt tick (~12 ms per step, emu_wt.c) -- run it at
+ * the raw RTC rate and every fade lands ~12x too fast. Unity outside
+ * timer mode. */
+int SBALL_WTTick(void)
+{
+	static unsigned n;
+	if (!aud_timer) return 1;
+	if (++n < aud_wt_div) return 0;
+	n = 0;
+	return 1;
+}
+#endif /* CARD_AUDIGY */
+
+/* Audigy 2 ZS Notebook [SB0530] wake-up.
+ *
+ * The CA0108 on this CardBus board powers up with its I/O register file
+ * inert: it claims cycles in its BAR but never completes a READ, which hard
+ * hangs the host (no recovery -- the machine has to be reset).  Linux's
+ * snd_emu10k1_cardbus_init() says why: this sequence runs "before the rest of
+ * the IO-Ports become active".  It must therefore be the very first thing
+ * done to the card, before hw_init or any other register touch.
+ *
+ * Linux interleaves dummy reads between the writes, but discards them
+ * (__always_unused).  That matters here: on an uninitialised card only writes
+ * complete, so we issue writes only.  Verified on a ThinkPad 235 (Ricoh
+ * RL5C476 socket) -- afterwards HCFG reads back 0001800C and the wall clock
+ * ticks.
+ */
+static void snd_emu10k1_cardbus_init( struct emu10k1_card *card )
+/////////////////////////////////////////////////////////////////
+{
+	unsigned int special_port = card->iobase + 0x38;
+
+	dbgprintf(("snd_emu10k1_cardbus_init: iobase=%X\n", card->iobase));
+
+	outl(special_port, 0x00d00000);
+	outl(special_port, 0x00d00001);
+	outl(special_port, 0x00d0005f);
+	outl(special_port, 0x00d0007f);
+	outl(special_port, 0x0090007f);
+
+	/* Attenuate playback: without this the output is 12dB too hot and
+	 * distorts (the Windows driver attenuates some other way). */
+	emu10k1_ptr20_write(card, TINA2_VOLUME, 0, 0xfefefefe);
+
+	pds_delay_10us(20000);   /* 200ms, as in ALSA */
+	return;
+}
+
+/* --- Audigy 2 ZS Notebook analog output: Wolfson WM8768/WM8568 over SPI ---
+ *
+ * This board has no ac97 codec; its analog path is a Wolfson DAC programmed
+ * over an SPI shim in the p17v register file.  Leave it unprogrammed and the
+ * analog stage sits wide open, so playback arrives grossly over level and
+ * clips -- attenuating in the FX engine only trades that for quantisation
+ * noise, because the gain is downstream of the DAC.
+ */
+#define P17V_SPI   0x3c     /* SPI interface register (p16v/p17v space) */
+
+static int snd_emu10k1_spi_write( struct emu10k1_card *card, unsigned int data)
+///////////////////////////////////////////////////////////////////////////////
+{
+	unsigned int reset, set, tmp;
+	int n;
+
+	if (data > 0xffff)      /* 16-bit values only */
+		return 1;
+
+	tmp   = emu10k1_ptr20_read(card, P17V_SPI, 0);
+	reset = (tmp & ~0x3ffff) | 0x20000;    /* set xxx20000 */
+	set   = reset | 0x10000;               /* set xxx1xxxx */
+
+	emu10k1_ptr20_write(card, P17V_SPI, 0, reset | data);
+	tmp = emu10k1_ptr20_read(card, P17V_SPI, 0);   /* write post */
+	emu10k1_ptr20_write(card, P17V_SPI, 0, set | data);
+
+	/* wait for the status bit to fall back to 0 */
+	for (n = 0; n < 100; n++) {
+		pds_delay_10us(1);
+		tmp = emu10k1_ptr20_read(card, P17V_SPI, 0);
+		if (!(tmp & 0x10000))
+			break;
+	}
+	if (n >= 100)
+		return 1;   /* timed out */
+
+	emu10k1_ptr20_write(card, P17V_SPI, 0, reset | data);
+	tmp = emu10k1_ptr20_read(card, P17V_SPI, 0);   /* write post */
+	return 0;
+}
+
+/* WM8768 register set, verbatim from ALSA's spi_dac_init[] */
+static const unsigned int spi_dac_init[] = {
+	0x00ff, 0x02ff, 0x0400, 0x0520, 0x0600, 0x08ff, 0x0aff,
+	0x0cff, 0x0eff, 0x10ff, 0x1200, 0x1400, 0x1480, 0x1800,
+	0x1aff, 0x1cff, 0x1e00, 0x0530, 0x0602, 0x0622, 0x1400
+};
+
+/* The nine per-channel volume registers of the set above, register field only.
+ * ALSA leaves them all at 0xff (maximum), which on this board is far too hot --
+ * playback arrives so far over level that it clips, and pulling it back in the
+ * FX engine only trades the clipping for quantisation noise, because the gain
+ * is downstream of the converter. Attenuating in the DAC itself is free.
+ *
+ * The SPI word is a 7-bit register plus 9-bit data, and bit 8 of the data is
+ * the volume UPDATE strobe: write a level without it and the DAC latches the
+ * value but never applies it (silently does nothing).
+ *
+ * 0xC0 measured by ear on a ThinkPad 235 into headphones. /VOL still works as
+ * a fader on top of this, and DACVOL.EXE can retune it live.
+ */
+/* Reference level set by ear through AUDMIX against SPEAKERS (2026-08-11);
+ * the old 0xC0 was tuned on sensitive reference headphones and left speaker
+ * users short. 0xEF = 93% on AUDMIX's MAIN slider. */
+#define ZSNB_DAC_VOLUME   0xEF
+#define ZSNB_DAC_UPDATE   0x0100
+
+static const unsigned int spi_dac_vol_regs[] = {
+	0x0000, 0x0200, 0x0800, 0x0a00, 0x0c00, 0x0e00, 0x1000, 0x1a00, 0x1c00
+};
+
+static void snd_emu10k1_spi_dac_init( struct emu10k1_card *card )
+/////////////////////////////////////////////////////////////////
+{
+	int n;
+
+	dbgprintf(("snd_emu10k1_spi_dac_init\n"));
+
+	/* ALSA's sequence first: it sets up the interface format and control
+	 * registers, which we do not want to second-guess. */
+	for (n = 0; n < (int)(sizeof(spi_dac_init)/sizeof(spi_dac_init[0])); n++)
+		snd_emu10k1_spi_write(card, spi_dac_init[n]);
+
+	/* then drop the volume registers to a usable level */
+	for (n = 0; n < (int)(sizeof(spi_dac_vol_regs)/sizeof(spi_dac_vol_regs[0])); n++)
+		snd_emu10k1_spi_write(card, spi_dac_vol_regs[n]
+		                            | ZSNB_DAC_UPDATE | ZSNB_DAC_VOLUME);
+
+	emu10k1_ptr20_write(card, 0x60, 0, 0x10);
+
+	/* GPIO: bit1 = speakers enabled, bit4 = IEC958 out. The Audigy 2 Value
+	 * GPIO values the 0108 path would otherwise write are wrong here. */
+	outw(card->iobase + A_IOCFG, 0x76);   /* Windows uses 0x3f76 */
+	return;
 }
 
 // init & close
@@ -283,6 +603,12 @@ static void snd_emu10k1_hw_init( struct emu10k1_card *card, struct audioout_info
 		outl(card->iobase + A_IOCFG, tmp);
 	}
 
+	/* ZS Notebook: program the Wolfson DAC and its GPIOs (ALSA order: right
+	 * after the 0108 block). The A_IOCFG writes further down are skipped for
+	 * this board so they cannot clobber the 0x76 set here. */
+	if (card->chips & EMU_CHIPS_CARDBUS)
+		snd_emu10k1_spi_dac_init(card);
+
 	if (card->chip_select & EMU_CHIPS_10KX) {
 		//buffer config
 		//  emu10k1_writeptr(card, PTB, 0, (uint32_t) card->virtualpagetable);
@@ -315,7 +641,8 @@ static void snd_emu10k1_hw_init( struct emu10k1_card *card, struct audioout_info
 		}
 	}
 
-	if (card->chips & EMU_CHIPS_10K2) {    // enable analog output
+	/* not on the ZS Notebook: its GPIOs are set by snd_emu10k1_spi_dac_init() */
+	if ((card->chips & EMU_CHIPS_10K2) && !(card->chips & EMU_CHIPS_CARDBUS)) {    // enable analog output
 		/* v1.8: A_IOCFG is 16-bit only */
 		uint16_t tmp = inw(card->iobase + A_IOCFG);
 		outw(card->iobase + A_IOCFG, tmp | A_IOCFG_GPOUT0);
@@ -328,7 +655,9 @@ static void snd_emu10k1_hw_init( struct emu10k1_card *card, struct audioout_info
 	//Enable the audio bit
 	outl(card->iobase + HCFG, inl(card->iobase + HCFG) | HCFG_AUDIOENABLE);
 
-	if ( card->chips & EMU_CHIPS_10K2 ) {
+	/* not on the ZS Notebook: spi_dac_init() already set A_IOCFG to 0x76, and
+	 * the Audigy 2 Value unmute values below are wrong for this board */
+	if (( card->chips & EMU_CHIPS_10K2 ) && !(card->chips & EMU_CHIPS_CARDBUS)) {
 		/* v1.8: A_IOCFG is 16-bit only */
 		//uint32_t tmp = inl(card->iobase + A_IOCFG);
 		uint16_t tmp = inw(card->iobase + A_IOCFG);
@@ -513,6 +842,11 @@ static void snd_emu10kx_fx_init( struct emu10k1_card *card, struct globalvars co
 
 		for (i = 0; i < 512 ; i++)
 			emu10k1_writeptr(card, A_FXGPREGBASE+i,0,0);  // clear GPRs
+#ifdef CARD_AUDIGY
+		/* group faders (see the DSP program below) start at unity */
+		emu10k1_writeptr(card, A_FXGPREGBASE+10, 0, 0x7fffffff);
+		emu10k1_writeptr(card, A_FXGPREGBASE+11, 0, 0x7fffffff);
+#endif
 
 #ifdef AUDIGY1_USE_AC97
 		if (card->chiprev != 4) { // Audigy1
@@ -522,6 +856,31 @@ static void snd_emu10kx_fx_init( struct emu10k1_card *card, struct globalvars co
 		} else
 #endif
 		{
+#ifdef CARD_AUDIGY
+			/* Group faders ahead of the master: the wavetable (emu_wt)
+			 * routes its voices to FX buses 4/5 while SB PCM + everything
+			 * in the PCM stream stays on 0/1, so the two can be balanced
+			 * independently (AUDMIX pokes these GPRs live):
+			 *   GPR 10 = WAVE gain (SB digital / PCM stream)
+			 *   GPR 11 = MIDI gain (hardware wavetable)
+			 *   GPR 12/13 = mixed L/R fed to the master stage */
+			A_OP(iMAC0, A_GPR(12), A_C_00000000, A_GPR(10), A_FXBUS(FXBUS_PCM_LEFT));
+			A_OP(iMAC0, A_GPR(12), A_GPR(12),    A_GPR(11), A_FXBUS(4));
+			A_OP(iMAC0, A_GPR(13), A_C_00000000, A_GPR(10), A_FXBUS(FXBUS_PCM_RIGHT));
+			A_OP(iMAC0, A_GPR(13), A_GPR(13),    A_GPR(11), A_FXBUS(5));
+
+			// Front Output + Master Volume
+			A_OP(iMAC0, A_EXTOUT(A_EXTOUT_AFRONT_L), 0xc0, A_GPR(8), A_GPR(12));
+			A_OP(iMAC0, A_EXTOUT(A_EXTOUT_AFRONT_R), 0xc0, A_GPR(9), A_GPR(13));
+
+			// Digital Front + Master Volume
+			A_OP(iMAC0, A_EXTOUT(A_EXTOUT_FRONT_L),  0xc0, A_GPR(8), A_GPR(12));
+			A_OP(iMAC0, A_EXTOUT(A_EXTOUT_FRONT_R),  0xc0, A_GPR(9), A_GPR(13));
+
+			// Audigy Drive, Headphone out + Master Volume
+			A_OP(iMAC0, A_EXTOUT(A_EXTOUT_HEADPHONE_L),0xc0,A_GPR(8),A_GPR(12));
+			A_OP(iMAC0, A_EXTOUT(A_EXTOUT_HEADPHONE_R),0xc0,A_GPR(9),A_GPR(13));
+#else
 			// Front Output + Master Volume
 			A_OP(iMAC0, A_EXTOUT(A_EXTOUT_AFRONT_L), 0xc0, A_GPR(8), A_FXBUS(FXBUS_PCM_LEFT));
 			A_OP(iMAC0, A_EXTOUT(A_EXTOUT_AFRONT_R), 0xc0, A_GPR(9), A_FXBUS(FXBUS_PCM_RIGHT));
@@ -533,6 +892,7 @@ static void snd_emu10kx_fx_init( struct emu10k1_card *card, struct globalvars co
 			// Audigy Drive, Headphone out + Master Volume
 			A_OP(iMAC0, A_EXTOUT(A_EXTOUT_HEADPHONE_L),0xc0,A_GPR(8),A_FXBUS(FXBUS_PCM_LEFT));
 			A_OP(iMAC0, A_EXTOUT(A_EXTOUT_HEADPHONE_R),0xc0,A_GPR(9),A_FXBUS(FXBUS_PCM_RIGHT));
+#endif
 
 			// Rear output + Master Volume
 			/* v1.8: "rear" output requires option /O1 */
@@ -567,7 +927,11 @@ static void snd_emu10kx_fx_init( struct emu10k1_card *card, struct globalvars co
 			snd_emu10kx_set_control_gpr( card, 8, i );
 			snd_emu10kx_set_control_gpr( card, 9, i );
 
-			snd_emu_ac97_mute(card,AC97_MASTER_VOL_STEREO); // for Audigy, we mute ac97 and use the philips 6 channel DAC instead
+			/* The ZS Notebook has no ac97 codec at all (SPI DAC + I2C ADC).
+			 * snd_emu_ac97_mute() READS AC97DATA, and with no codec on the
+			 * ac97 link that read never completes -> hard hang. */
+			if (!(card->chips & EMU_CHIPS_CARDBUS))
+				snd_emu_ac97_mute(card,AC97_MASTER_VOL_STEREO); // for Audigy, we mute ac97 and use the philips 6 channel DAC instead
 		}
 
 	} else { // SB Live
@@ -825,6 +1189,70 @@ static void snd_emu10k1_playback_start_voice( struct emu10k1_card *card, int voi
 	return;
 }
 
+#ifdef CARD_AUDIGY
+/* ---------------- hardware wavetable seam --------------------------------
+ * The wavetable itself lives in emu_wt.c; these are the only things it needs
+ * from here, all of which are static above.
+ *
+ * PTR is a shared index register and a write is two non-atomic I/O ops, so a
+ * sound interrupt landing between them would send our DATA to whatever
+ * register the ISR selected. The ISR cannot be preempted by us, so guarding
+ * this side alone closes the race.
+ */
+static __inline__ uint32_t emu_irq_off(void)
+{
+	uint32_t f;
+	__asm__ __volatile__("pushfl; popl %0; cli" : "=r"(f) : : "memory");
+	return f;
+}
+
+static __inline__ void emu_irq_restore(uint32_t f)
+{
+	__asm__ __volatile__("pushl %0; popfl" : : "r"(f) : "memory");
+}
+
+const uint32_t emuwt_maxpages = MAXPAGES;
+int emuwt_noio;     /* bisect: AUDWTNOIO -- synth runs, card is never touched */
+
+void EMU_WritePtr( struct emu10k1_card *card, uint32_t reg, uint32_t chn, uint32_t data)
+////////////////////////////////////////////////////////////////////////////////////////
+{
+	uint32_t f;
+	if (emuwt_noio)
+		return;
+	f = emu_irq_off();
+	emu10k1_writeptr(card, reg, chn, data);
+	emu_irq_restore(f);
+}
+
+uint32_t EMU_ReadPtr( struct emu10k1_card *card, uint32_t reg, uint32_t chn)
+/////////////////////////////////////////////////////////////////////////////
+{
+	uint32_t val, f;
+	if (emuwt_noio)
+		return 0;
+	f = emu_irq_off();
+	val = emu10k1_readptr(card, reg, chn);
+	emu_irq_restore(f);
+	return val;
+}
+
+uint32_t EMU_SrToPitch( uint32_t rate)
+{
+	return emu10k1_srToPitch(rate);
+}
+
+uint32_t EMU_CalcPitchTarget( uint32_t rate)
+{
+	return emu10k1_calc_pitch_target(rate);
+}
+
+uint32_t EMU_SelectInterprom( struct emu10k1_card *card, uint32_t pitch_target)
+{
+	return emu10k1_select_interprom(card, pitch_target);
+}
+#endif /* CARD_AUDIGY */
+
 static void snd_emu10k1_playback_stop_voice( struct emu10k1_card *card, int voice)
 //////////////////////////////////////////////////////////////////////////////////
 {
@@ -979,6 +1407,32 @@ static void snd_emu10kx_setrate( struct emu10k1_card *card, struct audioout_info
 	emu10k1_pcm_init_voice(card, 2, VOICE_FLAGS_MASTER, 0, (aui->gvars->period_size ? aui->gvars->period_size : 512) >> 2 );
 #endif
 	dbgprintf(("snd_emu10kx_setrate exit, freq=%u, dmabufsize=0x%X, voice_pitch_target=0x%X\n", aui->freq_card, dmabufsize, card->voice_pitch_target ));
+#ifdef CARD_AUDIGY
+	/* here rather than hw_init: the pitch values the voices need are only
+	 * computed above, and hw_init runs before AU_setrate().
+	 * Environment variables rather than command line options on purpose --
+	 * main.c is carrying unrelated uncommitted work. */
+	{
+		static int wt_started;
+		if (!wt_started) {
+			const char *sf = getenv("AUDSF2");
+			wt_started = 1;
+			if (getenv("AUDWT"))
+				EMUWT_Selftest(card);
+			if (sf && *sf && EMUWT_Init(card, sf)) {
+				const char *demo = getenv("AUDWTDEMO");
+				if (demo) {
+					int bank = 0, prog = 0;
+					if (*demo) {
+						prog = atoi(demo);
+						if (prog >= 128) { bank = 128; prog -= 128; }
+					}
+					EMUWT_Demo(bank, prog);
+				}
+			}
+		}
+	}
+#endif
 	return;
 }
 
@@ -988,10 +1442,16 @@ static void snd_emu10kx_pcm_start_playback( struct emu10k1_card *card)
 	snd_emu10k1_playback_start_voice(card,0,VOICE_FLAGS_MASTER);
 	snd_emu10k1_playback_start_voice(card,1,0);
 #if LOOPINT
+#ifdef CARD_AUDIGY
+	if (!aud_timer) {   /* pump mode: no CLIEL, no dummy voice -- INTA must never assert */
+#endif
 	/* v1.9: dummy voice just for interrupt generation */
 	emu10k1_writeptr( card, PTRX, 2, 0); /* set volume to 0 */
 	snd_emu10k1_playback_start_voice(card,2,VOICE_FLAGS_MASTER);
 	emu10k1_writeptr(card, CLIEL, 0, 1 << 2);
+#ifdef CARD_AUDIGY
+	}
+#endif
 #endif
 	return;
 }
@@ -1027,11 +1487,11 @@ static int snd_emu10kx_isr( struct emu10k1_card *card)
 	if ( interrupts ) {
 #if LOOPINT
 		if ( interrupts & IPR_CHANNELLOOP ) {
-			uint32_t tmp;
-			outl(card->iobase + PTR, CLIPL << 16 );
-			if ( tmp = inl( card->iobase + DATA ) ) {
-				outl(card->iobase + DATA, tmp);
-			}
+			/* via the (guarded) primitives: this raw PTR sequence was the
+			 * last one a nested ISR pass could split */
+			uint32_t tmp = emu10k1_readptr(card, CLIPL, 0);
+			if ( tmp )
+				emu10k1_writeptr(card, CLIPL, 0, tmp);
 		}
 #endif
 		emu10k1_writefn0(card, IPR, interrupts ); /* ack interrupt */
@@ -1319,7 +1779,9 @@ static const struct pci_device_s creative_devices[] = {
 static const struct emu_card_version_s emucard_versions[] = {
  {"Audigy 4 [SB0610]"          ,0x0008,0,0x10211102,EMU_CHIPS_10K2|EMU_CHIPS_0108,8},
  {"Audigy 2 Value [SB0400]"    ,0x0008,0,0x10011102,EMU_CHIPS_10K2|EMU_CHIPS_0108,8},
- //{"Audigy 2 ZS Notebook [SB0530]",0x0008,0,0x20011102,EMU_CHIPS_10K2|EMU_CHIPS_0108,8},
+ /* CardBus board: needs the port+0x38 wake-up, and has no ac97 codec
+  * (ALSA: spi_dac + i2c_adc, and notably NO ac97_chip). */
+ {"Audigy 2 ZS Notebook [SB0530]",0x0008,0,0x20011102,EMU_CHIPS_10K2|EMU_CHIPS_0108|EMU_CHIPS_CARDBUS,8},
  {"Audigy 2 Value [unknown]"   ,0x0008,0,0         ,EMU_CHIPS_10K2|EMU_CHIPS_0108,6},
  //{"E-mu 1212m [4001]"          ,0x0004,0,0x40011102,EMU_CHIPS_10K2|EMU_CHIPS_0102,6},
 
@@ -1445,6 +1907,12 @@ static int SBALL_adetect( struct audioout_info_s *aui )
 
 	card->chip_select = card->chips = card->card_capabilities->chips;
 
+	/* MUST come before any other I/O register access: on the CardBus board
+	 * the register file is inert until this runs, and a read would hang the
+	 * machine outright. */
+	if (card->chips & EMU_CHIPS_CARDBUS)
+		snd_emu10k1_cardbus_init(card);
+
 	/* check the 5 "families": 10k1, 10k2, p16v, audigyls, live24 */
 	for ( i = 0; i < 5; i++ ) {
 		card->driver_funcs = emu_driver_all_funcs[i];
@@ -1474,6 +1942,27 @@ static int SBALL_adetect( struct audioout_info_s *aui )
 
 	SBALL_select_mixer(card);
 
+#ifdef CARD_AUDIGY
+	/* AUDTIMER=1: interrupt-dead host (X60s class) -- drive the whole engine
+	 * from RTC IRQ8 instead of the card's INTA. The card_irq lie re-points
+	 * the vector hook, VPIC IRQ8 protection, slave-PIC trap and cascade
+	 * unmask, all downstream of AU_getirq. SBERTC=3..15 picks the tick rate
+	 * (32768 >> (rs-1) Hz): default 6 = 1024 Hz, 7 = 512 Hz buys CPU
+	 * headroom on slow hosts. Without the env var the interrupt path is
+	 * untouched. */
+	{
+		const char *e = getenv("AUDTIMER");
+		if (e && *e == '1') {
+			const char *t = getenv("SBERTC");
+			if (t) { int rs = atoi(t); if (rs >= 3 && rs <= 15) aud_rtc_rs = (unsigned char)rs; }
+			aud_wt_div = ((32768u >> (aud_rtc_rs - 1)) * 12u + 500u) / 1000u;
+			if (!aud_wt_div) aud_wt_div = 1;
+			aud_timer = 1;
+			aui->card_irq = 8;
+		}
+	}
+#endif
+
 	return 1;
 
 err_adetect:
@@ -1486,6 +1975,13 @@ static void SBALL_close( struct audioout_info_s *aui )
 {
 	struct emu10k1_card *card = aui->card_private_data;
 
+#ifdef CARD_AUDIGY
+	if (aud_timer) {
+		rtc_disable();
+		aud_i8_remove();
+		aud_timer = 0;
+	}
+#endif
 	if ( card ) {
 		if (card->iobase)
 			if ( card->driver_funcs->hw_close )
@@ -1516,6 +2012,20 @@ static void SBALL_start( struct audioout_info_s *aui )
 {
 	struct emu10k1_card *card = aui->card_private_data;
 
+#ifdef CARD_AUDIGY
+	if (aud_timer) {
+		/* Pump mode: no card interrupts at all. This runs after the CardBus
+		 * 0x38 wake-up (adetect) and before any unmask; INTENABLE=0 plus
+		 * the no-CLIEL/no-dummy-voice start_playback means INTA never
+		 * asserts on the dead line. */
+		emu10k1_writefn0(card, EMU10K_INTENABLE, 0 );
+		if ( card->driver_funcs->start_playback )
+			card->driver_funcs->start_playback( card );
+		rtc_enable();
+		aud_i8_install();
+		return;
+	}
+#endif
 	//emu10k1_writefn0(card, EMU10K_INTENABLE, INTE_FXDSPENABLE | INTE_INTERVALTIMERENB );
 #if !LOOPINT
 	emu10k1_writefn0(card, EMU10K_INTENABLE, INTE_SAMPLERATETRACKER | INTE_INTERVALTIMERENB );
@@ -1545,6 +2055,9 @@ static void SBALL_stop( struct audioout_info_s *aui )
 	if ( card->driver_funcs->stop_playback )
 		card->driver_funcs->stop_playback( card );
 
+	/* AUDTIMER: the RTC pump deliberately stays armed here -- stop fires on
+	 * EVERY rate change, and killing the pump there deadlocked the ES
+	 * backend once. Teardown lives in SBALL_close only. */
 	return;
 }
 
@@ -1609,6 +2122,23 @@ static int SBALL_IRQRoutine( struct audioout_info_s *aui )
 {
 	//dbgprintf(("SBALL_IRQRoutine\n"));
 	struct emu10k1_card *card = aui->card_private_data;
+#ifdef CARD_AUDIGY
+	if (aud_timer) {
+		uint8_t f;
+		++aud_tick_seq;
+		aud_watchdog();
+		f = DPMI_DisableInterrupt();               /* cli: the IRQ0 heartbeat must not */
+		outportb(0x70,0x0C); (void)inportb(0x71);  /* land between CMOS index and data */
+		DPMI_RestoreInterrupt(f);
+		/* belt and braces: we never enable an interrupt source, but an IPR
+		 * bit latched before INTENABLE=0 must not sit asserting a (possibly
+		 * floating) INTA forever. No CLIPL service -- no loop ints here. */
+		{ uint32_t ipr = inl(card->iobase + IPR);
+		  if (ipr) emu10k1_writefn0(card, IPR, ipr); }
+		return 1;   /* every IRQ8 is ours by construction; returning 0 would
+		             * chain SNDISR into the BIOS INT 70h handler */
+	}
+#endif
 	return card->driver_funcs->interrupt_isr( card );
 }
 

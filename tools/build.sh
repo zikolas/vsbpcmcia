@@ -1,6 +1,15 @@
 #!/bin/bash
 # VSBPCMCIA build: DJGPP + JWasm inside an amd64 Debian container.
 #
+# Card backend:   ./tools/build.sh              -> ES1688 build   (vsbpcm.exe)
+#                 CARD=VEW211 ./tools/build.sh  -> CS4231A build  (vsbpcmv.exe)
+#                 CARD=AUDIGY ./tools/build.sh  -> Audigy build   (vsbpcma.exe)
+#
+# CARD=AUDIGY is the odd one out: it keeps the ES1688 PCMCIA backend but ALSO
+# links the SB Live/Audigy driver (sc_sbliv + sc_sbl24 + pcibios + ac97mix) for
+# the CardBus Audigy 2 ZS Notebook, which is a PCI card rather than PCMCIA and
+# so needs CBGO/CBINIT to bring its socket up first.
+#
 # Host prerequisites (paths overridable via env):
 #   DJGPP_DIR - a DJGPP cross toolchain (i586-pc-msdosdjgpp-*), default ~/djgpp
 #   JWASM_BIN - a Linux JWasm binary (build: git clone JWasm; make -f GccUnix.mak),
@@ -36,9 +45,21 @@ if [ ! -f "$REPO/djgpp.mak" ] || [ ! -d "$REPO/src" ]; then
   exit 1
 fi
 
+if [ "$CARD" = "VEW211" ]; then
+  CARDDEF="-DCARD_VEW211"
+  OUTNAME="vsbpcmv"
+elif [ "$CARD" = "AUDIGY" ]; then
+  CARDDEF="-DCARD_AUDIGY"
+  OUTNAME="vsbpcma"
+else
+  CARDDEF=""
+  OUTNAME="vsbpcm"
+fi
+
 rm -f "$REPO"/djgpp/*.o "$REPO"/djgpp/*.ar
 
 docker run --rm --platform linux/amd64 \
+  -e CARDDEF="$CARDDEF" -e OUTNAME="$OUTNAME" \
   -v "$REPO":/build -v "$DJGPP_DIR":/opt/djgpp -v "$JWASM_BIN":/usr/local/bin/jwasm \
   -w /build debian:stable-slim bash -c '
   set -e
@@ -63,17 +84,19 @@ docker run --rm --platform linux/amd64 \
     | xargs -0 sed -i -E "s/(#[[:space:]]*include[[:space:]]*\")([^\"]+)(\")/\1\L\2\E\3/"
   rm -f djgpp/*.o djgpp/*.ar
 
-  echo "=== compiling objects ==="
-  make -f djgpp.mak 2>&1 | grep -viE "warning:|note:| \^|~~~|\| |In file included" | tail -8 || true
+  echo "=== compiling objects (${CARDDEF:-ES1688 default}) ==="
+  # CPPFLAGS too, not just CFLAGS: vopl3.cpp/dbopl.cpp use $(CPPFLAGS), and
+  # without the card define they compile away under NOFM -> undefined VOPL3_*.
+  make -f djgpp.mak CFLAGS="$CARDDEF" CPPFLAGS="$CARDDEF" 2>&1 | grep -viE "warning:|note:| \^|~~~|\| |In file included" | tail -8 || true
   cd djgpp
   echo "=== manual archive + link (Linux) ==="
   OBJ=$(ls *.o 2>/dev/null | grep -v "^main.o$")
-  ar rc vsbpcm.ar $OBJ
-  g++ -o vsbpcm.exe main.o vsbpcm.ar -lm 2>&1 | tail -6
+  ar rc "$OUTNAME".ar $OBJ
+  g++ -o "$OUTNAME".exe main.o "$OUTNAME".ar -lm 2>&1 | tail -6
   echo "=== result ==="
-  if [ -f vsbpcm.exe ]; then
-    mkdir -p /build/djgpp && cp vsbpcm.exe /build/djgpp/vsbpcm.exe
-    ls -la /build/djgpp/vsbpcm.exe && echo "BUILD OK"
+  if [ -f "$OUTNAME".exe ]; then
+    mkdir -p /build/djgpp && cp "$OUTNAME".exe /build/djgpp/"$OUTNAME".exe
+    ls -la /build/djgpp/"$OUTNAME".exe && echo "BUILD OK"
   else
     echo "BUILD FAILED"
   fi

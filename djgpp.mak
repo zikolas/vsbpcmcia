@@ -45,9 +45,22 @@ OBJFILES=\
 	$(OUTD)/vsb.o		$(OUTD)/vdma.o		$(OUTD)/virq.o		$(OUTD)/vopl3.o		$(OUTD)/vmpu.o		$(OUTD)/tsf.o\
 	$(OUTD)/au_cards.o\
 	$(OUTD)/dmabuff.o	$(OUTD)/physmem.o	$(OUTD)/timer.o\
-	$(OUTD)/sc_es1688.o\
+	$(OUTD)/sc_es1688.o	$(OUTD)/sc_vew211.o	$(OUTD)/fmvol.o\
 	$(OUTD)/stackio.o	$(OUTD)/stackisr.o	$(OUTD)/sbisr.o		$(OUTD)/int31.o		$(OUTD)/rmwrap.o	$(OUTD)/mixer.o\
 	$(OUTD)/hapi.o		$(OUTD)/dprintf.o	$(OUTD)/vioout.o	$(OUTD)/djdpmi.o	$(OUTD)/uninst.o	$(OUTD)/fileacc.o
+
+# CARD_AUDIGY build: pull the SB Live/Audigy driver and its PCI plumbing back
+# in (for the CardBus Audigy 2 ZS Notebook, which is a PCI device, not PCMCIA).
+# sc_sbliv.c needs emu_driver_audigyls/live24_funcs from sc_sbl24.c and
+# aucards_ac97chan_mixerset from ac97mix.c, so all three are required, plus
+# pcibios.c for the PCI enumeration.
+# dbopl.o comes back too: CARD_AUDIGY clears NOFM (the Audigy has no hardware
+# OPL at 0x388 to fall through to), so vopl3.cpp references DBOPL again.
+ifneq (,$(findstring CARD_AUDIGY,$(CFLAGS)))
+OBJFILES+= $(OUTD)/pcibios.o	$(OUTD)/ac97mix.o	$(OUTD)/sc_sbliv.o	$(OUTD)/sc_sbl24.o	$(OUTD)/dbopl.o
+# SF2 soundfonts played on the EMU10K2's own 64 hardware voices
+OBJFILES+= $(OUTD)/emu_sf2.o	$(OUTD)/emu_wt.o
+endif
 
 INCLUDE_DIRS=src mpxplay
 SRC_DIRS=src mpxplay
@@ -62,7 +75,10 @@ LD_EXTRA_FLAGS=-Map $(OUTD)/$(NAME).map
 INCLUDES=$(addprefix -I,$(INCLUDE_DIRS))
 LIBS=$(addprefix -l,stdcxx m)
 
-COMPILE.asm.o=jwasm.exe -q -djgpp -Istartup -D?MODEL=small -DDJGPP $(A_DEBUG_FLAGS) -Fo=$@ $<
+# $(CFLAGS) carries only the card define (-DCARD_AUDIGY etc.), so the ASM side
+# can finally see which card is being built; with CFLAGS empty the command line
+# is unchanged and the 486 builds stay byte-identical (hash-verified).
+COMPILE.asm.o=jwasm.exe -q -djgpp -Istartup -D?MODEL=small -DDJGPP $(CFLAGS) $(A_DEBUG_FLAGS) -Fo=$@ $<
 COMPILE.c.o=gcc $(C_DEBUG_FLAGS) $(C_OPT_FLAGS) $(C_EXTRA_FLAGS) $(CFLAGS) $(INCLUDES) -c $< -o $@
 COMPILE.cpp.o=gcc $(C_DEBUG_FLAGS) $(C_OPT_FLAGS) $(C_EXTRA_FLAGS) $(CPPFLAGS) $(INCLUDES) -c $< -o $@
 
@@ -111,7 +127,8 @@ $(OUTD)/sc_inthd.o:: sc_inthd.c  mpxplay.h au_cards.h dmabuff.h pcibios.h sc_int
 $(OUTD)/sc_sbl24.o:: sc_sbl24.c  mpxplay.h au_cards.h dmabuff.h pcibios.h ac97mix.h sc_sbl24.h emu10k1.h
 $(OUTD)/sc_sbliv.o:: sc_sbliv.c  mpxplay.h au_cards.h dmabuff.h pcibios.h ac97mix.h sc_sbliv.h emu10k1.h
 $(OUTD)/sc_via82.o:: sc_via82.c  mpxplay.h au_cards.h dmabuff.h pcibios.h ac97.h
-$(OUTD)/sc_es1688.o:: sc_es1688.c au_cards.h
+$(OUTD)/sc_es1688.o:: sc_es1688.c au_cards.h config.h
+$(OUTD)/sc_vew211.o:: sc_vew211.c au_cards.h config.h
 $(OUTD)/timer.o::    timer.c     mpxplay.h au_cards.h timer.h
 
 $(OUTD)/dbopl.o::    dbopl.cpp   dbopl.h
@@ -119,6 +136,7 @@ $(OUTD)/linear.o::   linear.c    linear.h platform.h
 $(OUTD)/main.o::     main.c      linear.h platform.h ptrap.h vopl3.h pic.h config.h vsb.h vdma.h virq.h au.h version.h
 $(OUTD)/pic.o::      pic.c       pic.h platform.h ptrap.h
 $(OUTD)/ptrap.o::    ptrap.c     linear.h platform.h ptrap.h config.h
+$(OUTD)/fmvol.o::    fmvol.c     platform.h ptrap.h fmvol.h
 $(OUTD)/sndisr.o::   sndisr.c    linear.h platform.h vopl3.h pic.h config.h vsb.h vdma.h virq.h ctadpcm.h au.h
 $(OUTD)/tsf.o::      tsf.c       tsf/tsf.h
 $(OUTD)/vdma.o::     vdma.c      linear.h platform.h ptrap.h vdma.h config.h

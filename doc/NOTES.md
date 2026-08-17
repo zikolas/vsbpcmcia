@@ -54,11 +54,11 @@ Cleared before a test with 16 zero bytes. All counters wrap.
 |------|---------|
 | 0x4F0 | max SNDISR nesting depth seen (goal: 1) |
 | 0x4F1 | render-guard skips (re-entered while rendering; goal: 0) |
-| 0x4F2 | PT_Feed stage (1 entry, 2 reconfig, 3 ring fill, 4 pump, 5 done) |
+| 0x4F2 | VEW211 build: guest rate >> 8 at each full reconfig (pitch forensics: 11025→43, 22050→86, a bogus 2x 43478→169); ES build: PT_Feed stage (1 entry, 2 reconfig, 3 ring fill, 4 pump, 5 done) |
 | 0x4F3 | PT_Feed busy-guard skips |
-| 0x4F4 | RTC revivals by the watchdog |
+| 0x4F4 | RTC revivals by the watchdog (VEW211 build: verified re-arms only -- PIE re-set, PIC unmask, or the seconds-confirmed reg-C wedge heal) |
 | 0x4F5 | ring fill, 32-byte units |
-| 0x4F6 | 0xAA once ES1688_start ran |
+| 0x4F6 | VEW211 build: SER catch-up count (codec-starvation refills -- pump ticks were lost to the guest; sustained growth in-game = tick loss, benign at idle); ES build: 0xAA once ES1688_start ran |
 | 0x4F7/0x4F9 | SNDISR tick counter, 16-bit lo/hi |
 | 0x4F8 | ES1688_irq calls (8-bit; tracks 0x4F7 lo) |
 | 0x4FA | FULL chip reconfigs (fast-resumes not counted) |
@@ -70,9 +70,45 @@ Rate measurements: read 0x46C (BIOS tick dword) and the counters in ONE
 mem_read (0x46C, 148 bytes spans both) and clock deltas against the BIOS
 tick -- wall-clock between tool calls is unreliable.
 
+**In-game caveats (measured on the 235, 2026-07-26):** games own the timer
+chain -- Lion King hooks INT8 without chaining, freezing 0x46C solid, and
+fast-timer games advance it several times too fast, so in-game deltas
+against 0x46C are meaningless. Lion King also SCRIBBLES the 0x4F0-0x4FF IAC
+area itself (it is a shared inter-application scratch), so telemetry read
+mid-LK is garbage. Read telemetry at the DOS prompt right after game exit
+instead (the scratch survives). This is also why the VEW211 driver keeps
+all its timing in its own RTC tick counter, never 0x46C.
+
+## Card backends
+
+Two compile-time-exclusive backends share one passthrough ABI (the
+`ES1688_PT_*` symbols -- historical names, card-agnostic):
+
+* **ES1688** (default; `vsbpcm.exe`): Ratoc REX-5571/5572, Panasonic
+  KXL-C101. 256-byte chip FIFO, FIFO-half-empty-paced feed, enabler ES1688GO.
+* **CS4231A** (`CARD=VEW211 tools/build.sh` -> `vsbpcmv.exe`): Panasonic
+  CF-VEW211/212, PC-9801N-J04. 16-sample FIFO, RTC-tick-credit-paced PIO
+  (PRDY is unreliable on this card; PIT ch0 is guest hardware -- games
+  reprogram its mode/reload, which corrupted a PIT-side elapsed-time
+  accumulator into burst overfeed = fast/pitched-up/crackling playback, the
+  2026-07-26 field bug). The codec has 14 fixed crystal-divided rates; a
+  guest rate missing the table by >2% engages a nearest-neighbour FRAME
+  STEPPER in PT_Feed (Bresenham drop/dup of whole frames during the ring
+  copy -- no interpolation, 486-priced; `SBENORS=1` disables it for A/B).
+  Table picks cap at the 22.05k design ceiling, so a 44.1k guest decimates
+  2:1 to correct pitch/tempo at half bandwidth. Exact/near-table streams
+  keep the raw untouched path. ms-paced verified MCE bring-up, codec
+  at window base+4, discrete YMF262 for FM (native 4-port 0x388 decode --
+  NOFM passthrough needs no enabler window tricks). Enabler VEW21XGO
+  (github.com/zikolas/vew21xgo); see deploy/GO-VEW211.BAT. 22.05 kHz design
+  ceiling. Ported from the rex5571-sbemu vew211-backend branch; carries the
+  same session machinery as the ES1688 backend (flush-generation ring
+  ownership, rs_want pump-restore, fast-resume on same-format re-arms, IRQ0
+  heartbeat, runtime TSC probe, telemetry map).
+
 ## Build
 
-`tools/build.sh` (Linux container; DJGPP cross + JWasm). The tree is
+`tools/build.sh` (Linux container; DJGPP cross + JWasm); `CARD=VEW211` selects the CS4231A backend. The tree is
 case-normalized for case-sensitive filesystems. Always clean-builds.
 CPU target is i486; the TSC duration probe is runtime-gated (EFLAGS.ID ->
 CPUID -> TSC), so one binary serves 486s and Pentiums. Upstream's `/SD`
@@ -118,7 +154,28 @@ it from a remote-control agent kills the agent.)
   estimate (pre-existing; SC2000 uses DSP 0x14, not direct-DAC).
 * **ADPCM** (<8-bit) falls back to the full render path, paced by the broken
   AU sawtooth (rare in practice).
-* **SBPro stereo-bit rate cache**: toggling the mixer stereo bit does not
-  invalidate vsb.SampleRate (CalcSampleRate divides by channels) -- a latent
-  2x rate skew for guests that toggle stereo without resending the time
-  constant. Not yet observed in the field.
+* **CS4231A fade dropouts are FIFO physics (closed 2026-07-26).** Some
+  games black out ALL interrupts for several ms at a time (Lion King's
+  screen fades, measured: SER starvation events fire in volume while the
+  guest-DSP-reset counter stays flat -- no reset storm, nothing to feed
+  with). The ES1688 rides the identical blackouts on its 256-BYTE chip
+  FIFO (~12 ms of cushion at 21 kHz); the CS4231A holds 16 SAMPLES
+  (~0.8 ms) and punctures. No driver can extend a hardware FIFO and the
+  PCMCIA bridge has no DMA. Verdict: fade-heavy titles sound best on the
+  ES1688-family cards; the VEW211 keeps native OPL3 + stereo + the frame
+  stepper's correct pitch everywhere else. (Two mitigation experiments were
+  field-WITHDRAWN the same day after a long session ended in crackle then
+  total silence: pumping from the IRQ0 heartbeat -- heavy work on a
+  borrowed, possibly slim guest ISR stack -- and a MODE2/DACZ underrun-
+  silence poke, an unverified write on a codec known to drop hasty writes.
+  The wedge state was lost to a reboot, so blame is split; neither had
+  shown audible benefit.)
+* **SBPro stereo-bit rate cache**: toggling the mixer stereo bit did not
+  invalidate vsb.SampleRate (CalcSampleRate divides by channels) -- a 2x rate
+  skew for guests that toggle stereo without resending the time constant.
+  Hit in the field 2026-07-26 (games fast + pitched up). FIXED on the
+  vew211-backend branch: stereo changes (mixer 0x0E write, ADPCM/silence
+  cmds forcing mono) invalidate the cache on pre-SB16 DSP versions. The fix
+  is `#ifdef CARD_VEW211`-guarded ONLY so the default ES build stays
+  byte-identical during bench testing -- UNGUARD AT MERGE (the ES1688 build
+  shares the bug).

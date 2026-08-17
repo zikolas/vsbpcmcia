@@ -9,17 +9,32 @@
  * version.h stay upstream's VSBHDA core version for lineage/merge sanity). */
 #define VSBPCM_VER "0.6.1"
 
+/* VSBPCMCIA card backend: default = ES1688 (sc_es1688.c). Define CARD_VEW211
+ * (tools/build.sh CARD=VEW211 does it via CFLAGS) to build the Panasonic
+ * CF-VEW211 / CS4231A backend instead -- the two provide the same passthrough
+ * ABI (ES1688_PT_*) and are compile-time exclusive. */
+/* #define CARD_VEW211 1 */
+
 /* VSBPCMCIA is PCMCIA-only: none of the fleet has PCI, so the PCI card
  * drivers are dead weight (~15% of the binary). Excluded via upstream's own
  * per-card guards -- the source files stay in the tree untouched so
  * `git merge upstream/main` stays cheap. */
+/* CARD_AUDIGY (tools/build.sh CARD=AUDIGY) is the exception: the Audigy 2 ZS
+ * Notebook is a CardBus -- i.e. PCI -- card, so that build keeps sc_sbliv. */
 #define NOES1371  1
 #define NOICH     1
 #define NOHDA     1
+#ifndef CARD_AUDIGY
 #define NOSBLIVE  1
+#endif
 #define NOVIA82   1
 
+/* The ES1688/VEW211 fleet has real hardware FM at 0x388 to fall through to, so
+ * stripping the software OPL3 is free there. The Audigy has none, so a
+ * CARD_AUDIGY build must emulate it or AdLib music is simply silent. */
+#ifndef CARD_AUDIGY
 #define NOFM      1   /* strip DOSBox OPL3 emulation; leave 0x388 to the hardware */
+#endif
 
 #define SB16      1   /* 1=support SB16 */
 #define ADPCM     1   /* 1=support ADPCM */
@@ -35,9 +50,20 @@
 #define REINITOPL 0
 #endif
 #define SETABSVOL 0   /* 0=the master volume is set by /VOL cmdline option and isn't modified by the application */
+/* CARD_AUDIGY: the 0x330 trap feeds the EMU10K2 hardware wavetable (emu_wt.c),
+ * so VMPU comes back. SOUNDFONT comes with it: vmpu.c's MIDI parser lives
+ * under that gate, and enabling both also makes struct globalvars agree with
+ * config.inc's GLOBALVARS again (the ASM side has always been built with
+ * VMPU=1/SOUNDFONT=1). TSF itself stays dormant unless /SF: is given. */
+#ifdef CARD_AUDIGY
+#define VMPU      1
+#define SLOWDOWN  1   /* 1=support /SD option */
+#define SOUNDFONT 1
+#else
 #define VMPU      0   /* ES1688: no MPU virtualization (inert on 486; guest 0x330 untrapped) */
 #define SLOWDOWN  1   /* 1=support /SD option */
 #define SOUNDFONT 0   /* ES1688: no soundfont MIDI (needs VMPU anyway) */
+#endif
 #define PT0V86    1   /* 1=support read access to v86 page table 0 */
 #define HOSTRT    0   /* 0=protect SB irq, so it's not modified by programs; must match setting in SBISR.ASM */
 
@@ -84,6 +110,8 @@ struct globalvars {
 #ifdef _DEBUG
 	char *logfile;
 #endif
+	int fmvol; /* /FMVOL: TL steps added to carriers on the REAL OPL3; -1 = off.
+	              Runtime default set in main() (the init above is positional). */
 };
 
 /* compatflags bits */
