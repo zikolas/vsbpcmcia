@@ -137,6 +137,12 @@ int PTOPS_CardWanted( const char *id )
     return e[i] == 0 && id[i] == 0;
 }
 
+int PTOPS_CardPinned( const char *id )
+{
+    const char *e = getenv("SBECARD");
+    return ( e && *e ) ? PTOPS_CardWanted( id ) : 0;
+}
+
 void PTOPS_Register( const struct pt_ops_s *ops )
 {
     PT_Ops = ops;

@@ -503,7 +503,15 @@ static int TP755_adetect(struct audioout_info_s *aui)
  int seg, par;
  uint32_t lin, start;
 
- if(!PTOPS_CardWanted("tp755")) return 0;
+ // OPT-IN ONLY (SET SBECARD=tp755). Unlike every other backend here, this
+ // one cannot look before it leaps: the 755C codec powers up dark, so
+ // detection REQUIRES writing the ThinkPad system-control port 0x15E8 --
+ // on a machine we have not yet identified as a ThinkPad. The 0x4E30
+ // pre-gate below narrows that, but it rests on "open bus always reads
+ // 0xFF", which is verified on only a couple of machines. A planar device
+ // is also the one thing a user always knows they have in advance, so
+ // nothing is lost by requiring them to say so.
+ if(!PTOPS_CardPinned("tp755")) return 0;
 
  // real ch0 is ours; a guest on /D0 would reprogram it mid-ring
  if(aui->gvars->dma == 0){

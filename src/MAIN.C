@@ -505,6 +505,8 @@ int main(int argc, char* argv[])
     }
     if ( (gm.hAU = AU_init( &gvars ) ) == 0 ) {
         printf("Error: no soundcard found\n");
+        if ( !getenv("SBECARD") )
+            printf("  (ThinkPad 755C planar audio is opt-in: SET SBECARD=tp755)\n");
         goto errexit;
     }
     printf("Found sound card: %s\n", AU_getshortname( gm.hAU ) );

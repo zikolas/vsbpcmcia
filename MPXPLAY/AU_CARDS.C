@@ -57,20 +57,20 @@ extern struct sndcard_info_s SBALL_sndcard_info;
 
 static const struct sndcard_info_s *sndcard_info_table[] = {
 	/* Probe order = strongest identification first, and it also decides who
-	 * wins on a box that has both. TP755 is the planar device (no card in the
-	 * slot) and gates on a read of its own block before touching anything, so
-	 * on a 755C it claims the session; a PC Card user there forces the card
-	 * with SBECARD. ES1688 does a real DSP handshake at 0x220. VEW211 goes
-	 * last: its whole presence test is "something answers at the codec port",
-	 * so it must never get first refusal on another card's registers. */
-#ifndef NOTP755
-	&TP755_sndcard_info,    /* TP755C planar CS4248, 8237-ch0 DMA ring */
-#endif
+	 * wins on a box that has both. ES1688 does a real DSP handshake at 0x220.
+	 * VEW211 follows: its whole presence test is "something answers at the
+	 * codec port", so it must not get first refusal on another card's
+	 * registers. TP755 is LAST and, additionally, never probes unless
+	 * SBECARD=tp755 names it -- its detection has to WRITE to 0x15E8 before
+	 * it knows what machine it is on, so it is opt-in (see sc_tp755.c). */
 #ifndef NOES1688
 	&ES1688_sndcard_info,   /* PCMCIA ES1688 passthrough (PC110/235) */
 #endif
 #ifndef NOVEW211
 	&VEW211_sndcard_info,   /* PCMCIA CS4231A passthrough (CF-VEW211) */
+#endif
+#ifndef NOTP755
+	&TP755_sndcard_info,    /* TP755C planar CS4248 -- opt-in, SBECARD=tp755 */
 #endif
 #ifndef NOES1371
 	&ES1371_sndcard_info,

@@ -48,6 +48,13 @@ void PTOPS_Register( const struct pt_ops_s *ops );
  * one without a rebuild. Init context only (it reads the environment). */
 int PTOPS_CardWanted( const char *id );
 
+/* Stricter variant: an UNSET SBECARD means NO, so the backend is never
+ * probed unless the user names it. For a backend whose probe cannot be made
+ * read-only -- sc_tp755 must WRITE to ThinkPad control port 0x15E8 before it
+ * can tell whether the machine is even a ThinkPad -- opt-in is the only way
+ * to guarantee it never touches a machine it does not belong to. */
+int PTOPS_CardPinned( const char *id );
+
 /* Engine-generic ISR telemetry (the BIOS 0x4F0-0x4FF map -- see
  * doc/NOTES.md), formerly duplicated in sc_es1688.c and sc_vew211.c. */
 void SNDISR_dbg_tick(void);
