@@ -24,6 +24,18 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 DJGPP_DIR="${DJGPP_DIR:-$HOME/djgpp}"
 JWASM_BIN="${JWASM_BIN:-$HOME/vsbhda-tools/jwasm}"
 
+# SAFETY: REPO is derived from $0, so a COPY of this script placed anywhere else
+# resolves REPO to that directory's parent -- from /tmp that is "/", and the
+# docker run below would mount the ENTIRE FILESYSTEM as /build and tar it.
+# (Done exactly once, 2026-08-17, complete with macOS privacy prompts.)
+# Refuse to run unless REPO really is this repo.
+if [ ! -f "$REPO/djgpp.mak" ] || [ ! -d "$REPO/src" ]; then
+  echo "build.sh: refusing to run -- '$REPO' is not the VSBPCMCIA repo" >&2
+  echo "  (no djgpp.mak / src). Run tools/build.sh from inside the repo;" >&2
+  echo "  do not copy this script elsewhere -- REPO comes from its own path." >&2
+  exit 1
+fi
+
 rm -f "$REPO"/djgpp/*.o "$REPO"/djgpp/*.ar
 
 docker run --rm --platform linux/amd64 \
