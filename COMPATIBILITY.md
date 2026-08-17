@@ -23,7 +23,7 @@ issue with your game, machine, card and symptoms.
 | Rise of the Triad | ✅ | 486 | |
 | The Lion King | ✅ | 486DX4 | |
 | SimCity 2000 | ✅ | 486DX4 | |
-| Dune II | ⚠️ | 486DX4, P-MMX | fine on the P-MMX. On the DX4 it loads and plays, but moving the mouse halts it with a DOS internal stack overflow — the same signature as Cannon Fodder's setup, and it survives `STACKS=32,512`; untriaged |
+| Dune II | ✅ | 486DX4, P-MMX | not a VSBPCMCIA issue: on the T2130CT, moving the mouse kills the game (DOS internal stack overflow, or a hard wedge in real mode) — but this reproduces on a bare boot with **only** himem + CuteMouse loaded, no VSBPCMCIA, no HDPMI, no Jemm, and with the game set to no sound card at all. Audio itself works. Also independent of the mouse driver (Microsoft MOUSE.COM fails too) and of the stack pool (survives `STACKS=64,512`, the DOS maximum) — so it is runaway interrupt nesting somewhere in the game/machine, nothing to do with sound |
 | Quake | ✅ | Am5x86/75 (Libretto 20) | |
 | Raptor: Call of the Shadows | ✅ | P-MMX | |
 | Impulse Tracker | ✅ | P-MMX | tracker/editor, SB digital out |
@@ -36,7 +36,7 @@ issue with your game, machine, card and symptoms.
 | Duke Nukem II | ✅ | 486DX4 | needs the SB-base FM alias fix (v0.6.1-pre1+): its SB probe runs an AdLib timer test at base+8 and never touches the DSP unless it passes. Also put the emulated SB **below** the real chip (`ES1688GO /SB=240` + `VSBPCM /A220`) — it scans 0x220 first, and with the real card there it selects real silicon, which has no DMA on a PCMCIA socket |
 | Earthworm Jim 2 | ⚠️ | 486SX/33 | audio distortion; suspected CPU limit, untested on faster machines |
 | Flashback | ❌ | 486DX4 | wedges to a flashing cursor in-game; untriaged, not yet retested without VSBPCMCIA loaded |
-| Cannon Fodder | ❌ | 486DX4, P-MMX | the setup's sound test dies in a repeating ring-0 exception 0Dh inside the DPMI host (faults on `mov gs, ss:[esi]`, byte-identical registers every run). Not the FM alias fix — the pre-fix binary faults identically. `/CF4` stops the fault repeating but not the fault itself; untriaged |
+| Cannon Fodder | ❌ | 486DX4, P-MMX | the setup's sound test dies in a repeating ring-0 exception 0Dh inside the DPMI host (faults on `mov gs, ss:[esi]`, byte-identical registers every run). Not the FM alias fix — the pre-fix binary faults identically. `/CF4` stops the fault repeating but not the fault itself. It ends in the same DOS "internal stack overflow" as Dune II — and like Dune II it survives both `STACKS=64,512` (the DOS maximum) and a different mouse driver, so it is runaway interrupt nesting, not sound. Note the fault can only be *reached* with a working SB present (the setup bails with "error initialising" otherwise), which is why VSBPCMCIA has to be loaded to see it |
 | Worms | ❌ | P-MMX | not yet triaged |
 
 ## Measured performance (DOOM v1.2 `-timedemo demo1`, 1667 gametics, VSBPCM v0.6)
