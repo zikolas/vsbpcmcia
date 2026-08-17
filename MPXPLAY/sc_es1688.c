@@ -54,6 +54,7 @@
 #include <stdlib.h>
 #include <pc.h>
 #include "au_cards.h"
+#include "ptops.h"        // engine passthrough ops table (we register in adetect)
 
 // ==========================================================================
 //  crazii DPMI-API compat shim over DJGPP (VSBHDA port)
@@ -115,80 +116,22 @@ static void DPMI_RestoreInterrupt(uint8_t prev)
 #define pds_free              free
 #define pds_textdisplay_printf(s)  printf("%s\n", (s))
 
-// SNDISR passthrough tap enable (engine-owned, lives in sndisr.c now): set to
-// 1 in ES1688_adetect when our card is the selected AU output, routing the RAW
-// guest DMA to ES1688_PT_Feed() -- native passthrough, no resample -- instead
-// of the render path. 0 for every other card, so stock cards are unaffected.
-extern int SNDISR_PassThru;
-
-// DIAG (hardware-test 1 follow-up): prove whether SNDISR fires on our RTC.
+// DIAG map for this backend's own bytes (the SNDISR entry/depth/duration
+// telemetry -- 0x4F0/0x4F1/0x4F7/0x4F9/0x4FC/0x4FD -- moved to sndisr.c
+// with the generic dbg trio; full map in doc/NOTES.md):
 //   0x4F6 = 0xAA once ES1688_start runs (also confirms the _farpokeb mechanism
 //           works in the resident context -- we KNOW start ran: the pop).
-//   0x4F7 = count of SNDISR_Interrupt entries (via ES1688_dbg_tick, called at
-//           the very top of SNDISR before AU_isirq).
 //   0x4F8 = count of ES1688_irq (irq_routine) calls, i.e. SNDISR reaching AU_isirq.
-// If 0x4F6==0xAA but 0x4F7==0 -> SNDISR never runs (RTC not reaching our PM ISR).
-//
-// Reentrancy + duration probes (hardware-test 3 follow-up; the fix is option
-// (ii): keep SNDISR inside one RTC period so it never re-enters at all):
-//   0x4F0 = MAX SNDISR nesting depth seen (1 = never re-entered = goal)
-//   0x4F1 = render-guard skips (SNDISR re-entered while the owner rendered)
-//   0x4FC/0x4FD = longest outermost SNDISR pass, 16-bit LE, in 256-TSC-cycle
-//                 units (~1.1us @233MHz). RTC period @1024Hz ~ 890 units --
-//                 max duration must stay well under that.
+//   0x4FB/0x4FF = 16-bit PT_Feed count (lo/hi; 8-bit counters wrap-alias
+//           hopelessly over multi-second windows -- the SC2K chop diagnosis
+//           needed exactly that).
 //   0x4FE = PT_Feed overfeed clamps (ring full; should stay 0 -- sndisr paces
 //           by ES1688_PT_Space now)
-/* The duration probe needs rdtsc, which #UDs on a real 486 -- and the 486
- * fleet is this port's whole reason to exist. Detect at RUNTIME (in adetect,
- * never in ISR context): EFLAGS.ID (bit 21) togglable -> CPUID exists ->
- * CPUID.1 EDX bit 4 = TSC. One binary serves the fleet: Pentium rigs keep the
- * 0x4FC/0x4FD duration telemetry, a 486 just leaves it at zero. */
-static int es_has_tsc;   /* set once in ES1688_adetect */
-static int es_tsc_check(void)
-{
- unsigned a, b, d;
- __asm__ __volatile__(
-  "pushfl; popl %0; movl %0, %1; xorl $0x200000, %0;"
-  "pushl %0; popfl; pushfl; popl %0; pushl %1; popfl"
-  : "=&r"(a), "=&r"(b));
- if(!((a ^ b) & 0x200000)) return 0;      /* ID stuck -> no CPUID -> 486-class */
- __asm__ __volatile__("cpuid" : "=d"(d) : "a"(1) : "ebx", "ecx");
- return (d >> 4) & 1;
-}
-/* Tick/feed counters are 16-BIT (lo/hi split across scratch bytes): 8-bit
- * counters wrap-alias hopelessly when measuring rates over multi-second
- * windows (the SC2K chop diagnosis needed exactly that). ticks = 0x4F7 lo /
- * 0x4F9 hi; feeds = 0x4FB lo / 0x4FF hi. On no-TSC CPUs 0x4FC/0x4FD carry a
- * 16-bit PT byte accumulator (>>4) instead of the duration probe. */
-static uint16_t es_tel_sndisr, es_tel_feed16;
+// On no-TSC CPUs 0x4FC/0x4FD carry a 16-bit PT byte accumulator (>>4)
+// instead of the engine's duration probe (SNDISR_HasTsc gates both uses).
+static uint16_t es_tel_feed16;
 static unsigned long es_tel_bytes;
 static unsigned char es_tel_irq;
-static unsigned char es_dbg_depth, es_dbg_maxdepth, es_dbg_skips;
-static unsigned long long es_dbg_t0;
-static unsigned es_dbg_maxdur;
-static unsigned long long es_rdtsc(void){ unsigned long long v; __asm__ __volatile__("rdtsc" : "=A"(v)); return v; }
-void ES1688_dbg_tick(void)
-{
- ++es_tel_sndisr;
- _farpokeb(_dos_ds, 0x4F7, (unsigned char)es_tel_sndisr);
- _farpokeb(_dos_ds, 0x4F9, (unsigned char)(es_tel_sndisr >> 8));
- if(++es_dbg_depth > es_dbg_maxdepth){ es_dbg_maxdepth = es_dbg_depth; _farpokeb(_dos_ds, 0x4F0, es_dbg_maxdepth); }
- if(es_has_tsc && es_dbg_depth == 1) es_dbg_t0 = es_rdtsc();
-}
-void ES1688_dbg_exit(void)
-{
- if(es_has_tsc && es_dbg_depth == 1){
-  unsigned long long dt = es_rdtsc() - es_dbg_t0;
-  unsigned u = ((dt >> 8) > 0xFFFFULL) ? 0xFFFFu : (unsigned)(dt >> 8);
-  if(u > es_dbg_maxdur){
-   es_dbg_maxdur = u;
-   _farpokeb(_dos_ds, 0x4FC, (unsigned char)u);
-   _farpokeb(_dos_ds, 0x4FD, (unsigned char)(u >> 8));
-  }
- }
- if(es_dbg_depth) es_dbg_depth--;
-}
-void ES1688_dbg_reenter(void){ _farpokeb(_dos_ds, 0x4F1, ++es_dbg_skips); }
 #define ES_DEF_BASE   0x220
 #define RING_BYTES    8192U         // MUST keep card_dmasize (=RING*4) within SBEMU's MAIN_PCM
 #define RING_MASK     (RING_BYTES-1)
@@ -319,7 +262,7 @@ static volatile uint32_t es_last_drain;   // BIOS tick when FIFO_HE last seen se
 // main.c hook: every guest DSP RESET calls this, so a pump that died while the
 // system sat idle (no polls, DAC halted, no hosts) is revived BEFORE the next
 // game's SB detect runs. Active playback never needs it; idle death did.
-void ES1688_PT_Watchdog(void)
+static void ES1688_PT_Watchdog(void)
 {
  es_watchdog();               // revive the RTC pump if it died while idle
  // Real-SB semantics: a DSP reset kills the current transfer. But NEVER touch
@@ -473,7 +416,7 @@ static void es_fifo_pump(void)
 // enough buffered to ride out pump jitter and no more. SET SBEPTLAT=ms tunes
 // it (default 250ms; raise it if audio breaks up on a slower host).
 static unsigned es_pt_lat_ms = 250;
-int ES1688_PT_Space(void)
+static int ES1688_PT_Space(void)
 {
  unsigned used = (ring_wr - ring_rd) & RING_MASK;
  unsigned target = RING_BYTES - 64;
@@ -495,7 +438,7 @@ int ES1688_PT_Space(void)
 // Fix: a busy guard on PT_Feed + interrupts OFF around the one long reconfig.
 static volatile int es_pt_feed_busy;
 static unsigned char es_reentry;   // DIAG: reentrant PT_Feed calls skipped (0x4F3)
-void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, unsigned bits, unsigned channels)
+static void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, unsigned bits, unsigned channels)
 {
  unsigned wr;
  _farpokeb(_dos_ds, 0x4F2, 1);                                 // DIAG stage: entry
@@ -529,7 +472,7 @@ void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, unsigned
     bytes = (int)es_free;
    } }
  es_tel_bytes += (unsigned long)bytes;         // PT byte-rate telemetry (no-TSC boxes: 0x4FC/D = bytes>>4, 16-bit)
- if(!es_has_tsc){
+ if(!SNDISR_HasTsc){
   unsigned u16 = (unsigned)((es_tel_bytes >> 4) & 0xFFFF);
   _farpokeb(_dos_ds, 0x4FC, (unsigned char)u16);
   _farpokeb(_dos_ds, 0x4FD, (unsigned char)(u16 >> 8));
@@ -630,6 +573,16 @@ static unsigned char es_rs_for_brate(unsigned brate)
  return rs;                                    // clamped to [ES_RS_MIN..ES_RS_IDLE]
 }
 
+// Engine passthrough ops (ptops.h): registered from adetect when this card
+// wins the session. PTF_TAP arms the sndisr tap; PTF_REAL_FM = the ES1688's
+// real ESFM answers 0x388, so no FM detection shim is needed.
+static const struct pt_ops_s es1688_pt_ops = {
+ PTF_TAP | PTF_REAL_FM,
+ ES1688_PT_Space, ES1688_PT_Feed, ES1688_PT_Watchdog,
+ SNDISR_dbg_tick, SNDISR_dbg_exit, SNDISR_dbg_reenter,
+ NULL,                                  // no nesting instrument -> no depth limiter
+};
+
 static int ES1688_adetect(struct audioout_info_s *aui)
 {
  es1688_card_s *card;
@@ -646,12 +599,11 @@ static int ES1688_adetect(struct audioout_info_s *aui)
  { const char *l = getenv("SBEPTLAT");                                          // passthrough latency cap (ms)
    if(l){ int ms = atoi(l); if(ms >= 30 && ms <= 2000) es_pt_lat_ms = (unsigned)ms; } }
  if(!es_dsp_reset(base)) return 0;
- es_has_tsc = es_tsc_check();             // 486-safe: rdtsc only ever runs if CPUID says TSC exists
  card = (es1688_card_s *)pds_calloc(1,sizeof(es1688_card_s));
  if(!card) return 0;
  card->base = base; aui->card_private_data = card; es_base = base;
  aui->card_irq = 8;                     // RTC drives SBEMU's pump
- SNDISR_PassThru = 1;                   // arm the SNDISR passthrough tap (raw guest DMA -> chip)
+ PTOPS_Register(&es1688_pt_ops);        // arm the SNDISR passthrough tap (raw guest DMA -> chip)
  // NOFM build: 0x388 is left UNtrapped (ptrap.c skips it when opl3=0), so guest
  // AdLib writes reach the ES1688's real ESFM directly -- no fm_write hook needed.
  return 1;

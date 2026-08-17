@@ -74,6 +74,7 @@
 #include <stdlib.h>
 #include <pc.h>
 #include "au_cards.h"
+#include "ptops.h"        // engine passthrough ops table (we register in adetect)
 
 // ==========================================================================
 //  crazii DPMI-API compat shim over DJGPP (same as sc_es1688.c)
@@ -113,49 +114,14 @@ static void DPMI_RestoreInterrupt(uint8_t prev)
 //  Passthrough ABI globals + telemetry (layout identical to sc_es1688.c;
 //  see doc/NOTES.md for the 0x4F0-0x4FF map)
 // ==========================================================================
-extern int SNDISR_PassThru;        // engine-owned tap gate (sndisr.c); armed in adetect
-
-static int es_has_tsc;
-static int es_tsc_check(void)
-{
- unsigned a, b, d;
- __asm__ __volatile__(
-  "pushfl; popl %0; movl %0, %1; xorl $0x200000, %0;"
-  "pushl %0; popfl; pushfl; popl %0; pushl %1; popfl"
-  : "=&r"(a), "=&r"(b));
- if(!((a ^ b) & 0x200000)) return 0;
- __asm__ __volatile__("cpuid" : "=d"(d) : "a"(1) : "ebx", "ecx");
- return (d >> 4) & 1;
-}
-static uint16_t es_tel_sndisr, es_tel_feed16;
+// The SNDISR entry/depth/duration telemetry and the tap-gate/reentrancy
+// globals moved to sndisr.c with the generic dbg trio (see ptops.h); this
+// backend keeps only its own bytes of the 0x4F0-0x4FF map:
+//   0x4F8 = irq_routine calls, 0x4FB/0x4FF = 16-bit feed count,
+//   0x4FE = ring-full feed clamps, 0x4F4 = watchdog revivals.
+static uint16_t es_tel_feed16;
 static unsigned long es_tel_bytes;
 static unsigned char es_tel_irq;
-static unsigned char es_dbg_depth, es_dbg_maxdepth, es_dbg_skips;
-static unsigned long long es_dbg_t0;
-static unsigned es_dbg_maxdur;
-static unsigned long long es_rdtsc(void){ unsigned long long v; __asm__ __volatile__("rdtsc" : "=A"(v)); return v; }
-void ES1688_dbg_tick(void)
-{
- ++es_tel_sndisr;
- _farpokeb(_dos_ds, 0x4F7, (unsigned char)es_tel_sndisr);
- _farpokeb(_dos_ds, 0x4F9, (unsigned char)(es_tel_sndisr >> 8));
- if(++es_dbg_depth > es_dbg_maxdepth){ es_dbg_maxdepth = es_dbg_depth; _farpokeb(_dos_ds, 0x4F0, es_dbg_maxdepth); }
- if(es_has_tsc && es_dbg_depth == 1) es_dbg_t0 = es_rdtsc();
-}
-void ES1688_dbg_exit(void)
-{
- if(es_has_tsc && es_dbg_depth == 1){
-  unsigned long long dt = es_rdtsc() - es_dbg_t0;
-  unsigned u = ((dt >> 8) > 0xFFFFULL) ? 0xFFFFu : (unsigned)(dt >> 8);
-  if(u > es_dbg_maxdur){
-   es_dbg_maxdur = u;
-   _farpokeb(_dos_ds, 0x4FC, (unsigned char)u);
-   _farpokeb(_dos_ds, 0x4FD, (unsigned char)(u >> 8));
-  }
- }
- if(es_dbg_depth) es_dbg_depth--;
-}
-void ES1688_dbg_reenter(void){ _farpokeb(_dos_ds, 0x4F1, ++es_dbg_skips); }
 
 // ---- card geometry -------------------------------------------------------
 #define VEW_WIN_BASE  0x530         // I/O window base (CIS idx 0x20); SBEBASE overrides
@@ -463,7 +429,7 @@ static void vew_watchdog(void)
 }
 
 // vsb.c hook: every guest DSP RESET lands here.
-void ES1688_PT_Watchdog(void)
+static void ES1688_PT_Watchdog(void)
 {
  vew_watchdog();
  es_flush_gen++;                                      // pump-executed ring flush
@@ -472,7 +438,7 @@ void ES1688_PT_Watchdog(void)
 }
 
 static unsigned vew_pt_lat_ms = 250;
-int ES1688_PT_Space(void)
+static int ES1688_PT_Space(void)
 {
  unsigned used = (ring_wr - ring_rd) & RING_MASK;
  unsigned target = RING_BYTES - 64;
@@ -499,7 +465,7 @@ int ES1688_PT_Space(void)
 static volatile int vew_pt_feed_busy;
 static unsigned char es_reentry;
 static unsigned char es_tel_drop;                     // 0x4FE: ring-full feed clamps
-void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, unsigned bits, unsigned channels)
+static void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, unsigned bits, unsigned channels)
 {
  unsigned wr;
  if(vew_pt_feed_busy){ _farpokeb(_dos_ds, 0x4F3, ++es_reentry); return; }
@@ -576,7 +542,7 @@ void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, unsigned
    buf += unit; bytes -= (int)unit;
   }
  }
- if(!es_has_tsc){
+ if(!SNDISR_HasTsc){
   unsigned u16 = (unsigned)((es_tel_bytes >> 4) & 0xFFFF);
   _farpokeb(_dos_ds, 0x4FC, (unsigned char)u16);
   _farpokeb(_dos_ds, 0x4FD, (unsigned char)(u16 >> 8));
@@ -648,6 +614,16 @@ static void vew_i8_remove(void)
 }
 
 // ---- au_cards interface --------------------------------------------------
+// Engine passthrough ops (ptops.h): registered from adetect when this card
+// wins the session. PTF_REAL_FM = the CF-VEW211's discrete YMF262 answers
+// 0x388 natively, so no FM detection shim is needed.
+static const struct pt_ops_s vew211_pt_ops = {
+ PTF_TAP | PTF_REAL_FM,
+ ES1688_PT_Space, ES1688_PT_Feed, ES1688_PT_Watchdog,
+ SNDISR_dbg_tick, SNDISR_dbg_exit, SNDISR_dbg_reenter,
+ NULL,                              // no nesting instrument -> no depth limiter
+};
+
 static int VEW211_adetect(struct audioout_info_s *aui)
 {
  vew211_card_s *card;
@@ -674,12 +650,11 @@ static int VEW211_adetect(struct audioout_info_s *aui)
  if((unsigned char)inportb(vew_codec + VC_IAR) == 0xFF) return 0;
  vew_ci_wait(vew_codec);
 
- es_has_tsc = es_tsc_check();
  card = (vew211_card_s *)pds_calloc(1,sizeof(vew211_card_s));
  if(!card) return 0;
  card->base = base; aui->card_private_data = card;
  aui->card_irq = 8;                                   // RTC drives the pump
- SNDISR_PassThru = 1;                                 // arm the sndisr passthrough tap
+ PTOPS_Register(&vew211_pt_ops);                      // arm the sndisr passthrough tap
  // NOFM: guest AdLib I/O at 0x388 goes untrapped to the card's DISCRETE
  // YMF262, which decodes all four OPL3 ports natively. Real FM for free.
  return 1;

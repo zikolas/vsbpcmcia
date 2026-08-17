@@ -45,8 +45,8 @@
 //     VDMA_Write and corrupt the guest-visible shadow state.
 //   * Guest /D0 would collide with our real channel 0 -> adetect refuses.
 //   * A guest master-resetting the 8237 (OUT 0x0D/0x0F) passes through and
-//     masks real ch0; the DSP-reset hook (ES1688_PT_Watchdog stub) re-
-//     unmasks ch0 as a cheap idempotent heal.
+//     masks real ch0; the DSP-reset hook (tp_watchdog, via the ptops
+//     table) re-unmasks ch0 as a cheap idempotent heal.
 //**************************************************************************
 
 #ifdef CARD_TP755
@@ -62,6 +62,7 @@
 
 #include "config.h"
 #include "au_cards.h"
+#include "ptops.h"      /* engine passthrough ops table (we register in adetect) */
 #include "dmabuff.h"
 #include "platform.h"   /* bool etc. -- must precede ptrap.h */
 #include "ptrap.h"
@@ -301,15 +302,15 @@ static uint8_t tp_g_t2 = 0;          // tier-2 (slave re-ICW) heals fired
 static uint8_t tp_imr_a1_boot = 0;
 static uint8_t tp_imr_21_boot = 0;
 
-// VERIFY-BEFORE-REVIVE (sndisr.c gates on this): after a heal, suppress
-// guest VIRQ injection for the first resumed ticks -- resurrection into
-// seconds-stale guest SB state crashed MI1 where the un-healed freeze
-// didn't. Only the ASYNC guardian sets it; the DSP-reset watchdog heal is
-// guest-initiated (fresh state incoming) and must inject promptly.
-volatile int tp_revive_squelch = 0;
+// VERIFY-BEFORE-REVIVE (SNDISR_ReviveSquelch, engine-owned in sndisr.c):
+// after a heal, suppress guest VIRQ injection for the first resumed ticks --
+// resurrection into seconds-stale guest SB state crashed MI1 where the
+// un-healed freeze didn't. Only the ASYNC guardian sets it; the DSP-reset
+// watchdog heal is guest-initiated (fresh state incoming) and must inject
+// promptly.
 
-// sndisr.c depth limiter reads the live nesting depth through this
-int TP755_Depth(void){ return tp_iac ? (int)tp_iac[0] : 0; }
+// sndisr.c depth limiter reads the live nesting depth through the ops table
+static int TP755_Depth(void){ return tp_iac ? (int)tp_iac[0] : 0; }
 
 static void tp_guardian(void)
 {
@@ -363,7 +364,7 @@ static void tp_guardian(void)
    if(v & 0x04) UntrappedIO_OUT(0x21, (uint8_t)(v & ~0x04));
    UntrappedIO_OUT(0xA0, 0x62);              // specific EOI slave lvl 2
    UntrappedIO_OUT(0x20, 0x62);              // specific EOI master lvl 2 (cascade)
-   tp_revive_squelch = 2;                    // gate injection on resume
+   SNDISR_ReviveSquelch = 2;                 // gate injection on resume
    // VERIFIED ACK (MI2 wedge autopsy, 2026-08-14 night, live-probed over
    // COMrade): with PEN ON the CS4248 IGNORES status-register writes -- SR
    // stayed 0x89 through repeated OUTs, then cleared on the FIRST write
@@ -479,6 +480,20 @@ static unsigned tp_dma_count(void)
 }
 
 //------------------------------------------------------------ callbacks ---
+// Engine passthrough ops (ptops.h; bodies live in the engine-ABI section at
+// the end of this file). No tap and NO real FM anywhere on a 755C -- the
+// absence of PTF_REAL_FM is what tells the engine 0x388 is open bus here.
+static void tp_dbg_tick(void);
+static void tp_dbg_exit(void);
+static void tp_dbg_reenter(void);
+static void tp_watchdog(void);
+static const struct pt_ops_s tp755_pt_ops = {
+ 0,
+ NULL, NULL, tp_watchdog,
+ tp_dbg_tick, tp_dbg_exit, tp_dbg_reenter,
+ TP755_Depth,
+};
+
 static int TP755_adetect(struct audioout_info_s *aui)
 {
  struct tp755_card_s *card;
@@ -542,6 +557,7 @@ static int TP755_adetect(struct audioout_info_s *aui)
  tp_iac = (uint8_t *)TP_NEARPTR(0x4F0);       // telemetry window (BIOS IAC)
  memset(tp_iac, 0, 16);
  tp_i8_install();                             // the clock guardian
+ PTOPS_Register(&tp755_pt_ops);               // dbg instrument + reset hook; no tap
 
  printf("CS4248 found @ %4.4Xh (I12=%02Xh, TP ctl was %02Xh)\n",
         tp_cb, id, tp_ctl_was_on);
@@ -652,15 +668,16 @@ static int TP755_irq(struct audioout_info_s *aui)
  return 1;
 }
 
-//------------------------------------------- engine ABI (PT stubs + heal) ---
-// sndisr.c/vsb.c link against the historical ES1688_* names regardless of
-// backend. This is a render-path card: the engine's tap gate (SNDISR_PassThru,
-// owned by sndisr.c) stays 0 and the PT entry points are inert -- except the
-// DSP-reset hook, which doubles as our 8237 heal: a guest master-reset
-// (OUT 0x0D/0x0F passes through vdma) masks real ch0 and starves the codec;
-// one idempotent re-unmask fixes it for free.
+//------------------------------------- engine ops (dbg instrument + heal) ---
+// Registered through the ptops.h table in adetect. This is a render-path
+// card: no tap (space/feed stay NULL, the engine's SNDISR_PassThru stays 0)
+// -- except the DSP-reset hook, which doubles as our 8237 heal: a guest
+// master-reset (OUT 0x0D/0x0F passes through vdma) masks real ch0 and
+// starves the codec; one idempotent re-unmask fixes it for free. The dbg
+// trio is this card's own IAC-window instrument (depth feeds the sndisr
+// depth limiter), NOT the generic SNDISR_dbg_* BIOS-byte telemetry.
 //
-void ES1688_dbg_tick(void)
+static void tp_dbg_tick(void)
 {
  if(tp_iac){
   tp_iac[0]++;                                 /* depth */
@@ -668,21 +685,18 @@ void ES1688_dbg_tick(void)
   if(!++tp_iac[2]) tp_iac[3]++;                /* tick count u16 */
  }
 }
-void ES1688_dbg_exit(void)
+static void tp_dbg_exit(void)
 {
  if(tp_iac){
   if(tp_iac[0]) tp_iac[0]--;
   tp_iac[1] = TP_PH_EXIT;
  }
 }
-void ES1688_dbg_reenter(void)
+static void tp_dbg_reenter(void)
 {
  if(tp_iac) tp_iac[4]++;
 }
-int  ES1688_PT_Space(void){ return 0; }
-void ES1688_PT_Feed(const unsigned char *p, int n, unsigned r, unsigned b, unsigned c)
-{ (void)p;(void)n;(void)r;(void)b;(void)c; }
-void ES1688_PT_Watchdog(void)
+static void tp_watchdog(void)
 {
  if(tp_hw_armed){
   uint8_t f = DPMI_DisableInterrupt();

@@ -16,6 +16,10 @@
 #include "VSB.H"
 #include "CTADPCM.H"
 #include "PTRAP.H"
+#include "PTOPS.H"
+
+#include <go32.h>          /* _dos_ds: the engine telemetry pokes below */
+#include <sys/farptr.h>
 
 #ifdef _DEBUG
 //#define SNDISRLOG /* usually defined in makefile */
@@ -53,6 +57,76 @@ void tsf_render_short(void *, short *, int, int);
  *     march the private ISR stack into the data segment (#GP fix). */
 int SNDISR_PassThru = 0;
 volatile int es_in_render = 0;
+
+/* Post-heal guest-IRQ squelch (formerly sc_tp755's tp_revive_squelch): a
+ * backend's clock guardian sets it after resurrecting a dead engine clock;
+ * the two gates below then drop the seconds-stale pending completions
+ * instead of injecting them into a guest that has long moved on. Stays 0
+ * unless a backend with a guardian arms it, so the gates cost nothing
+ * elsewhere. */
+volatile int SNDISR_ReviveSquelch = 0;
+
+/* ---- engine-generic ISR telemetry + the passthrough ops table ----------
+ * The BIOS 0x4F0-0x4FF map (doc/NOTES.md), formerly duplicated per-backend:
+ * 0x4F0 = max nesting depth, 0x4F1 = render-guard skips, 0x4F7/0x4F9 =
+ * 16-bit SNDISR entry count, 0x4FC/0x4FD = longest outermost pass in
+ * 256-TSC-cycle units. rdtsc #UDs on a real 486 -- the fleet this port
+ * exists for -- so the duration probe is gated on a one-time CPUID check
+ * run at PTOPS_Register time (adetect context), never in the ISR. */
+int SNDISR_HasTsc = 0;
+static uint16_t dbg_tel_sndisr;
+static unsigned char dbg_depth, dbg_maxdepth, dbg_skips;
+static unsigned long long dbg_t0;
+static unsigned dbg_maxdur;
+static unsigned long long dbg_rdtsc(void){ unsigned long long v; __asm__ __volatile__("rdtsc" : "=A"(v)); return v; }
+static int dbg_tsc_check(void)
+{
+    unsigned a, b, d;
+    __asm__ __volatile__(
+        "pushfl; popl %0; movl %0, %1; xorl $0x200000, %0;"
+        "pushl %0; popfl; pushfl; popl %0; pushl %1; popfl"
+        : "=&r"(a), "=&r"(b));
+    if(!((a ^ b) & 0x200000)) return 0;  /* ID stuck -> no CPUID -> 486-class */
+    __asm__ __volatile__("cpuid" : "=d"(d) : "a"(1) : "ebx", "ecx");
+    return (d >> 4) & 1;
+}
+void SNDISR_dbg_tick(void)
+{
+    ++dbg_tel_sndisr;
+    _farpokeb(_dos_ds, 0x4F7, (unsigned char)dbg_tel_sndisr);
+    _farpokeb(_dos_ds, 0x4F9, (unsigned char)(dbg_tel_sndisr >> 8));
+    if(++dbg_depth > dbg_maxdepth){ dbg_maxdepth = dbg_depth; _farpokeb(_dos_ds, 0x4F0, dbg_maxdepth); }
+    if(SNDISR_HasTsc && dbg_depth == 1) dbg_t0 = dbg_rdtsc();
+}
+void SNDISR_dbg_exit(void)
+{
+    if(SNDISR_HasTsc && dbg_depth == 1){
+        unsigned long long dt = dbg_rdtsc() - dbg_t0;
+        unsigned u = ((dt >> 8) > 0xFFFFULL) ? 0xFFFFu : (unsigned)(dt >> 8);
+        if(u > dbg_maxdur){
+            dbg_maxdur = u;
+            _farpokeb(_dos_ds, 0x4FC, (unsigned char)u);
+            _farpokeb(_dos_ds, 0x4FD, (unsigned char)(u >> 8));
+        }
+    }
+    if(dbg_depth) dbg_depth--;
+}
+void SNDISR_dbg_reenter(void){ _farpokeb(_dos_ds, 0x4F1, ++dbg_skips); }
+
+static const struct pt_ops_s pt_ops_default = {
+    0,                          /* no tap; no card has claimed the session */
+    NULL, NULL, NULL,
+    SNDISR_dbg_tick, SNDISR_dbg_exit, SNDISR_dbg_reenter,
+    NULL
+};
+const struct pt_ops_s *PT_Ops = &pt_ops_default;
+
+void PTOPS_Register( const struct pt_ops_s *ops )
+{
+    PT_Ops = ops;
+    SNDISR_PassThru = ( ops->flags & PTF_TAP ) ? 1 : 0;
+    SNDISR_HasTsc = dbg_tsc_check();    /* adetect context, never ISR */
+}
 
 bool _SND_InstallISR( uint8_t, int(*ISR)(void) );
 bool _SND_UninstallISR( uint8_t );
@@ -327,23 +401,18 @@ static int SNDISR_Interrupt( void )
      * tail (conversions/mixer/AU_writedata) is dead weight and is skipped;
      * that tail is what made SNDISR outlast the RTC period and caused the
      * runaway re-entry that marched the ISR stack into .data (#GP). */
-    extern int ES1688_PT_Space(void);
-    extern void ES1688_PT_Feed(const unsigned char *, int, unsigned, unsigned, unsigned);
-    extern void ES1688_dbg_tick(void);
-    extern void ES1688_dbg_exit(void);
-    extern void ES1688_dbg_reenter(void);
     int pt_mode = 0, pt_took = 0;
     int pt_space = 0;
 #endif
 
 #ifndef NOES1688
-    ES1688_dbg_tick();   /* DIAG: entry count (0x4F7) + nesting depth (0x4F0) */
+    PT_Ops->dbg_tick();   /* DIAG: entry count (0x4F7) + nesting depth (0x4F0) */
 #endif
 
     /* check if the sound hw does request an interrupt. */
     if( !AU_isirq( isr.hAU ) ) {
 #ifndef NOES1688
-        ES1688_dbg_exit();
+        PT_Ops->dbg_exit();
 #endif
         return(0);
     }
@@ -355,15 +424,16 @@ static int SNDISR_Interrupt( void )
         PIC_SetIRQMask(mask | 1);
     }
 #endif
-#ifdef CARD_TP755
     /* DEPTH LIMITER (MI1 nesting fossil, 2026-08-14 pt.2): SETIF re-enables
-     * interrupts below, and an IRQ10 edge landing in the post-render exit
+     * interrupts below, and an IRQ edge landing in the post-render exit
      * window (es_in_render already 0, EOI pending) nests a fresh SNDISR
      * frame -- each one carves STACKCORR (4KB) off the private ISR stack.
      * Trap-tax-stretched passes let this resonate to depth 14 = 56KB gone.
-     * Three live frames is already pathological: ack + EOI and get out. */
-    { extern int TP755_Depth(void);
-      if ( TP755_Depth() > 3 ) goto isrexit; }
+     * Three live frames is already pathological: ack + EOI and get out.
+     * Runtime-dispatched: only a backend with a live nesting instrument
+     * (sc_tp755's IAC window) supplies depth. */
+    if ( PT_Ops->depth && PT_Ops->depth() > 3 ) goto isrexit;
+#ifdef CARD_TP755
     /* apply the tick's buffered guest OPL writes before rendering them */
     { extern void PTRAP_DrainOplRing(void);
       PTRAP_DrainOplRing(); }
@@ -373,24 +443,17 @@ static int SNDISR_Interrupt( void )
      * DSP cmds 0xF2/0xF3 (trigger IRQ).
      * Todo: check if SB emulated Irq is masked; if yes, don't trigger!
      */
-#ifdef CARD_TP755
-    /* VERIFY-BEFORE-REVIVE (MI1 crash lesson, 2026-08-14): after the IRQ0
-     * guardian resurrects a dead engine clock, the guest's SB driver state is
-     * seconds stale -- injecting the PRE-freeze completion (or the first
-     * fresh ones) crashed a game that had survived the freeze itself. For
-     * the first squelched ticks after a heal, drop pending status instead. */
-    { extern volatile int tp_revive_squelch;
-      extern void VSB_ClearIRQStatus( void );
-      if ( tp_revive_squelch ) {
-          tp_revive_squelch--;
-          VSB_ClearIRQStatus();
-      } else if ( VSB_GetIRQStatus() )
-          VIRQ_Invoke();
-    }
-#else
-    if ( VSB_GetIRQStatus() )
+    /* VERIFY-BEFORE-REVIVE (MI1 crash lesson, 2026-08-14): after a backend's
+     * clock guardian resurrects a dead engine clock, the guest's SB driver
+     * state is seconds stale -- injecting the PRE-freeze completion (or the
+     * first fresh ones) crashed a game that had survived the freeze itself.
+     * For the first squelched ticks after a heal, drop pending status
+     * instead. SNDISR_ReviveSquelch stays 0 on guardian-less backends. */
+    if ( SNDISR_ReviveSquelch ) {
+        SNDISR_ReviveSquelch--;
+        VSB_ClearIRQStatus();
+    } else if ( VSB_GetIRQStatus() )
         VIRQ_Invoke();
-#endif
 
 #if SETIF
     _enable_ints();
@@ -406,7 +469,7 @@ static int SNDISR_Interrupt( void )
 #define PT_MODE_SAMPLES 1024
     if ( SNDISR_PassThru ) {
         pt_mode = 1;
-        pt_space = ES1688_PT_Space();
+        pt_space = PT_Ops->space();
         samples = PT_MODE_SAMPLES;
     }
 #endif
@@ -427,7 +490,7 @@ static int SNDISR_Interrupt( void )
      * Build A empirically ran full nested passes WITH EOI for 52 feeds, so
      * EOI-per-delivered-tick is known-compatible with this PIC stack.
      * Do NOT clear the flag on the re-entrant path -- only the owner clears it. */
-    { if(es_in_render) { ES1688_dbg_reenter(); goto isrexit; }
+    { if(es_in_render) { PT_Ops->dbg_reenter(); goto isrexit; }
       es_in_render = 1; }
 #endif
 
@@ -607,7 +670,7 @@ static int SNDISR_Interrupt( void )
              * ring's free space above, so PT_Feed never overruns the ring. */
             /* (0x4F5 is the ring-fill probe now; the reached-tap diag is retired) */
             if ( pt_block )
-                ES1688_PT_Feed( (const unsigned char *)pDest, bytes, SB_Rate, VSB_GetBits(), channels );
+                PT_Ops->feed( (const unsigned char *)pDest, bytes, SB_Rate, VSB_GetBits(), channels );
 #endif
             /* v2.0: copy 1 more sample for cv_rate() */
             if ( resample
@@ -682,15 +745,10 @@ static int SNDISR_Interrupt( void )
                 VSB_SetPos(0);
             else
                 VSB_Stop(); /* v1.8: does no longer reset SB position */
-#ifdef CARD_TP755
             /* revival squelch: skip the injection, keep the bookkeeping;
              * the pending status is delivered late (or dropped) by the
              * top-of-tick gate once the squelch window has passed */
-            { extern volatile int tp_revive_squelch;
-              if ( !tp_revive_squelch ) VIRQ_Invoke(); }
-#else
-            VIRQ_Invoke();
-#endif
+            if ( !SNDISR_ReviveSquelch ) VIRQ_Invoke();
         } else {
 #ifdef SNDISRLOG
             dbgprintf(("isr(%u): s/c(o)/b=0x%02X/0x%02X(0x%02X)/0x%03X SB Pos=0x%X DMA Idx/Cnt=%X/%X\n", loop, samples, count, ocnt, bytes, SB_Pos, DMA_Index, DMA_Count ));
@@ -902,7 +960,7 @@ static int SNDISR_Interrupt( void )
 
 isrexit:
 #ifndef NOES1688
-    ES1688_dbg_exit();   /* DIAG: depth-- + outermost-pass duration (0x4FC/D) */
+    PT_Ops->dbg_exit();   /* DIAG: depth-- + outermost-pass duration (0x4FC/D) */
 #endif
     PIC_SendEOI( isr.SndIrq );
 #if COMPAT4

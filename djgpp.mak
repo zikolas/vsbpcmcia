@@ -134,9 +134,9 @@ $(OUTD)/sc_inthd.o:: sc_inthd.c  mpxplay.h au_cards.h dmabuff.h pcibios.h sc_int
 $(OUTD)/sc_sbl24.o:: sc_sbl24.c  mpxplay.h au_cards.h dmabuff.h pcibios.h ac97mix.h sc_sbl24.h emu10k1.h
 $(OUTD)/sc_sbliv.o:: sc_sbliv.c  mpxplay.h au_cards.h dmabuff.h pcibios.h ac97mix.h sc_sbliv.h emu10k1.h
 $(OUTD)/sc_via82.o:: sc_via82.c  mpxplay.h au_cards.h dmabuff.h pcibios.h ac97.h
-$(OUTD)/sc_es1688.o:: sc_es1688.c au_cards.h config.h
-$(OUTD)/sc_vew211.o:: sc_vew211.c au_cards.h config.h
-$(OUTD)/sc_tp755.o:: sc_tp755.c au_cards.h dmabuff.h config.h
+$(OUTD)/sc_es1688.o:: sc_es1688.c au_cards.h config.h ptops.h
+$(OUTD)/sc_vew211.o:: sc_vew211.c au_cards.h config.h ptops.h
+$(OUTD)/sc_tp755.o:: sc_tp755.c au_cards.h dmabuff.h config.h ptops.h
 $(OUTD)/timer.o::    timer.c     mpxplay.h au_cards.h timer.h
 
 $(OUTD)/dbopl.o::    dbopl.cpp   dbopl.h
@@ -145,12 +145,12 @@ $(OUTD)/main.o::     main.c      linear.h platform.h ptrap.h vopl3.h pic.h confi
 $(OUTD)/pic.o::      pic.c       pic.h platform.h ptrap.h
 $(OUTD)/ptrap.o::    ptrap.c     linear.h platform.h ptrap.h config.h
 $(OUTD)/fmvol.o::    fmvol.c     platform.h ptrap.h fmvol.h
-$(OUTD)/sndisr.o::   sndisr.c    linear.h platform.h vopl3.h pic.h config.h vsb.h vdma.h virq.h ctadpcm.h au.h
+$(OUTD)/sndisr.o::   sndisr.c    linear.h platform.h vopl3.h pic.h config.h vsb.h vdma.h virq.h ctadpcm.h au.h ptops.h
 $(OUTD)/tsf.o::      tsf.c       tsf/tsf.h
 $(OUTD)/vdma.o::     vdma.c      linear.h platform.h ptrap.h vdma.h config.h
 $(OUTD)/virq.o::     virq.c      linear.h platform.h pic.h ptrap.h virq.h config.h
 $(OUTD)/vopl3.o::    vopl3.cpp   dbopl.h vopl3.h config.h
-$(OUTD)/vsb.o::      vsb.c       linear.h platform.h vsb.h config.h
+$(OUTD)/vsb.o::      vsb.c       linear.h platform.h vsb.h config.h ptops.h
 $(OUTD)/vmpu.o::     vmpu.c      linear.h platform.h vmpu.h config.h
 
 $(OUTD)/djdpmi.o::   djdpmi.asm

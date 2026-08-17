@@ -11,6 +11,7 @@
 #include "VIRQ.H"
 #include "VDMA.H"
 #include "PTRAP.H"
+#include "PTOPS.H"
 #if VMPU
 #include "VMPU.H"
 #endif
@@ -385,15 +386,11 @@ static void DSP_Reset( uint8_t value )
          * reboot, and a format-matching next stream skipped its chip re-arm
          * (the 'pinball -> idle -> pinball silent' case). Every guest DSP
          * reset lands here, i.e. before any game's SB detect. */
-        { extern int SNDISR_PassThru; extern void ES1688_PT_Watchdog(void);
-#ifdef CARD_TP755
-          /* TP755: render build (the tap stays 0), but the hook doubles as
-           * the stuck-INT/masked-ch0 heal -- call it on every DSP reset. */
-          ES1688_PT_Watchdog();
-#else
-          if ( SNDISR_PassThru ) ES1688_PT_Watchdog();
-#endif
-        }
+        /* Runtime-dispatched: a backend that registered a watchdog gets it
+         * on every reset (on the TP755 the hook doubles as the stuck-INT/
+         * masked-ch0 heal despite the tap staying unarmed); a backend that
+         * never claimed the session left the default table, watchdog NULL. */
+        if ( PT_Ops->watchdog ) PT_Ops->watchdog();
 #endif
         /* v1.5: bits 4-7 are rsvd, set to 1? DosBox sets to 0 - check a real SB16! */
         /* v1.7: now done in VSB_Init() - INT_SETUP and DMA_SETUP are r/o registers */
@@ -1046,7 +1043,6 @@ void VSB_SetIRQStatus( uint8_t flag )
     vsb.MixerRegs[SB_MIXERREG_IRQ_STATUS] |= flag;
 }
 
-#ifdef CARD_TP755
 /* revival squelch (sndisr.c): a completion latched BEFORE an engine freeze
  * must be dropped outright on heal, not delivered into seconds-stale guest
  * state (SetIRQStatus only ORs, so a dedicated clear is needed). */
@@ -1055,7 +1051,6 @@ void VSB_ClearIRQStatus( void )
 {
     vsb.MixerRegs[SB_MIXERREG_IRQ_STATUS] &= ~( SB_MIXERREG_IRQ_STAT8BIT | SB_MIXERREG_IRQ_STAT16BIT );
 }
-#endif
 
 int VSB_GetIRQStatus( void )
 ////////////////////////////
