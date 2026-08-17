@@ -15,8 +15,12 @@
 #   JWASM_BIN - a Linux JWasm binary (build: git clone JWasm; make -f GccUnix.mak),
 #               default ~/vsbhda-tools/jwasm
 #
-# The tree must be case-normalized (lowercase filenames + #include directives) --
-# already done in this repo. The makefile's DOS link stage (copy /b, del) dies
+# CASE HANDLING: upstream tracks src/*.C and src/*.H in UPPERCASE while djgpp.mak
+# refers to them in lowercase -- self-consistent only on a case-INSENSITIVE
+# filesystem (DOS/Windows/macOS), which is where upstream builds. This container
+# is case-SENSITIVE, so the tree is copied to /work and lowercased THERE; the repo
+# is never modified, so a fresh clone builds unprepared and upstream merges stay
+# cheap. The makefile's DOS link stage (copy /b, del) dies
 # under Linux, which is EXPECTED: objects are archived + linked manually below.
 # The default DJGPP stub is used (no res/stub.bin swap needed -- verified on
 # hardware). Always a CLEAN build: stale objects have bitten before (the tsf.o
@@ -25,6 +29,18 @@ set -e
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 DJGPP_DIR="${DJGPP_DIR:-$HOME/djgpp}"
 JWASM_BIN="${JWASM_BIN:-$HOME/vsbhda-tools/jwasm}"
+
+# SAFETY: REPO is derived from $0, so a COPY of this script placed anywhere else
+# resolves REPO to that directory's parent -- from /tmp that is "/", and the
+# docker run below would mount the ENTIRE FILESYSTEM as /build and tar it.
+# (Done exactly once, 2026-08-17, complete with macOS privacy prompts.)
+# Refuse to run unless REPO really is this repo.
+if [ ! -f "$REPO/djgpp.mak" ] || [ ! -d "$REPO/src" ]; then
+  echo "build.sh: refusing to run -- '$REPO' is not the VSBPCMCIA repo" >&2
+  echo "  (no djgpp.mak / src). Run tools/build.sh from inside the repo;" >&2
+  echo "  do not copy this script elsewhere -- REPO comes from its own path." >&2
+  exit 1
+fi
 
 if [ "$CARD" = "VEW211" ]; then
   CARDDEF="-DCARD_VEW211"
@@ -47,6 +63,23 @@ docker run --rm --platform linux/amd64 \
   ln -sf /usr/local/bin/jwasm /usr/local/bin/jwasm.exe
   for t in /opt/djgpp/bin/i586-pc-msdosdjgpp-*; do n=$(basename "$t" | sed "s/i586-pc-msdosdjgpp-//"); ln -sf "$t" /usr/local/bin/"$n"; done
   export PATH=/opt/djgpp/bin:/usr/local/bin:$PATH
+
+  echo "=== case-normalising a throwaway copy (repo untouched) ==="
+  rm -rf /work; mkdir -p /work
+  tar -C /build --exclude=./.git -cf - . | tar -C /work -xf -
+  cd /work
+  find . -depth -type d | while read -r d; do
+    b=$(basename "$d"); l=$(printf %s "$b" | tr "A-Z" "a-z")
+    [ "$b" = "$l" ] || mv "$d" "$(dirname "$d")/$l"
+  done
+  find . -type f | while read -r f; do
+    b=$(basename "$f"); l=$(printf %s "$b" | tr "A-Z" "a-z")
+    [ "$b" = "$l" ] || mv "$f" "$(dirname "$f")/$l"
+  done
+  find . -type f \( -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.hpp" -o -name "*.asm" -o -name "*.inc" \) -print0 \
+    | xargs -0 sed -i -E "s/(#[[:space:]]*include[[:space:]]*\")([^\"]+)(\")/\1\L\2\E\3/"
+  rm -f djgpp/*.o djgpp/*.ar
+
   echo "=== compiling objects (${CARDDEF:-ES1688 default}) ==="
   # CPPFLAGS too, not just CFLAGS: vopl3.cpp/dbopl.cpp use $(CPPFLAGS), and
   # without the card define they compile away under NOFM -> undefined VOPL3_*.
@@ -57,5 +90,10 @@ docker run --rm --platform linux/amd64 \
   ar rc "$OUTNAME".ar $OBJ
   g++ -o "$OUTNAME".exe main.o "$OUTNAME".ar -lm 2>&1 | tail -6
   echo "=== result ==="
-  ls -la "$OUTNAME".exe 2>/dev/null && echo "BUILD OK" || echo "BUILD FAILED"
+  if [ -f "$OUTNAME".exe ]; then
+    mkdir -p /build/djgpp && cp "$OUTNAME".exe /build/djgpp/"$OUTNAME".exe
+    ls -la /build/djgpp/"$OUTNAME".exe && echo "BUILD OK"
+  else
+    echo "BUILD FAILED"
+  fi
 '

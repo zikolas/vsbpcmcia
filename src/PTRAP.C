@@ -567,6 +567,42 @@ static void PDT_DelEntries( int start, int end, int entries )
  * note: sndirq is the irq of the real sound hardware!
  */
 
+/* Forward an access to the emulated SB's FM alias on to the REAL OPL3.
+ *
+ * On a real Sound Blaster, base+0..3 and base+8/9 ARE the FM chip, and games
+ * probe them: Duke Nukem II's SB detection runs a full AdLib timer test at
+ * base+8 and refuses to touch the DSP at all unless it passes.  Upstream can
+ * simply drop these ports under /FM because there the emulated base and the
+ * real OPL are the same card.  Our real FM is at 0x388 on a separate PCMCIA
+ * base, so dropping them left the alias reading an open bus (0xFF) -- the
+ * timer test's first check is "status & 0xE0 == 0", which 0xFF fails.
+ *
+ * The SB base is 16-byte aligned, so the low two bits of the port select the
+ * OPL3 port pair for both alias windows (base+8/9 -> 388/389).
+ *
+ * With /FMVOL armed the real 0x388-0x38B are themselves trapped for carrier
+ * scaling, so alias traffic is routed through those same handlers -- writing
+ * straight to the chip here would sneak past the attenuation and play the FM
+ * alias at full volume.
+ */
+static uint8_t FM_Alias( uint16_t port, uint8_t val, uint16_t flags )
+{
+    uint16_t fm = 0x388 + (port & 3);
+    if ( FMVOL_Active() ) {
+        switch ( port & 3 ) {
+        case 0:  return FMVOL_388( fm, val, flags );
+        case 1:  return FMVOL_389( fm, val, flags );
+        case 2:  return FMVOL_38A( fm, val, flags );
+        default: return FMVOL_38B( fm, val, flags );
+        }
+    }
+    if ( flags & TRAPF_OUT ) {
+        UntrappedIO_OUT( fm, val );
+        return val;
+    }
+    return UntrappedIO_IN( fm );
+}
+
 void PTRAP_Prepare( int opl, int sbaddr, int dma, int hdma, int sndirq )
 ////////////////////////////////////////////////////////////////////////
 {
@@ -616,14 +652,22 @@ void PTRAP_Prepare( int opl, int sbaddr, int dma, int hdma, int sndirq )
              * FM volume protected-mode games get - the half a JLM can't reach.
              * The 0x220-0x223/0x228-0x229 FM aliases still go: the CF-VEW211
              * decodes FM at 0x388 only. */
-            int b = portranges[OPL3_PDT];
-            PortHandler[b+0] = FMVOL_388; PortHandler[b+1] = FMVOL_389;
-            PortHandler[b+2] = FMVOL_38A; PortHandler[b+3] = FMVOL_38B;
+            int f = portranges[OPL3_PDT];
+            PortHandler[f+0] = FMVOL_388; PortHandler[f+1] = FMVOL_389;
+            PortHandler[f+2] = FMVOL_38A; PortHandler[f+3] = FMVOL_38B;
         } else
             PDT_DelEntries( portranges[OPL3_PDT], maxports, 4 );
-        PDT_DelEntries( portranges[SB_PDT], maxports, 4 );
-        /* v1.8: also remove ports 0x228-0x229; +3 to skip ports 0x224,0x225,0x226 */
-        PDT_DelEntries( portranges[SB_PDT]+3, maxports, 2 );
+        /* The SB-base FM aliases are KEPT and forwarded to 0x388-0x38B rather
+         * than dropped -- games probe them to decide a Sound Blaster exists.
+         * See FM_Alias().  (The CF-VEW211 decodes FM at 0x388 only, which is
+         * exactly where these are sent.) */
+        { int b = portranges[SB_PDT];
+          PortHandler[b+0] = FM_Alias;   /* base+0 */
+          PortHandler[b+1] = FM_Alias;   /* base+1 */
+          PortHandler[b+2] = FM_Alias;   /* base+2 */
+          PortHandler[b+3] = FM_Alias;   /* base+3 */
+          PortHandler[b+7] = FM_Alias;   /* base+8 */
+          PortHandler[b+8] = FM_Alias; } /* base+9 */
     }
 
     /* delete empty port ranges */
