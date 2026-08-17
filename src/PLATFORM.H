@@ -19,7 +19,11 @@ static inline unsigned int BSF(unsigned int x)
 static inline unsigned long long rdtsc(void)
 {
 	unsigned long long tsc;
-	asm( "rdtsc" : "=r" (tsc) );
+	/* "=A" = EDX:EAX, which is what RDTSC hard-writes. With "=r" GCC may
+	 * allocate any pair -- the value is then garbage AND live EAX/EDX are
+	 * clobbered without being declared. NOTE: rdtsc #UDs on a 486; every
+	 * caller must gate on SNDISR_HasTsc (ptops.h). */
+	asm( "rdtsc" : "=A" (tsc) );
 	return tsc;
 }
 # if FPUSRINLINE 

@@ -19,6 +19,7 @@
 #include "PIC.H"
 #include "LINEAR.H"
 #include "PTRAP.H"
+#include "PTOPS.H"
 #include "VDMA.H"
 #include "VIRQ.H"
 #include "VOPL3.H"
@@ -597,8 +598,14 @@ int main(int argc, char* argv[])
     if ( gvars.vol != VOL_DEFAULT )
         printf("Volume: %u\n", gvars.vol );
 #if SLOWDOWN
-    if ( gvars.slowdown  )
-        printf("Slowdown factor: %u\n", gvars.slowdown );
+    if ( gvars.slowdown  ) {
+        /* the delay loop is RDTSC-based, which #UDs on a 486: say it is
+         * ignored rather than let the ISR fault (see delay_10us). */
+        if ( SNDISR_HasTsc )
+            printf("Slowdown factor: %u\n", gvars.slowdown );
+        else
+            printf("Slowdown factor: ignored (no TSC on this CPU)\n");
+    }
 #endif
     if (gvars.period_size)
         printf("Period size: %d\n", gvars.period_size);

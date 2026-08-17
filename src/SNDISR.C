@@ -181,6 +181,13 @@ static void delay_10us(unsigned int ticks)
 	static uint64_t oldtsc = 0;
 	uint64_t newtsc;
 
+	/* RDTSC is an invalid opcode on a real 486 -- the fleet this port
+	 * exists for -- and this runs in ISR context, so an ungated /SD was a
+	 * #UD wedge on every non-Pentium box. Ignore the slowdown there
+	 * rather than fault (main.c says so at startup). */
+	if ( !SNDISR_HasTsc )
+		return;
+
 	do {
 		newtsc = rdtsc();
 	} while ( (newtsc - oldtsc) < ( ticks << 18 ) );

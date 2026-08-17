@@ -141,7 +141,7 @@ $(OUTD)/timer.o::    timer.c     mpxplay.h au_cards.h timer.h
 
 $(OUTD)/dbopl.o::    dbopl.cpp   dbopl.h
 $(OUTD)/linear.o::   linear.c    linear.h platform.h
-$(OUTD)/main.o::     main.c      linear.h platform.h ptrap.h vopl3.h pic.h config.h vsb.h vdma.h virq.h au.h version.h
+$(OUTD)/main.o::     main.c      linear.h platform.h ptrap.h vopl3.h pic.h config.h vsb.h vdma.h virq.h au.h version.h ptops.h
 $(OUTD)/pic.o::      pic.c       pic.h platform.h ptrap.h
 $(OUTD)/ptrap.o::    ptrap.c     linear.h platform.h ptrap.h config.h
 $(OUTD)/fmvol.o::    fmvol.c     platform.h ptrap.h fmvol.h
