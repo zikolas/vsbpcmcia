@@ -24,6 +24,8 @@
 #include "PTRAP.H"
 #include "VOPL3.H"
 #include "FMVOL.H"
+#include "FMSHIM.H"
+#include "PTOPS.H"
 #include "VDMA.H"
 #include "VIRQ.H"
 #include "VSB.H"
@@ -857,10 +859,18 @@ static void PDT_DelEntries( int start, int end, int entries )
  * scaling, so alias traffic is routed through those same handlers -- writing
  * straight to the chip here would sneak past the attenuation and play the FM
  * alias at full volume.
+ *
+ * On a card with NO FM silicon (the 755C's planar CS4248) there is nothing to
+ * forward TO -- 0x388 is open bus and the probe fails on 0xFF -- so the same
+ * aliases are answered by the timer-only shim instead. See fmshim.c.
  */
+static int FmShimOn;   /* set in PTRAP_Prepare: this card has no real FM */
+
 static uint8_t FM_Alias( uint16_t port, uint8_t val, uint16_t flags )
 {
     uint16_t fm = 0x388 + (port & 3);
+    if ( FmShimOn )
+        return FMSHIM_Acc( fm, val, flags );
     if ( FMVOL_Active() ) {
         switch ( port & 3 ) {
         case 0:  return FMVOL_388( fm, val, flags );
@@ -918,7 +928,28 @@ void PTRAP_Prepare( int opl, int sbaddr, int dma, int hdma, int sndirq )
 
     /* if no OPL3 emulation, skip ports 0x388-0x38b, 0x220-0x223 and 0x228-0x229 */
     if ( !opl ) {
-        if ( FMVOL_Active() ) {
+        /* Does this card have FM silicon behind 0x388? The backend says so in
+         * its ops table (ptops.h). SBEFMSHIM=1 forces the FM-less path on a
+         * card that does have a chip -- a bench knob for exercising the shim
+         * (expect FM music to go silent while SB detection keeps working). */
+        FmShimOn = !( PT_Ops->flags & PTF_REAL_FM );
+        { const char *e = getenv("SBEFMSHIM");
+          if ( e && *e == '1' ) FmShimOn = 1; }
+
+        if ( FmShimOn ) {
+            /* No chip anywhere: keep 0x388-0x38B TRAPPED (they would read
+             * open bus otherwise) and answer them from the shim, so a guest
+             * probing AdLib directly detects an OPL and a guest probing the
+             * SB base aliases gets past its FM gate to the DSP. No synthesis
+             * is compiled in on this path, so music stays silent -- what this
+             * recovers is the card's digital audio. */
+            int f = portranges[OPL3_PDT];
+            FMSHIM_Reset();
+            PortHandler[f+0] = FMSHIM_Acc; PortHandler[f+1] = FMSHIM_Acc;
+            PortHandler[f+2] = FMSHIM_Acc; PortHandler[f+3] = FMSHIM_Acc;
+            printf("FM: no chip on this card - timer-only OPL3 shim at 388h"
+                   " (detection only, no music)\n");
+        } else if ( FMVOL_Active() ) {
             /* FMVOL: keep 0x388-0x38B trapped, but filtered+forwarded to the
              * REAL OPL3 with carrier-level scaling.  Because these are the
              * ordinary port traps (QPI for V86, HDPMI32i for PM), this is the
@@ -928,8 +959,11 @@ void PTRAP_Prepare( int opl, int sbaddr, int dma, int hdma, int sndirq )
             int f = portranges[OPL3_PDT];
             PortHandler[f+0] = FMVOL_388; PortHandler[f+1] = FMVOL_389;
             PortHandler[f+2] = FMVOL_38A; PortHandler[f+3] = FMVOL_38B;
-        } else
+        } else {
+            /* real chip, no attenuator wanted: leave 0x388-0x38B UNtrapped so
+             * guest AdLib music rides the hardware directly */
             PDT_DelEntries( portranges[OPL3_PDT], maxports, 4 );
+        }
         /* The SB-base FM aliases are KEPT and forwarded to 0x388-0x38B rather
          * than dropped -- games probe them to decide a Sound Blaster exists.
          * See FM_Alias().  (The CF-VEW211 decodes FM at 0x388 only, which is
