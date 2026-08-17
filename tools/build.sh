@@ -122,6 +122,9 @@ docker run --rm --platform linux/amd64 \
   OBJ=$(ls *.o 2>/dev/null | grep -v "^main.o$")
   ar rc "$OUTNAME".ar $OBJ
   g++ -o "$OUTNAME".exe main.o "$OUTNAME".ar -lm 2>&1 | tail -6
+  # the DOS link stage in djgpp.mak strips; this manual replacement must too,
+  # or ~46% of the shipped exe is non-loadable DWARF (measured on v0.6.1).
+  strip -s "$OUTNAME".exe
   echo "=== result ==="
   if [ -f "$OUTNAME".exe ]; then
     mkdir -p /build/djgpp && cp "$OUTNAME".exe /build/djgpp/"$OUTNAME".exe
