@@ -7,7 +7,7 @@
  * FM for free. VMPU 0 = no 0x330 MPU trap. SOUNDFONT 0 = no TinySoundFont MIDI. */
 /* VSBPCMCIA: our fork version (the banner shows this; VERMAJOR/VERMINOR in
  * version.h stay upstream's VSBHDA core version for lineage/merge sanity). */
-#define VSBPCM_VER "0.6"
+#define VSBPCM_VER "0.6.1"
 
 /* VSBPCMCIA is PCMCIA-only: none of the fleet has PCI, so the PCI card
  * drivers are dead weight (~15% of the binary). Excluded via upstream's own
