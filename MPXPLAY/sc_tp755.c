@@ -49,7 +49,7 @@
 //     table) re-unmasks ch0 as a cheap idempotent heal.
 //**************************************************************************
 
-#ifdef CARD_TP755
+#ifndef NOTP755
 
 #include <string.h>
 #include <stdint.h>
@@ -503,13 +503,19 @@ static int TP755_adetect(struct audioout_info_s *aui)
  int seg, par;
  uint32_t lin, start;
 
+ if(!PTOPS_CardWanted("tp755")) return 0;
+
  // real ch0 is ours; a guest on /D0 would reprogram it mid-ring
  if(aui->gvars->dma == 0){
   printf("CS4248: guest DMA 0 collides with the codec's real DMA ch0; use /D1 or /D3\n");
   return 0;
  }
 
- e = getenv("SBEBASE");
+ // TPBASE, not SBEBASE: here "base" is the planar codec block (0x4E30), a
+ // third meaning of the word. One binary carries all three backends now, so
+ // each reads its own variable -- a shared name would aim one probe at
+ // another card's live registers.
+ e = getenv("TPBASE");
  if(e){ long b = strtol(e, NULL, 16); if(b > 0 && b <= 0xFFFC) tp_cb = (uint16_t)b; }
  e = getenv("DACRATE");
  if(e){ unsigned r = (unsigned)atoi(e);
@@ -517,6 +523,16 @@ static int TP755_adetect(struct audioout_info_s *aui)
                if(r > TP_RATE_MAX) r = TP_RATE_MAX; tp_dacrate = r; } }
  e = getenv("SBEVOL");
  if(e){ int a = atoi(e); if(a >= 0 && a <= 63) tp_vol = a; }
+
+ // PRE-GATE, no writes: a genuine 755C answers this port whether its codec
+ // is enabled or not (a disabled one reads 0x80); open bus on every other
+ // machine reads 0xFF. Checking BEFORE tp_twiddle means we never poke the
+ // ThinkPad system-control port 0x15E8 on a machine that is not a ThinkPad --
+ // which matters now that this probe runs in a binary that also serves
+ // PC110s, T2130CTs and OmniBooks. (A BIOS model/submodel gate via INT 15h
+ // AH=C0h belongs on top of this, but its values have to be measured on the
+ // bench first -- no machine identification exists in this tree yet.)
+ if((unsigned char)inportb(tp_cb + TC_IAR) == 0xFF) return 0;
 
  tp_ctl_was_on = tp_twiddle(1);               // enable the card
  if(!(tp_ctl_was_on & TP_CTL_BIT)) TP_MS(60); // fresh power-up: let it settle
@@ -535,7 +551,14 @@ static int TP755_adetect(struct audioout_info_s *aui)
  // OPL write ring -- layout owned by ptrap.c) lives there; the stub
  // outgrew the PSP and the audio ring never reaches this slack (the 64K
  // dodge keeps start within the first half).
+#ifdef CARD_TP755
  par = (int)((2 * TP_RING_BYTES + 15) >> 4) + TP_RMHOME_PARA;
+#else
+ // No software OPL in this build, so no write ring and no relocated v86
+ // stub: the stub stays in the PSP (53 bytes of the 160 available) and we
+ // keep TP_RMHOME_PARA paragraphs of DOS memory that would go unused.
+ par = (int)((2 * TP_RING_BYTES + 15) >> 4);
+#endif
  seg = tp_dos_alloc((unsigned)par, &tp_dos_sel);
  if(seg == -1){ printf("CS4248: DOS memory alloc failed\n"); goto notfound; }
  lin = (uint32_t)seg << 4;
@@ -545,7 +568,9 @@ static int TP755_adetect(struct audioout_info_s *aui)
  tp_ring_phys = start;                        // physical == linear below 1MB
  tp_ring = (char *)TP_NEARPTR(start);
  memset(tp_ring, 0, TP_RING_BYTES);
+#ifdef CARD_TP755
  PTRAP_SetOplRing(lin + (uint32_t)(par - TP_RMHOME_PARA) * 16);
+#endif
 
  card = (struct tp755_card_s *)calloc(1, sizeof(*card));
  if(!card){ __dpmi_free_dos_memory(tp_dos_sel); tp_dos_sel = 0; goto notfound; }
@@ -739,4 +764,4 @@ struct sndcard_info_s TP755_sndcard_info={
  NULL, NULL, NULL                                     // mixer slots
 };
 
-#endif // CARD_TP755
+#endif // NOTP755

@@ -121,6 +121,22 @@ static const struct pt_ops_s pt_ops_default = {
 };
 const struct pt_ops_s *PT_Ops = &pt_ops_default;
 
+int PTOPS_CardWanted( const char *id )
+{
+    const char *e = getenv("SBECARD");
+    int i;
+    if ( !e || !*e )
+        return 1;                       /* no preference: probe order decides */
+    for ( i = 0; e[i] && id[i]; i++ ) {
+        char a = e[i], b = id[i];
+        if ( a >= 'A' && a <= 'Z' ) a += 'a' - 'A';
+        if ( b >= 'A' && b <= 'Z' ) b += 'a' - 'A';
+        if ( a != b )
+            return 0;
+    }
+    return e[i] == 0 && id[i] == 0;
+}
+
 void PTOPS_Register( const struct pt_ops_s *ops )
 {
     PT_Ops = ops;

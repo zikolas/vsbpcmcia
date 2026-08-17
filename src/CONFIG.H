@@ -9,11 +9,13 @@
  * version.h stay upstream's VSBHDA core version for lineage/merge sanity). */
 #define VSBPCM_VER "0.6.1"
 
-/* VSBPCMCIA card backend: default = ES1688 (sc_es1688.c). Define CARD_VEW211
- * (tools/build.sh CARD=VEW211 does it via CFLAGS) to build the Panasonic
- * CF-VEW211 / CS4231A backend instead -- the two provide the same passthrough
- * ABI (ES1688_PT_*) and are compile-time exclusive. */
-/* #define CARD_VEW211 1 */
+/* VSBPCMCIA card backends are RUNTIME-selected: sc_es1688.c (ES1688 PCMCIA),
+ * sc_vew211.c (CF-VEW211 CS4231A) and sc_tp755.c (TP755C planar CS4248) are
+ * all compiled into the default build and probed in order (au_cards.c), each
+ * reading its own base variable. SET SBECARD=es1688|vew211|tp755 pins one.
+ * NOES1688 / NOVEW211 / NOTP755 drop a backend from the build if space is
+ * ever tight; CARD_TP755 is no longer a backend selector -- it now means
+ * "compile the software OPL too", i.e. FM music on the FM-less 755C. */
 
 /* VSBPCMCIA is PCMCIA-only: none of the fleet has PCI, so the PCI card
  * drivers are dead weight (~15% of the binary). Excluded via upstream's own

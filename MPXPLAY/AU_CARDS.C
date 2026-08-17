@@ -26,12 +26,18 @@
 
 extern uint8_t bOMode;
 
-#ifdef CARD_VEW211
-extern struct sndcard_info_s VEW211_sndcard_info;
-#elif defined(CARD_TP755)
+/* The PCMCIA/planar passthrough backends all coexist now (the ABI they used
+ * to share is dispatched through ptops.h), so all three are probed in order
+ * instead of being selected at build time. SET SBECARD=es1688|vew211|tp755
+ * pins one. */
+#ifndef NOTP755
 extern struct sndcard_info_s TP755_sndcard_info;
-#elif !defined(NOES1688)
+#endif
+#ifndef NOES1688
 extern struct sndcard_info_s ES1688_sndcard_info;
+#endif
+#ifndef NOVEW211
+extern struct sndcard_info_s VEW211_sndcard_info;
 #endif
 #ifndef NOES1371
 extern struct sndcard_info_s ES1371_sndcard_info;
@@ -50,12 +56,21 @@ extern struct sndcard_info_s SBALL_sndcard_info;
 #endif
 
 static const struct sndcard_info_s *sndcard_info_table[] = {
-#ifdef CARD_VEW211
-	&VEW211_sndcard_info,   /* PCMCIA CS4231A passthrough (CF-VEW211); no PCI, tried first */
-#elif defined(CARD_TP755)
-	&TP755_sndcard_info,    /* TP755C planar CS4248, 8237-ch0 DMA ring; no PCI, tried first */
-#elif !defined(NOES1688)
-	&ES1688_sndcard_info,   /* PCMCIA ES1688 passthrough (PC110/235); no PCI, tried first */
+	/* Probe order = strongest identification first, and it also decides who
+	 * wins on a box that has both. TP755 is the planar device (no card in the
+	 * slot) and gates on a read of its own block before touching anything, so
+	 * on a 755C it claims the session; a PC Card user there forces the card
+	 * with SBECARD. ES1688 does a real DSP handshake at 0x220. VEW211 goes
+	 * last: its whole presence test is "something answers at the codec port",
+	 * so it must never get first refusal on another card's registers. */
+#ifndef NOTP755
+	&TP755_sndcard_info,    /* TP755C planar CS4248, 8237-ch0 DMA ring */
+#endif
+#ifndef NOES1688
+	&ES1688_sndcard_info,   /* PCMCIA ES1688 passthrough (PC110/235) */
+#endif
+#ifndef NOVEW211
+	&VEW211_sndcard_info,   /* PCMCIA CS4231A passthrough (CF-VEW211) */
 #endif
 #ifndef NOES1371
 	&ES1371_sndcard_info,

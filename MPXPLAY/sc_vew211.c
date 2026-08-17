@@ -52,18 +52,18 @@
 //  hosts, SB-era guests). A chained IRQ0 heartbeat revives a dead RTC. The
 //  CS4231A in PIO mode needs no card-IRQ servicing (no ES1688-style TC IRQ).
 //
-//  Layout: I/O window base 0x530 (CIS idx 0x20; SBEBASE overrides); the
+//  Layout: I/O window base 0x530 (CIS idx 0x20; VEWBASE overrides); the
 //  CS4231A answers at base+4..+7 (IAR/IDR/SR/PDR). FM is a DISCRETE YMF262
 //  (OPL3) at 0x388 decoding all four ports natively: with NOFM the guest's
 //  AdLib I/O reaches it untrapped -- real OPL3, no relay needed. The card
 //  must be brought up by VEW21XGO first.
 //
-//  BACKEND SELECTION: define CARD_VEW211 (config.h) to build this backend;
-//  sc_es1688.c self-excludes -- both provide the same passthrough ABI
-//  (ES1688_PT_* -- historical names, card-agnostic) and must never both
-//  be compiled in.
+//  BACKEND SELECTION: runtime. This backend is compiled into the default
+//  build alongside sc_es1688.c and sc_tp755.c and probed in table order
+//  (au_cards.c); the passthrough ABI they once shared is now dispatched
+//  through the ptops.h ops table. SET SBECARD=vew211 pins this one.
 //**************************************************************************
-#ifdef CARD_VEW211
+#ifndef NOVEW211
 
 #include <string.h>
 #include <stdint.h>
@@ -124,7 +124,7 @@ static unsigned long es_tel_bytes;
 static unsigned char es_tel_irq;
 
 // ---- card geometry -------------------------------------------------------
-#define VEW_WIN_BASE  0x530         // I/O window base (CIS idx 0x20); SBEBASE overrides
+#define VEW_WIN_BASE  0x530         // I/O window base (CIS idx 0x20); VEWBASE overrides
 #define VEW_CODEC_OFF  4            // CS4231A sits at window base + 4
 #define VC_IAR  0                   // Index Address Register (bit6 = MCE)
 #define VC_IDR  1                   // Indexed Data Register
@@ -628,7 +628,12 @@ static int VEW211_adetect(struct audioout_info_s *aui)
 {
  vew211_card_s *card;
  uint16_t base = VEW_WIN_BASE;
- const char *e = getenv("SBEBASE");
+ const char *e;
+ if(!PTOPS_CardWanted("vew211")) return 0;
+ // VEWBASE, not SBEBASE: on this card "base" is the PCMCIA I/O WINDOW (codec
+ // at +4), not an SB DSP base. Sharing one variable across backends in a
+ // single binary would point one probe at another card's live registers.
+ e = getenv("VEWBASE");
  const char *r = getenv("DACRATE");
  const char *t = getenv("SBERTC");
  const char *v = getenv("SBEVOL");
@@ -791,4 +796,4 @@ struct sndcard_info_s VEW211_sndcard_info={
  NULL, NULL, NULL                                     // mixer slots
 };
 
-#endif // CARD_VEW211
+#endif // NOVEW211

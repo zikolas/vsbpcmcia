@@ -42,6 +42,12 @@ extern const struct pt_ops_s *PT_Ops;
  * for the duration telemetry. */
 void PTOPS_Register( const struct pt_ops_s *ops );
 
+/* Runtime backend selection. SBECARD=es1688|vew211|tp755 pins the session to
+ * one backend; unset means "probe in table order". Every backend's adetect
+ * calls this first, so a user on an ambiguous box can always force the right
+ * one without a rebuild. Init context only (it reads the environment). */
+int PTOPS_CardWanted( const char *id );
+
 /* Engine-generic ISR telemetry (the BIOS 0x4F0-0x4FF map -- see
  * doc/NOTES.md), formerly duplicated in sc_es1688.c and sc_vew211.c. */
 void SNDISR_dbg_tick(void);

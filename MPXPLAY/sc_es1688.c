@@ -40,10 +40,10 @@
 //  SBEMU feeds 16-bit stereo; we down-mix to 8-bit mono into the ring in
 //  ES1688_writedata. The SB must be brought up at its base by ES1688GO first.
 //**************************************************************************
-#if !defined(NOES1688) && !defined(CARD_VEW211) && !defined(CARD_TP755)
-   /* self-exclude when another backend owns the build: all backends provide
-    * the same passthrough ABI symbols (ES1688_PT_*) and must never both be
-    * compiled in */
+#ifndef NOES1688
+   /* All backends now coexist in one binary: the passthrough ABI they used to
+    * export in common is dispatched through the ptops.h table, so nothing here
+    * clashes with sc_vew211.c or sc_tp755.c any more. */
 
 #include <string.h>
 #include <stdint.h>
@@ -587,7 +587,13 @@ static int ES1688_adetect(struct audioout_info_s *aui)
 {
  es1688_card_s *card;
  uint16_t base = ES_DEF_BASE;
- const char *e = getenv("SBEBASE");
+ const char *e;
+ if(!PTOPS_CardWanted("es1688")) return 0;
+ // SBEBASE keeps its historical meaning HERE and only here: the emulated SB's
+ // DSP base on an ES1688 card (the deployed GO.BATs set it). The other
+ // backends read their own variables -- one binary, three different meanings
+ // of "base", so they must not share a name.
+ e = getenv("SBEBASE");
  const char *r = getenv("DACRATE");
  const char *t = getenv("SBERTC");
  if(e) base = (uint16_t)strtol(e, NULL, 16);

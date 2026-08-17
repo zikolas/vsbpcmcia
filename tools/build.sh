@@ -1,9 +1,13 @@
 #!/bin/bash
 # VSBPCMCIA build: DJGPP + JWasm inside an amd64 Debian container.
 #
-# Card backend:   ./tools/build.sh              -> ES1688 build   (vsbpcm.exe)
-#                 CARD=VEW211 ./tools/build.sh  -> CS4231A build  (vsbpcmv.exe)
-#                 CARD=TP755 ./tools/build.sh   -> CS4248 build   (vsbpcmt.exe)
+# Card backend:   ./tools/build.sh              -> UNIFIED build  (vsbpcm.exe)
+#                     ES1688 + CF-VEW211 + TP755C in one binary, probed at
+#                     runtime; SET SBECARD=es1688|vew211|tp755 to pin one.
+#                 CARD=TP755 ./tools/build.sh   -> unified + software OPL
+#                     (vsbpcmt.exe): same three backends, but with dbopl
+#                     compiled in so the FM-less 755C gets actual FM MUSIC
+#                     instead of the detection-only shim.
 #                 CARD=AUDIGY ./tools/build.sh  -> Audigy build   (vsbpcma.exe)
 #
 # CARD=AUDIGY is the odd one out: it keeps the ES1688 PCMCIA backend but ALSO
@@ -47,8 +51,10 @@ if [ ! -f "$REPO/djgpp.mak" ] || [ ! -d "$REPO/src" ]; then
 fi
 
 if [ "$CARD" = "VEW211" ]; then
-  CARDDEF="-DCARD_VEW211"
-  OUTNAME="vsbpcmv"
+  echo "build.sh: CARD=VEW211 is retired -- the default build now CONTAINS the" >&2
+  echo "  VEW211 backend and picks it at runtime. Build without CARD and use" >&2
+  echo "  SET SBECARD=vew211 on the box to pin it." >&2
+  exit 1
 elif [ "$CARD" = "TP755" ]; then
   CARDDEF="-DCARD_TP755"
   OUTNAME="vsbpcmt"
