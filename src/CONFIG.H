@@ -30,9 +30,11 @@
 #define NOVIA82   1
 
 /* The ES1688/VEW211 fleet has real hardware FM at 0x388 to fall through to, so
- * stripping the software OPL3 is free there. The Audigy has none, so a
- * CARD_AUDIGY build must emulate it or AdLib music is simply silent. */
-#ifndef CARD_AUDIGY
+ * stripping the software OPL3 is free there. The Audigy and the 755C's planar
+ * CS4248 have no FM chip anywhere, so those builds keep the DOSBox OPL3
+ * emulation (0x388 trapped, dbopl rendered into the stream) or AdLib music is
+ * simply silent. */
+#if !defined(CARD_AUDIGY) && !defined(CARD_TP755)
 #define NOFM      1   /* strip DOSBox OPL3 emulation; leave 0x388 to the hardware */
 #endif
 

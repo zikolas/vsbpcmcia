@@ -28,6 +28,8 @@ extern uint8_t bOMode;
 
 #ifdef CARD_VEW211
 extern struct sndcard_info_s VEW211_sndcard_info;
+#elif defined(CARD_TP755)
+extern struct sndcard_info_s TP755_sndcard_info;
 #elif !defined(NOES1688)
 extern struct sndcard_info_s ES1688_sndcard_info;
 #endif
@@ -50,6 +52,8 @@ extern struct sndcard_info_s SBALL_sndcard_info;
 static const struct sndcard_info_s *sndcard_info_table[] = {
 #ifdef CARD_VEW211
 	&VEW211_sndcard_info,   /* PCMCIA CS4231A passthrough (CF-VEW211); no PCI, tried first */
+#elif defined(CARD_TP755)
+	&TP755_sndcard_info,    /* TP755C planar CS4248, 8237-ch0 DMA ring; no PCI, tried first */
 #elif !defined(NOES1688)
 	&ES1688_sndcard_info,   /* PCMCIA ES1688 passthrough (PC110/235); no PCI, tried first */
 #endif

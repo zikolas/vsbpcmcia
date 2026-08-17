@@ -641,7 +641,17 @@ void Operator::KeyOff( uint8_t mask )
 	return (waveBase[ index & waveMask ] * MulTable[ vol >> ENV_EXTRA ]) >> MUL_SH;
 #elif ( DBOPL_WAVE == WAVE_TABLELOG )
 	int32_t wave = waveBase[ index & waveMask ];
-	uint32_t total = ( wave & 0x7fff ) + vol << ( 3 - ENV_EXTRA );
+	/* VSBPCMCIA fix: upstream DOSBox has
+	 *     ( wave & 0x7fff ) + vol << ( 3 - ENV_EXTRA )
+	 * and C binds '+' tighter than '<<', so the whole SUM gets shifted --
+	 * the wave's own log-domain magnitude is scaled by 8 along with the
+	 * volume, i.e. ~8x over-attenuation (near-silence / wrecked timbre).
+	 * The intended form is visible in the WAVE_HANDLER path, which passes
+	 * the volume PRE-shifted -- waveHandler( index, vol << ( 3 - ENV_EXTRA ) )
+	 * -- and MakeVolume() then does a plain wave + volume. Parenthesised
+	 * here to match. Latent upstream bug: DOSBox ships TABLEMUL, so this
+	 * branch is dead code there and nobody ever heard it. */
+	uint32_t total = ( wave & 0x7fff ) + ( vol << ( 3 - ENV_EXTRA ) );
 	int32_t sig = ExpTable[ total & 0xff ];
 	uint32_t exp = total >> 8;
 	int32_t neg = wave >> 16;

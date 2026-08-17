@@ -3,6 +3,7 @@
 #
 # Card backend:   ./tools/build.sh              -> ES1688 build   (vsbpcm.exe)
 #                 CARD=VEW211 ./tools/build.sh  -> CS4231A build  (vsbpcmv.exe)
+#                 CARD=TP755 ./tools/build.sh   -> CS4248 build   (vsbpcmt.exe)
 #                 CARD=AUDIGY ./tools/build.sh  -> Audigy build   (vsbpcma.exe)
 #
 # CARD=AUDIGY is the odd one out: it keeps the ES1688 PCMCIA backend but ALSO
@@ -48,6 +49,9 @@ fi
 if [ "$CARD" = "VEW211" ]; then
   CARDDEF="-DCARD_VEW211"
   OUTNAME="vsbpcmv"
+elif [ "$CARD" = "TP755" ]; then
+  CARDDEF="-DCARD_TP755"
+  OUTNAME="vsbpcmt"
 elif [ "$CARD" = "AUDIGY" ]; then
   CARDDEF="-DCARD_AUDIGY"
   OUTNAME="vsbpcma"
@@ -56,10 +60,35 @@ else
   OUTNAME="vsbpcm"
 fi
 
+# OPL wave generator (dbopl's DBOPL_WAVE, see src/dbopl.h):
+#   OPLGEN unset|TABLEMUL -> upstream default, one 16x16 IMUL per operator per
+#                            sample. Tuned for a Pentium's fast multiplier.
+#   OPLGEN=TABLELOG       -> multiply-free: log-domain add + ExpTable lookup.
+#                            A 486 IMUL is 13-26 clocks vs 1-3 for a shift, so
+#                            this is the one to bench on the fleet.
+#   OPLGEN=HANDLER        -> smallest tables (SinTable+ExpTable only), per
+#                            waveform function pointer. Third bench point:
+#                            less table pressure, indirect call per sample.
+# Suffix keeps every variant a distinct 8.3 name so they can sit on one box
+# side by side:  vsbpcmt.exe / vsbpcmtl.exe / vsbpcmth.exe
+case "${OPLGEN:-TABLEMUL}" in
+  TABLEMUL) OPLDEF="" ;;
+  TABLELOG) OPLDEF="-DDBOPL_WAVE=WAVE_TABLELOG"; OUTNAME="${OUTNAME}l" ;;
+  HANDLER)  OPLDEF="-DDBOPL_WAVE=WAVE_HANDLER";  OUTNAME="${OUTNAME}h" ;;
+  *) echo "build.sh: unknown OPLGEN='$OPLGEN' (TABLEMUL|TABLELOG|HANDLER)" >&2; exit 1 ;;
+esac
+# OPLDEF rides CPPFLAGS only -- CFLAGS also feeds jwasm, which has no business
+# seeing a C++ enum name. NOFM builds compile no OPL core at all, so the flag
+# is inert there; say so rather than shipping a silently identical binary.
+# (CARD=AUDIGY also compiles dbopl -- see djgpp.mak -- so it is NOT inert there.)
+if [ -n "$OPLDEF" ] && [ "$CARD" != "TP755" ] && [ "$CARD" != "AUDIGY" ]; then
+  echo "build.sh: WARNING -- OPLGEN=$OPLGEN is inert without CARD=TP755/AUDIGY (NOFM strips dbopl)" >&2
+fi
+
 rm -f "$REPO"/djgpp/*.o "$REPO"/djgpp/*.ar
 
 docker run --rm --platform linux/amd64 \
-  -e CARDDEF="$CARDDEF" -e OUTNAME="$OUTNAME" \
+  -e CARDDEF="$CARDDEF" -e OPLDEF="$OPLDEF" -e OUTNAME="$OUTNAME" \
   -v "$REPO":/build -v "$DJGPP_DIR":/opt/djgpp -v "$JWASM_BIN":/usr/local/bin/jwasm \
   -w /build debian:stable-slim bash -c '
   set -e
@@ -84,10 +113,10 @@ docker run --rm --platform linux/amd64 \
     | xargs -0 sed -i -E "s/(#[[:space:]]*include[[:space:]]*\")([^\"]+)(\")/\1\L\2\E\3/"
   rm -f djgpp/*.o djgpp/*.ar
 
-  echo "=== compiling objects (${CARDDEF:-ES1688 default}) ==="
+  echo "=== compiling objects ($OUTNAME, ${CARDDEF:-ES1688 default}) ==="
   # CPPFLAGS too, not just CFLAGS: vopl3.cpp/dbopl.cpp use $(CPPFLAGS), and
   # without the card define they compile away under NOFM -> undefined VOPL3_*.
-  make -f djgpp.mak CFLAGS="$CARDDEF" CPPFLAGS="$CARDDEF" 2>&1 | grep -viE "warning:|note:| \^|~~~|\| |In file included" | tail -8 || true
+  make -f djgpp.mak CFLAGS="$CARDDEF" CPPFLAGS="$CARDDEF $OPLDEF" 2>&1 | grep -viE "warning:|note:| \^|~~~|\| |In file included" | tail -8 || true
   cd djgpp
   echo "=== manual archive + link (Linux) ==="
   OBJ=$(ls *.o 2>/dev/null | grep -v "^main.o$")

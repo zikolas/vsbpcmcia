@@ -343,13 +343,42 @@ static int SNDISR_Interrupt( void )
         PIC_SetIRQMask(mask | 1);
     }
 #endif
+#ifdef CARD_TP755
+    /* DEPTH LIMITER (MI1 nesting fossil, 2026-08-14 pt.2): SETIF re-enables
+     * interrupts below, and an IRQ10 edge landing in the post-render exit
+     * window (es_in_render already 0, EOI pending) nests a fresh SNDISR
+     * frame -- each one carves STACKCORR (4KB) off the private ISR stack.
+     * Trap-tax-stretched passes let this resonate to depth 14 = 56KB gone.
+     * Three live frames is already pathological: ack + EOI and get out. */
+    { extern int TP755_Depth(void);
+      if ( TP755_Depth() > 3 ) goto isrexit; }
+    /* apply the tick's buffered guest OPL writes before rendering them */
+    { extern void PTRAP_DrainOplRing(void);
+      PTRAP_DrainOplRing(); }
+#endif
     /* since the client context is now restored when a SB IRQ is emulated,
      * it's safe to call VIRQ_Invoke here. This will happen only for
      * DSP cmds 0xF2/0xF3 (trigger IRQ).
      * Todo: check if SB emulated Irq is masked; if yes, don't trigger!
      */
+#ifdef CARD_TP755
+    /* VERIFY-BEFORE-REVIVE (MI1 crash lesson, 2026-08-14): after the IRQ0
+     * guardian resurrects a dead engine clock, the guest's SB driver state is
+     * seconds stale -- injecting the PRE-freeze completion (or the first
+     * fresh ones) crashed a game that had survived the freeze itself. For
+     * the first squelched ticks after a heal, drop pending status instead. */
+    { extern volatile int tp_revive_squelch;
+      extern void VSB_ClearIRQStatus( void );
+      if ( tp_revive_squelch ) {
+          tp_revive_squelch--;
+          VSB_ClearIRQStatus();
+      } else if ( VSB_GetIRQStatus() )
+          VIRQ_Invoke();
+    }
+#else
     if ( VSB_GetIRQStatus() )
         VIRQ_Invoke();
+#endif
 
 #if SETIF
     _enable_ints();
@@ -642,7 +671,15 @@ static int SNDISR_Interrupt( void )
                 VSB_SetPos(0);
             else
                 VSB_Stop(); /* v1.8: does no longer reset SB position */
+#ifdef CARD_TP755
+            /* revival squelch: skip the injection, keep the bookkeeping;
+             * the pending status is delivered late (or dropped) by the
+             * top-of-tick gate once the squelch window has passed */
+            { extern volatile int tp_revive_squelch;
+              if ( !tp_revive_squelch ) VIRQ_Invoke(); }
+#else
             VIRQ_Invoke();
+#endif
         } else {
 #ifdef SNDISRLOG
             dbgprintf(("isr(%u): s/c(o)/b=0x%02X/0x%02X(0x%02X)/0x%03X SB Pos=0x%X DMA Idx/Cnt=%X/%X\n", loop, samples, count, ocnt, bytes, SB_Pos, DMA_Index, DMA_Count ));

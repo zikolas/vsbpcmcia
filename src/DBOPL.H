@@ -24,8 +24,18 @@
 #define WAVE_TABLEMUL	12
 
 //Select the type of wave generator routine
-//#define DBOPL_WAVE WAVE_TABLEMUL
+/* VSBPCMCIA: overridable from the build line (-DDBOPL_WAVE=WAVE_TABLELOG),
+ * see tools/build.sh OPLGEN. Without an override this stays WAVE_TABLEMUL --
+ * upstream DOSBox's pick -- so every existing build is unchanged.
+ * Why we care on a 486: TABLEMUL costs one 16x16 IMUL per operator per sample
+ * (dbopl.cpp GetWave), and a 486 IMUL is 13-26 clocks against 1-3 for the
+ * shift/add/lookup that TABLELOG uses instead. TABLEMUL is a Pentium-era
+ * choice; dbopl's author put this switch here explicitly to "try different
+ * ones for slower platforms" (dbopl.cpp header). Which one actually wins on
+ * a DX4/75 or a 486SX/33 is a measurement, not an argument. */
+#ifndef DBOPL_WAVE
 #define DBOPL_WAVE WAVE_TABLEMUL
+#endif
 
 #include <inttypes.h>
 

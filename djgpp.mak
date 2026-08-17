@@ -45,7 +45,7 @@ OBJFILES=\
 	$(OUTD)/vsb.o		$(OUTD)/vdma.o		$(OUTD)/virq.o		$(OUTD)/vopl3.o		$(OUTD)/vmpu.o		$(OUTD)/tsf.o\
 	$(OUTD)/au_cards.o\
 	$(OUTD)/dmabuff.o	$(OUTD)/physmem.o	$(OUTD)/timer.o\
-	$(OUTD)/sc_es1688.o	$(OUTD)/sc_vew211.o	$(OUTD)/fmvol.o\
+	$(OUTD)/sc_es1688.o	$(OUTD)/sc_vew211.o	$(OUTD)/sc_tp755.o	$(OUTD)/fmvol.o\
 	$(OUTD)/stackio.o	$(OUTD)/stackisr.o	$(OUTD)/sbisr.o		$(OUTD)/int31.o		$(OUTD)/rmwrap.o	$(OUTD)/mixer.o\
 	$(OUTD)/hapi.o		$(OUTD)/dprintf.o	$(OUTD)/vioout.o	$(OUTD)/djdpmi.o	$(OUTD)/uninst.o	$(OUTD)/fileacc.o
 
@@ -62,6 +62,12 @@ OBJFILES+= $(OUTD)/pcibios.o	$(OUTD)/ac97mix.o	$(OUTD)/sc_sbliv.o	$(OUTD)/sc_sbl
 OBJFILES+= $(OUTD)/emu_sf2.o	$(OUTD)/emu_wt.o
 endif
 
+# CARD_TP755: the 755C build keeps the OPL3 emulation (no FM hardware on
+# that machine -- see config.h), so dbopl.o comes back for it only.
+ifneq (,$(findstring CARD_TP755,$(CFLAGS)))
+OBJFILES+= $(OUTD)/dbopl.o
+endif
+
 INCLUDE_DIRS=src mpxplay
 SRC_DIRS=src mpxplay
 
@@ -76,8 +82,9 @@ INCLUDES=$(addprefix -I,$(INCLUDE_DIRS))
 LIBS=$(addprefix -l,stdcxx m)
 
 # $(CFLAGS) carries only the card define (-DCARD_AUDIGY etc.), so the ASM side
-# can finally see which card is being built; with CFLAGS empty the command line
-# is unchanged and the 486 builds stay byte-identical (hash-verified).
+# can see which card is being built (rmcode1.asm's v86 OPL fast-path is
+# CARD_TP755-gated); with CFLAGS empty the command line is unchanged and the
+# default build stays byte-identical.
 COMPILE.asm.o=jwasm.exe -q -djgpp -Istartup -D?MODEL=small -DDJGPP $(CFLAGS) $(A_DEBUG_FLAGS) -Fo=$@ $<
 COMPILE.c.o=gcc $(C_DEBUG_FLAGS) $(C_OPT_FLAGS) $(C_EXTRA_FLAGS) $(CFLAGS) $(INCLUDES) -c $< -o $@
 COMPILE.cpp.o=gcc $(C_DEBUG_FLAGS) $(C_OPT_FLAGS) $(C_EXTRA_FLAGS) $(CPPFLAGS) $(INCLUDES) -c $< -o $@
@@ -112,8 +119,8 @@ $(OUTD)/$(NAME).ar:: $(OBJFILES)
 # is included in binary format into rmwrap.asm.
 
 $(OUTD)/rmwrap.o:: rmwrap.asm rmcode1.asm rmcode2.asm
-	jwasm.exe -q -bin -Fl$(OUTD)/ -Fo$(OUTD)/rmcode1.bin src/rmcode1.asm
-	jwasm.exe -q -bin -Fl$(OUTD)/ -Fo$(OUTD)/rmcode2.bin src/rmcode2.asm
+	jwasm.exe -q -bin $(CFLAGS) -Fl$(OUTD)/ -Fo$(OUTD)/rmcode1.bin src/rmcode1.asm
+	jwasm.exe -q -bin $(CFLAGS) -Fl$(OUTD)/ -Fo$(OUTD)/rmcode2.bin src/rmcode2.asm
 	jwasm.exe -q -djgpp -D?MODEL=small -DOUTD=$(OUTD) -Fo$@ src/rmwrap.asm
 
 $(OUTD)/ac97mix.o::  ac97mix.c   mpxplay.h au_cards.h ac97mix.h
@@ -129,6 +136,7 @@ $(OUTD)/sc_sbliv.o:: sc_sbliv.c  mpxplay.h au_cards.h dmabuff.h pcibios.h ac97mi
 $(OUTD)/sc_via82.o:: sc_via82.c  mpxplay.h au_cards.h dmabuff.h pcibios.h ac97.h
 $(OUTD)/sc_es1688.o:: sc_es1688.c au_cards.h config.h
 $(OUTD)/sc_vew211.o:: sc_vew211.c au_cards.h config.h
+$(OUTD)/sc_tp755.o:: sc_tp755.c au_cards.h dmabuff.h config.h
 $(OUTD)/timer.o::    timer.c     mpxplay.h au_cards.h timer.h
 
 $(OUTD)/dbopl.o::    dbopl.cpp   dbopl.h

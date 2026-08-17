@@ -40,9 +40,10 @@
 //  SBEMU feeds 16-bit stereo; we down-mix to 8-bit mono into the ring in
 //  ES1688_writedata. The SB must be brought up at its base by ES1688GO first.
 //**************************************************************************
-#if !defined(NOES1688) && !defined(CARD_VEW211)   /* self-exclude when the
-   CS4231A backend is selected: both backends provide the same passthrough
-   ABI symbols (ES1688_PT_*) and must never both be compiled in */
+#if !defined(NOES1688) && !defined(CARD_VEW211) && !defined(CARD_TP755)
+   /* self-exclude when another backend owns the build: all backends provide
+    * the same passthrough ABI symbols (ES1688_PT_*) and must never both be
+    * compiled in */
 
 #include <string.h>
 #include <stdint.h>
