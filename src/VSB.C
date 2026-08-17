@@ -385,13 +385,13 @@ static void DSP_Reset( uint8_t value )
          * reboot, and a format-matching next stream skipped its chip re-arm
          * (the 'pinball -> idle -> pinball silent' case). Every guest DSP
          * reset lands here, i.e. before any game's SB detect. */
-        { extern int ES1688_PT; extern void ES1688_PT_Watchdog(void);
+        { extern int SNDISR_PassThru; extern void ES1688_PT_Watchdog(void);
 #ifdef CARD_TP755
-          /* TP755: render build (PT stays 0), but the hook doubles as the
-           * stuck-INT/masked-ch0 heal -- call it on every DSP reset. */
+          /* TP755: render build (the tap stays 0), but the hook doubles as
+           * the stuck-INT/masked-ch0 heal -- call it on every DSP reset. */
           ES1688_PT_Watchdog();
 #else
-          if ( ES1688_PT ) ES1688_PT_Watchdog();
+          if ( SNDISR_PassThru ) ES1688_PT_Watchdog();
 #endif
         }
 #endif

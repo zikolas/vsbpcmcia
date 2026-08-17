@@ -41,6 +41,19 @@ void tsf_render_short(void *, short *, int, int);
 
 #define VOICELR 1
 
+/* Engine-owned passthrough state. These used to be per-backend copies of
+ * ES1688_PT / es_in_render duplicated across every sc_* card file; they are
+ * engine state, not card state, so they live here once.
+ *   SNDISR_PassThru: the backend arms this in its adetect when its card is
+ *     the selected AU output -- raw guest DMA is then routed to the PT feed
+ *     instead of the render path. 0 = stock render path, other cards
+ *     unaffected.
+ *   es_in_render: 1 while the owning SNDISR pass is in the heavy render+tap
+ *     path, so a re-entrant SNDISR (SETIF=1) skips the render and can't
+ *     march the private ISR stack into the data segment (#GP fix). */
+int SNDISR_PassThru = 0;
+volatile int es_in_render = 0;
+
 bool _SND_InstallISR( uint8_t, int(*ISR)(void) );
 bool _SND_UninstallISR( uint8_t );
 
@@ -314,7 +327,6 @@ static int SNDISR_Interrupt( void )
      * tail (conversions/mixer/AU_writedata) is dead weight and is skipped;
      * that tail is what made SNDISR outlast the RTC period and caused the
      * runaway re-entry that marched the ISR stack into .data (#GP). */
-    extern int ES1688_PT;
     extern int ES1688_PT_Space(void);
     extern void ES1688_PT_Feed(const unsigned char *, int, unsigned, unsigned, unsigned);
     extern void ES1688_dbg_tick(void);
@@ -392,7 +404,7 @@ static int SNDISR_Interrupt( void )
      * tails so a non-PT tick stays cheap. 1024 >> any real per-tick need
      * (worst sustained stream ~350 guest bytes/tick at the idle pump rate). */
 #define PT_MODE_SAMPLES 1024
-    if ( ES1688_PT ) {
+    if ( SNDISR_PassThru ) {
         pt_mode = 1;
         pt_space = ES1688_PT_Space();
         samples = PT_MODE_SAMPLES;
@@ -415,8 +427,7 @@ static int SNDISR_Interrupt( void )
      * Build A empirically ran full nested passes WITH EOI for 52 feeds, so
      * EOI-per-delivered-tick is known-compatible with this PIC stack.
      * Do NOT clear the flag on the re-entrant path -- only the owner clears it. */
-    { extern volatile int es_in_render;
-      if(es_in_render) { ES1688_dbg_reenter(); goto isrexit; }
+    { if(es_in_render) { ES1688_dbg_reenter(); goto isrexit; }
       es_in_render = 1; }
 #endif
 
@@ -696,7 +707,7 @@ static int SNDISR_Interrupt( void )
     };
 
 #ifndef NOES1688
-    { extern volatile int es_in_render; es_in_render = 0; }   /* render owner done (re-entrant path skipped this via goto isrexit) */
+    es_in_render = 0;   /* render owner done (re-entrant path skipped this via goto isrexit) */
     if ( pt_took )
         goto isrexit;   /* PT consumed this tick's audio raw: there is no render
                          * output to pad/mix/write, and skipping that tail is

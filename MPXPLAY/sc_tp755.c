@@ -22,7 +22,7 @@
 //  model: a hardware-paced 8237 ch0 autoinit ring in DOS conventional
 //  memory, refilled by SNDISR on the codec's own half-ring... rather,
 //  per-period IRQ10. No RTC, no tick credit, no PRDY workarounds, no
-//  passthrough (ES1688_PT=0): the engine renders SB PCM + emulated OPL3
+//  passthrough (the sndisr tap stays unarmed): the engine renders SB PCM + emulated OPL3
 //  (CARD_TP755 unmasks NOFM -- there is no FM chip anywhere on the 755C)
 //  into the ring via the standard AU_cardbuf_space/AU_writedata path.
 //
@@ -654,13 +654,12 @@ static int TP755_irq(struct audioout_info_s *aui)
 
 //------------------------------------------- engine ABI (PT stubs + heal) ---
 // sndisr.c/vsb.c link against the historical ES1688_* names regardless of
-// backend. This is a render-path card: ES1688_PT stays 0 and the PT entry
-// points are inert -- except the DSP-reset hook, which doubles as our 8237
-// heal: a guest master-reset (OUT 0x0D/0x0F passes through vdma) masks real
-// ch0 and starves the codec; one idempotent re-unmask fixes it for free.
+// backend. This is a render-path card: the engine's tap gate (SNDISR_PassThru,
+// owned by sndisr.c) stays 0 and the PT entry points are inert -- except the
+// DSP-reset hook, which doubles as our 8237 heal: a guest master-reset
+// (OUT 0x0D/0x0F passes through vdma) masks real ch0 and starves the codec;
+// one idempotent re-unmask fixes it for free.
 //
-int ES1688_PT = 0;
-volatile int es_in_render = 0;
 void ES1688_dbg_tick(void)
 {
  if(tp_iac){
@@ -681,7 +680,6 @@ void ES1688_dbg_reenter(void)
  if(tp_iac) tp_iac[4]++;
 }
 int  ES1688_PT_Space(void){ return 0; }
-int  ES1688_PT_Used(void){ return 0; }
 void ES1688_PT_Feed(const unsigned char *p, int n, unsigned r, unsigned b, unsigned c)
 { (void)p;(void)n;(void)r;(void)b;(void)c; }
 void ES1688_PT_Watchdog(void)
@@ -713,17 +711,6 @@ void ES1688_PT_Watchdog(void)
   }
  }
 }
-void ES1688_PT_FullReset(void)
-{
- if(tp_hw_armed){
-  tp_codec_config(tp_dacrate);
-  tp_dma_arm();
-  outportb(tp_cb + TC_SR, 0);
-  tp_ci_put(0x0A, I10_IEN);
-  tp_pen(1);
- }
-}
-
 //---------------------------------------------------------------- struct ---
 // VSBHDA sndcard_info_s: 14 fields. Mixer slots NULL (SBEVOL sets I6/I7 at
 // config; the DS1669 analog master pots stay under the volume buttons).

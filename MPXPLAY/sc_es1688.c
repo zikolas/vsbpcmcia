@@ -115,15 +115,11 @@ static void DPMI_RestoreInterrupt(uint8_t prev)
 #define pds_free              free
 #define pds_textdisplay_printf(s)  printf("%s\n", (s))
 
-// SNDISR passthrough tap enable. Set to 1 in ES1688_adetect when our card is the
-// selected AU output; sndisr.c reads it (extern) to route the RAW guest DMA to
-// ES1688_PT_Feed() -- native passthrough, no resample -- instead of the render
-// path. 0 for every other card, so stock cards are unaffected.
-int ES1688_PT = 0;
-// Set by sndisr.c around the render loop: 1 while the owning SNDISR is in the
-// heavy render+tap path, so a re-entrant SNDISR (SETIF=1) skips the render and
-// can't march the private ISR stack into the data segment (#GP fix).
-volatile int es_in_render = 0;
+// SNDISR passthrough tap enable (engine-owned, lives in sndisr.c now): set to
+// 1 in ES1688_adetect when our card is the selected AU output, routing the RAW
+// guest DMA to ES1688_PT_Feed() -- native passthrough, no resample -- instead
+// of the render path. 0 for every other card, so stock cards are unaffected.
+extern int SNDISR_PassThru;
 
 // DIAG (hardware-test 1 follow-up): prove whether SNDISR fires on our RTC.
 //   0x4F6 = 0xAA once ES1688_start runs (also confirms the _farpokeb mechanism
@@ -193,15 +189,6 @@ void ES1688_dbg_exit(void)
  if(es_dbg_depth) es_dbg_depth--;
 }
 void ES1688_dbg_reenter(void){ _farpokeb(_dos_ds, 0x4F1, ++es_dbg_skips); }
-// which: 0 = SNDISR render-loop body entered (VSB_Running() true) -> 0x4F4;
-//        1 = reached the tap point (inside !IsSilent, after the guest-DMA read) -> 0x4F5.
-// loop>0 & reach=0 => IsSilent always true; loop=0 => VSB_Running() false; reach>0 & feed=0 => tap condition fails.
-static unsigned char es_dbg_loop, es_dbg_reach;
-void ES1688_dbg_mark(int which){
- if(which==0) _farpokeb(_dos_ds, 0x4F4, ++es_dbg_loop);
- else         _farpokeb(_dos_ds, 0x4F5, ++es_dbg_reach);
-}
-
 #define ES_DEF_BASE   0x220
 #define RING_BYTES    8192U         // MUST keep card_dmasize (=RING*4) within SBEMU's MAIN_PCM
 #define RING_MASK     (RING_BYTES-1)
@@ -500,12 +487,6 @@ int ES1688_PT_Space(void)
  return (int)(target - used);
 }
 
-// telemetry helper (BIOS IAC-area reporting in main.c's tap)
-int ES1688_PT_Used(void)
-{
- return (int)((ring_wr - ring_rd) & RING_MASK);
-}
-
 // feed raw guest PCM (called by SBEMU core, reconfigures the chip on format change)
 // REENTRANCY: VSBHDA's SNDISR runs with interrupts ENABLED (SETIF, sndisr.c:325),
 // so while our tap is mid-flight the next RTC tick can re-enter SNDISR -> our tap.
@@ -604,27 +585,12 @@ static void es_fifo_setup(uint16_t base, unsigned rate)
  es_hw_rate = es_hw_bits = es_hw_channels = 0;
  es_last_drain = _farpeekl(_dos_ds, 0x46C);
 }
-// Full driver reset for SBRESET (soft reset instead of a reboot): quiesce,
-// clear all cached passthrough state, bring the chip back up fresh, re-arm the
-// pump. Called from MAIN_Interrupt when the reset magic is seen on the trap.
-void ES1688_PT_FullReset(void);
-
 static void es_fifo_stop(uint16_t base)
 {
  es_ewr(base, 0xB8, 0x00);              // clear run
  es_dsp_reset(base);
  es_dsp_cmd(base, 0xD3);                // speaker off
  es_hw_rate = es_hw_bits = es_hw_channels = 0;   // chip disarmed: no fast-resume onto a stopped DAC
-}
-
-void ES1688_PT_FullReset(void)
-{
- es_flush_gen++;              // pump-executed ring flush (see ring ownership note)
- es_pt_active = 0;
- es_pt_rate = es_pt_bits = es_pt_channels = 0;  // force a full reconfig on next feed
- es_dsp_reset(es_base);
- es_fifo_setup(es_base, es_dacrate);            // fresh chip bring-up, DAC running
- rtc_enable();                                  // and make sure the pump is alive
 }
 
 //--- RTC (IRQ8) periodic: SBEMU's pump clock (card_irq=8) --------------------
@@ -685,7 +651,7 @@ static int ES1688_adetect(struct audioout_info_s *aui)
  if(!card) return 0;
  card->base = base; aui->card_private_data = card; es_base = base;
  aui->card_irq = 8;                     // RTC drives SBEMU's pump
- ES1688_PT = 1;                         // arm the SNDISR passthrough tap (raw guest DMA -> chip)
+ SNDISR_PassThru = 1;                   // arm the SNDISR passthrough tap (raw guest DMA -> chip)
  // NOFM build: 0x388 is left UNtrapped (ptrap.c skips it when opl3=0), so guest
  // AdLib writes reach the ES1688's real ESFM directly -- no fm_write hook needed.
  return 1;

@@ -113,8 +113,7 @@ static void DPMI_RestoreInterrupt(uint8_t prev)
 //  Passthrough ABI globals + telemetry (layout identical to sc_es1688.c;
 //  see doc/NOTES.md for the 0x4F0-0x4FF map)
 // ==========================================================================
-int ES1688_PT = 0;                 // tap armed (sndisr.c reads this)
-volatile int es_in_render = 0;     // sndisr.c render-reentrancy guard flag
+extern int SNDISR_PassThru;        // engine-owned tap gate (sndisr.c); armed in adetect
 
 static int es_has_tsc;
 static int es_tsc_check(void)
@@ -496,11 +495,6 @@ int ES1688_PT_Space(void)
    return (int)space; }
 }
 
-int ES1688_PT_Used(void)
-{
- return (int)((ring_wr - ring_rd) & RING_MASK);
-}
-
 // feed raw guest PCM (sndisr.c tap); reconfigure the codec on format change.
 static volatile int vew_pt_feed_busy;
 static unsigned char es_reentry;
@@ -590,16 +584,6 @@ void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, unsigned
  ring_wr = wr;
  vew_pio_pump();                                      // keep the FIFO fed inline
  vew_pt_feed_busy = 0;
-}
-
-// Full soft reset: quiesce, clear passthrough state, re-arm.
-void ES1688_PT_FullReset(void)
-{
- es_flush_gen++;
- vew_pt_active = 0;
- vew_pt_rate = vew_pt_bits = vew_pt_channels = 0;
- vew_codec_config(vew_dacrate, 8, 1);
- rtc_enable();
 }
 
 // ---- RTC (IRQ8) periodic: the pump clock ---------------------------------
@@ -695,7 +679,7 @@ static int VEW211_adetect(struct audioout_info_s *aui)
  if(!card) return 0;
  card->base = base; aui->card_private_data = card;
  aui->card_irq = 8;                                   // RTC drives the pump
- ES1688_PT = 1;                                       // arm the sndisr passthrough tap
+ SNDISR_PassThru = 1;                                 // arm the sndisr passthrough tap
  // NOFM: guest AdLib I/O at 0x388 goes untrapped to the card's DISCRETE
  // YMF262, which decodes all four OPL3 ports natively. Real FM for free.
  return 1;
