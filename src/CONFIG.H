@@ -7,12 +7,12 @@
  * FM for free. VMPU 0 = no 0x330 MPU trap. SOUNDFONT 0 = no TinySoundFont MIDI. */
 /* VSBPCMCIA: our fork version (the banner shows this; VERMAJOR/VERMINOR in
  * version.h stay upstream's VSBHDA core version for lineage/merge sanity). */
-#define VSBPCM_VER "0.6.1"
+#define VSBPCM_VER "1.0"
 
 /* VSBPCMCIA card backends are RUNTIME-selected: sc_es1688.c (ES1688 PCMCIA),
  * sc_vew211.c (CF-VEW211 CS4231A) and sc_tp755.c (TP755C planar CS4248) are
- * all compiled into the default build and probed in order (au_cards.c), each
- * reading its own base variable. SET SBECARD=es1688|vew211|tp755 pins one.
+ * all compiled into the default build, and /CARD:name picks one at load time.
+ * NOTHING is probed -- the launcher already had to run that card's enabler.
  * NOES1688 / NOVEW211 / NOTP755 drop a backend from the build if space is
  * ever tight; CARD_TP755 is no longer a backend selector -- it now means
  * "compile the software OPL too", i.e. FM music on the FM-less 755C. */
