@@ -251,14 +251,22 @@ VSBPCMCIA uses some source code from:
    was originally developed against SBEMU
  * DOSBox's DBOPL - OPL3 emulation, linked only by the builds that need it
    (CARD=TP755, CARD=AUDIGY)
- * Linux ALSA snd-emu10k1 (GPL v2) - the Audigy 2 ZS Notebook initialisation
-   and WM8768 DAC sequences ported for the CARD=AUDIGY build
+ * Linux ALSA snd-emu10k1 (GPL v2), (C) Jaroslav Kysela and contributors -
+   the EMU10K2/CA0108 register definitions (mpxplay/emu10k1.h), the Audigy 2
+   ZS Notebook initialisation, the BAR+0x38 wake-up and the WM8768 DAC
+   sequences. The hardware wavetable (mpxplay/emu_wt.c) is code we wrote, but
+   it is written against those definitions and programming sequences -- it is
+   not independent of ALSA's work. The bench tools in tools/audigy/ take
+   their chip knowledge from the same source (see tools/audigy/README.md).
  * TinySoundFont (MIT, vendored in tsf/) - optional software-synth fallback;
-   the hardware wavetable itself (mpxplay/emu_sf2.c, emu_wt.c) is original
+   the hardware wavetable does not use it
 
 License: GNU General Public License v2 (see COPYING). VSBPCMCIA is a
 derivative of VSBHDA, SBEMU, MPXPlay (C) PDSoft (Attila Padar) and DOSBox's
 OPL emulation, all GPL v2; the ES1688, CS4231A and CS4248 backends
-(C) 2026 zikolas. The Audigy hardware wavetable and SF2 parser (C) 2026
-zikolas, GPL v2 with the rest of the tree.
+(C) 2026 zikolas. The SF2 reader (mpxplay/emu_sf2.c) is written from the
+published SoundFont 2.01 specification and is (C) 2026 zikolas. The Audigy
+wavetable (mpxplay/emu_wt.c) is (C) 2026 zikolas for the code written here,
+resting on the ALSA register-level work credited above -- copyright in that
+remains with its authors. All GPL v2 with the rest of the tree.
 Released binaries always correspond to the tagged source in this repository.
