@@ -248,7 +248,12 @@ VSBPCMCIA uses some source code from:
  * VSBHDA: https://github.com/Baron-von-Riedesel/VSBHDA - the SB emulation core
  * MPXPlay: https://mpxplay.sourceforge.net/ - sound card driver interface
  * SBEMU: https://github.com/crazii/SBEMU - the ES1688 passthrough backend
-   was originally developed against SBEMU
+   was originally developed against SBEMU, and the DPMI helper API the PCMCIA
+   backends call (DPMI_InstallISR and friends, the pds_* helpers) keeps
+   crazii's shape; the DJGPP implementations behind it are ours
+ * Linux ALSA wss_lib.c (GPL v2) - the ThinkPad system-control twiddle that
+   wakes the 755C's planar codec (port 0x15E8, index 0x1C, bit 0x02) in
+   mpxplay/sc_tp755.c, and the ES1688 reset semantics noted in sc_es1688.c
  * DOSBox's DBOPL - OPL3 emulation, linked only by the builds that need it
    (CARD=TP755, CARD=AUDIGY)
  * Linux ALSA snd-emu10k1 (GPL v2), (C) Jaroslav Kysela and contributors -
@@ -263,10 +268,26 @@ VSBPCMCIA uses some source code from:
 
 License: GNU General Public License v2 (see COPYING). VSBPCMCIA is a
 derivative of VSBHDA, SBEMU, MPXPlay (C) PDSoft (Attila Padar) and DOSBox's
-OPL emulation, all GPL v2; the ES1688, CS4231A and CS4248 backends
-(C) 2026 zikolas. The SF2 reader (mpxplay/emu_sf2.c) is written from the
-published SoundFont 2.01 specification and is (C) 2026 zikolas. The Audigy
-wavetable (mpxplay/emu_wt.c) is (C) 2026 zikolas for the code written here,
-resting on the ALSA register-level work credited above -- copyright in that
-remains with its authors. All GPL v2 with the rest of the tree.
+OPL emulation, all GPL v2.
+
+The ES1688, CS4231A and CS4248 backends (mpxplay/sc_es1688.c, sc_vew211.c,
+sc_tp755.c) are (C) 2026 zikolas for the code written here -- the passthrough
+architecture (ring, RTC pump, tick-credit pacing, frame stepper, watchdogs),
+the codec bring-up recipes worked out on the bench, the 755C's 8237 ring and
+the telemetry. They are NOT independent of the work credited above: they
+implement MPXplay's au_cards interface, carry SBEMU's DPMI helper shape, and
+sc_tp755.c's codec wake-up comes from Linux's wss_lib.c. Chip register
+semantics come from the ESS and Crystal datasheets.
+
+The SF2 reader (mpxplay/emu_sf2.c) is written from the published SoundFont
+2.01 specification and is (C) 2026 zikolas. The Audigy wavetable
+(mpxplay/emu_wt.c) is (C) 2026 zikolas for the code written here, resting on
+the ALSA register-level work credited above -- copyright in that remains with
+its authors, as it does for every other component listed. All GPL v2 with the
+rest of the tree.
+
+Where this file says "(C) 2026 zikolas" it means the code written here and
+nothing more; no claim is made over anyone else's work, and anything traced
+to another project is credited above. Corrections welcome.
+
 Released binaries always correspond to the tagged source in this repository.
