@@ -135,7 +135,11 @@ static const struct {
     const char *desc;
     int *pValue;
 } GOptions[] = {
+#ifndef NOSBLIVE
+    "CARD:", "ES1688|VEW211|TP755|AUDIGY req.", (int *)&FOpts.card,
+#else
     "CARD:", "ES1688|VEW211|TP755 REQUIRED", (int *)&FOpts.card,
+#endif
     "BASE", "real card base, hex", &FOpts.base,
     "DACRATE", "codec rate, Hz", &FOpts.dacrate,
     "CVOL", "codec attenuation [0-63]", &FOpts.cvol,
@@ -480,11 +484,27 @@ int main(int argc, char* argv[])
                "  /CARD:VEW211 [/BASE530]   Panasonic CF-VEW211; run VEW21XGO first\n"
                "                            and match its /IO= (default 530)\n"
                "  /CARD:TP755  [/BASE4E30]  ThinkPad 755C planar codec; no enabler\n"
+#ifndef NOSBLIVE
+               "  /CARD:AUDIGY             Audigy 2 ZS Notebook; run AUD2GO first\n"
+#endif
                "Note: /BASE is the REAL card. /A is the EMULATED SB the guest sees.\n");
         return(1);
     }
-    if( !PTOPS_CardIs("es1688") && !PTOPS_CardIs("vew211") && !PTOPS_CardIs("tp755") ) {
+    if( !PTOPS_CardIs("es1688") && !PTOPS_CardIs("vew211") && !PTOPS_CardIs("tp755")
+#ifndef NOSBLIVE
+        /* CARD_AUDIGY build: the SB Live/Audigy driver is linked and its entry
+         * sits after the PCMCIA ones in the card table, so naming it lets
+         * those three decline in PTOPS_CardIs without touching a port and the
+         * Audigy is reached. Without this the /CARD gate had NO legal value in
+         * this build at all, and it could not start. */
+        && !PTOPS_CardIs("audigy")
+#endif
+      ) {
+#ifndef NOSBLIVE
+        printf("Error: unknown /CARD:%s -- expected ES1688, VEW211, TP755 or AUDIGY\n", FOpts.card );
+#else
         printf("Error: unknown /CARD:%s -- expected ES1688, VEW211 or TP755\n", FOpts.card );
+#endif
         return(1);
     }
     if( FOpts.cvol != -1 && ( FOpts.cvol < 0 || FOpts.cvol > 63 ) ) {
