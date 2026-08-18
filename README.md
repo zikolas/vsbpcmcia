@@ -4,36 +4,30 @@ Sound Blaster emulation for PCMCIA sound cards on DMA-less laptops; a fork of Ba
 Works with unmodified HDPMI binaries (v3.21+), making it compatible with HX.
 
 The target machines are 486-class PCMCIA laptops whose card bridges have no ISA
-DMA to the socket (IBM PC110, ThinkPad 235, Toshiba T2130CT, HP OmniBook, ...).
-The guest's Sound Blaster audio is intercepted and pushed to the real card's
-FIFO by programmed I/O — a passthrough: the chip plays the guest's native
-rate/format, nothing is resampled. FM (AdLib) rides the card's real OPL
-directly at 0x388, untrapped.
-Validated from a Pentium MMX down to a 386-bus 486SLC/25 (HP OmniBook 425) —
-see COMPATIBILITY.md for the measured floor and slow-CPU tuning.
+DMA to the socket. The guest's Sound Blaster audio is intercepted and pushed to
+the real card's FIFO by programmed I/O — a passthrough: the chip plays the 
+guest's native rate/format, nothing is resampled. FM (AdLib) rides the card's
+real OPL directly at 0x388, untrapped. Validated from a Pentium MMX down to a 
+386-bus 486SLC/25 (HP OmniBook 425) — see COMPATIBILITY.md for the measured
+floor and slow-CPU tuning.
 
-**v1.0 ships ONE binary for every supported card.** VSBPCM.EXE contains the
-ES1688, CF-VEW211 and ThinkPad 755C backends; `/CARD:` picks one at load time.
-Nothing is probed — you already have to run that card's enabler first, so the
-launcher always knew which card it was talking to.
+VSBPCM.EXE contains the ES1688, CS4231 and CS4248 backends; `/CARD:` picks 
+one at load time. Nothing is probed — you already have to run that card's 
+enabler first, so the launcher always knew which card it was talking to.
 
 Supported sound cards:
- * ES1688-class PCMCIA cards: Ratoc REX-5571/5572, Panasonic KXL-C101
+ * ES1688-based PCMCIA cards: Ratoc REX-5571/5572, Panasonic KXL-C101
    (bring the card up with ES1688GO first,
    https://github.com/zikolas/es1688go) — `/CARD:ES1688`
- * CS4231A PCMCIA cards: Panasonic CF-VEW211/212, NEC PC-9801N-J04
+ * CS4231A based PCMCIA cards: Panasonic CF-VEW211
    (bring the card up with VEW21XGO first,
    https://github.com/zikolas/vew21xgo) — `/CARD:VEW211`
- * ThinkPad 755C internal Crystal CS4248 (WSS): no PC Card needed, the planar
-   codec is the sound card and the driver wakes it itself — `/CARD:TP755`
+ * BONUS: ThinkPad 755C Crystal CS4248: The planar codec is the sound card
+   and the driver wakes it up — `/CARD:TP755`
+ 
  * Sound Blaster Audigy 2 ZS Notebook (CardBus, SB0530): bring the socket up
    with AUD2GO first (https://github.com/zikolas/aud2go) — VSBPCMA.EXE, a
    separate build (`CARD=AUDIGY`); see "CardBus backend" below
-
-Sibling forks: VSBCMI (https://github.com/drivelling-spinel/VSBCMI) supports
-PCI cards based on CMI 8338/8738; upstream VSBHDA covers HDA/AC97/SB Live.
-The PCI card drivers are present in this tree but excluded from the PCMCIA
-builds; the CARD=AUDIGY build pulls the SB Live/Audigy driver back in.
 
 Game compatibility: see COMPATIBILITY.md.
 
