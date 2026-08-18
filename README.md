@@ -244,53 +244,46 @@ Sound Blaster 1.0, 2.0, Pro, Pro2, 16.
 
 ## Credits and licence
 
-VSBPCMCIA uses some source code from:
- * VSBHDA: https://github.com/Baron-von-Riedesel/VSBHDA - the SB emulation core
- * MPXPlay: https://mpxplay.sourceforge.net/ - sound card driver interface
+VSBPCMCIA is GNU General Public License v2 (see COPYING). It is built on the
+projects below; each entry says what came from where, and copyright in those
+parts stays with their authors.
+
+ * VSBHDA: https://github.com/Baron-von-Riedesel/VSBHDA - the SB emulation
+   core this is a fork of
+ * MPXPlay (C) PDSoft (Attila Padar): https://mpxplay.sourceforge.net/ - the
+   au_cards sound-card driver interface every backend here implements
  * SBEMU: https://github.com/crazii/SBEMU - the ES1688 passthrough backend
-   was originally developed against SBEMU, and the DPMI helper API the PCMCIA
+   was originally developed against SBEMU, and the DPMI helper API the
    backends call (DPMI_InstallISR and friends, the pds_* helpers) keeps
-   crazii's shape; the DJGPP implementations behind it are ours
+   crazii's shape; the DJGPP implementations behind it were written here
  * Linux ALSA, sound/isa/wss/wss_lib.c (GPL v2) - the ThinkPad
    system-control twiddle that wakes the 755C's planar codec (port 0x15E8,
    index 0x1C, bit 0x02) in mpxplay/sc_tp755.c. sc_es1688.c separately cites
    ALSA for one ES1688 reset behaviour (reset bit 1 clears the FIFO): that is
    a documented register effect we cross-checked, not code taken from it --
    noted here for completeness rather than because it is owed
- * DOSBox's DBOPL - OPL3 emulation, linked only by the builds that need it
-   (CARD=TP755, CARD=AUDIGY)
  * Linux ALSA snd-emu10k1 (GPL v2), (C) Jaroslav Kysela and contributors -
    the EMU10K2/CA0108 register definitions (mpxplay/emu10k1.h), the Audigy 2
    ZS Notebook initialisation, the BAR+0x38 wake-up and the WM8768 DAC
-   sequences. The hardware wavetable (mpxplay/emu_wt.c) was written here, but
-   against those definitions and programming sequences -- it is not
-   independent of ALSA's work. The bench tools in tools/audigy/ take
-   their chip knowledge from the same source (see tools/audigy/README.md).
+   sequences. The bench tools in tools/audigy/ take their chip knowledge from
+   the same source (see tools/audigy/README.md)
+ * DOSBox's DBOPL (GPL v2) - OPL3 emulation, linked only by the builds that
+   need it (CARD=TP755, CARD=AUDIGY)
  * TinySoundFont (MIT, vendored in tsf/) - optional software-synth fallback;
    the hardware wavetable does not use it
 
-License: GNU General Public License v2 (see COPYING). VSBPCMCIA is a
-derivative of VSBHDA, SBEMU, MPXPlay (C) PDSoft (Attila Padar) and DOSBox's
-OPL emulation, all GPL v2.
+Written here and (C) 2026 zikolas, GPL v2 with the rest of the tree: the
+passthrough architecture (ring, RTC pump, tick-credit pacing, frame stepper,
+watchdogs); the three backends mpxplay/sc_es1688.c, sc_vew211.c and
+sc_tp755.c, built on the interfaces and sequences credited above; the codec
+bring-up recipes worked out on the bench; the 755C's 8237 DMA ring; the
+telemetry; the SF2 reader mpxplay/emu_sf2.c, written from the published
+SoundFont 2.01 specification; and the Audigy wavetable mpxplay/emu_wt.c,
+which rests on ALSA's register-level work. Chip register semantics come from
+the ESS and Crystal datasheets, which are facts rather than anyone's code.
 
-The ES1688, CS4231A and CS4248 backends (mpxplay/sc_es1688.c, sc_vew211.c,
-sc_tp755.c) are (C) 2026 zikolas for the code written here -- the passthrough
-architecture (ring, RTC pump, tick-credit pacing, frame stepper, watchdogs),
-the codec bring-up recipes worked out on the bench, the 755C's 8237 ring and
-the telemetry. They are NOT independent of the work credited above: they
-implement MPXplay's au_cards interface, carry SBEMU's DPMI helper shape, and
-sc_tp755.c's codec wake-up comes from Linux's wss_lib.c. Chip register
-semantics come from the ESS and Crystal datasheets.
-
-The SF2 reader (mpxplay/emu_sf2.c) is written from the published SoundFont
-2.01 specification and is (C) 2026 zikolas. The Audigy wavetable
-(mpxplay/emu_wt.c) is (C) 2026 zikolas for the code written here, resting on
-the ALSA register-level work credited above -- copyright in that remains with
-its authors, as it does for every other component listed. All GPL v2 with the
-rest of the tree.
-
-Where this file says "(C) 2026 zikolas" it means the code written here and
-nothing more; no claim is made over anyone else's work, and anything traced
-to another project is credited above. Corrections welcome.
+"(C) 2026 zikolas" means the code written here and nothing more. No claim is
+made over anyone else's work, and anything traced to another project is
+credited above. Corrections welcome.
 
 Released binaries always correspond to the tagged source in this repository.
