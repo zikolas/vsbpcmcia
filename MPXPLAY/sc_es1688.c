@@ -587,24 +587,22 @@ static int ES1688_adetect(struct audioout_info_s *aui)
 {
  es1688_card_s *card;
  uint16_t base = ES_DEF_BASE;
- const char *e;
- if(!PTOPS_CardWanted("es1688")) return 0;
- // SBEBASE keeps its historical meaning HERE and only here: the emulated SB's
- // DSP base on an ES1688 card (the deployed GO.BATs set it). The other
- // backends read their own variables -- one binary, three different meanings
- // of "base", so they must not share a name.
- e = getenv("SBEBASE");
- const char *r = getenv("DACRATE");
  const char *t = getenv("SBERTC");
- if(e) base = (uint16_t)strtol(e, NULL, 16);
- if(r){ es_dacrate = (unsigned)atoi(r);
+ if(!PTOPS_CardIs("es1688")) return 0;
+ if(FOpts.base) base = (uint16_t)FOpts.base;          // /BASE (was SBEBASE)
+ if(FOpts.dacrate){ es_dacrate = (unsigned)FOpts.dacrate;
         if(es_dacrate<DAC_RATE_MIN) es_dacrate=DAC_RATE_MIN;
         if(es_dacrate>DAC_RATE_MAX) es_dacrate=DAC_RATE_MAX; }
  if(t){ int rs = atoi(t); if(rs>=3 && rs<=15) es_rtc_rs = (unsigned char)rs; }  // SBERTC forces a FIXED rate
  else { es_adaptive = 1; es_rtc_rs = ES_RS_IDLE; }                             // no SBERTC -> self-pace (start idle, ramp on first feed)
  { const char *l = getenv("SBEPTLAT");                                          // passthrough latency cap (ms)
    if(l){ int ms = atoi(l); if(ms >= 30 && ms <= 2000) es_pt_lat_ms = (unsigned)ms; } }
- if(!es_dsp_reset(base)) return 0;
+ // Named, not probed: say why rather than declining into a bare
+ // "no soundcard found".
+ if(!es_dsp_reset(base)){
+  printf("ES1688: no DSP at %4.4Xh -- run ES1688GO first, and check /BASE\n", base);
+  return 0;
+ }
  card = (es1688_card_s *)pds_calloc(1,sizeof(es1688_card_s));
  if(!card) return 0;
  card->base = base; aui->card_private_data = card; es_base = base;

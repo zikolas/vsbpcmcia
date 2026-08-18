@@ -929,12 +929,10 @@ void PTRAP_Prepare( int opl, int sbaddr, int dma, int hdma, int sndirq )
     /* if no OPL3 emulation, skip ports 0x388-0x38b, 0x220-0x223 and 0x228-0x229 */
     if ( !opl ) {
         /* Does this card have FM silicon behind 0x388? The backend says so in
-         * its ops table (ptops.h). SBEFMSHIM=1 forces the FM-less path on a
-         * card that does have a chip -- a bench knob for exercising the shim
+         * its ops table (ptops.h). /FMSHIM forces the FM-less path on a card
+         * that does have a chip -- a bench knob for exercising the shim
          * (expect FM music to go silent while SB detection keeps working). */
-        FmShimOn = !( PT_Ops->flags & PTF_REAL_FM );
-        { const char *e = getenv("SBEFMSHIM");
-          if ( e && *e == '1' ) FmShimOn = 1; }
+        FmShimOn = !( PT_Ops->flags & PTF_REAL_FM ) || FOpts.fmshim;
 
         if ( FmShimOn ) {
             /* No chip anywhere: keep 0x388-0x38B TRAPPED (they would read

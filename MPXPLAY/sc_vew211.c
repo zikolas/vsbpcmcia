@@ -52,16 +52,16 @@
 //  hosts, SB-era guests). A chained IRQ0 heartbeat revives a dead RTC. The
 //  CS4231A in PIO mode needs no card-IRQ servicing (no ES1688-style TC IRQ).
 //
-//  Layout: I/O window base 0x530 (CIS idx 0x20; VEWBASE overrides); the
+//  Layout: I/O window base 0x530 (CIS idx 0x20; /BASE overrides); the
 //  CS4231A answers at base+4..+7 (IAR/IDR/SR/PDR). FM is a DISCRETE YMF262
 //  (OPL3) at 0x388 decoding all four ports natively: with NOFM the guest's
 //  AdLib I/O reaches it untrapped -- real OPL3, no relay needed. The card
 //  must be brought up by VEW21XGO first.
 //
-//  BACKEND SELECTION: runtime. This backend is compiled into the default
-//  build alongside sc_es1688.c and sc_tp755.c and probed in table order
-//  (au_cards.c); the passthrough ABI they once shared is now dispatched
-//  through the ptops.h ops table. SET SBECARD=vew211 pins this one.
+//  BACKEND SELECTION: /CARD:VEW211 on the command line. This backend is
+//  compiled into the default build alongside sc_es1688.c and sc_tp755.c;
+//  the passthrough ABI they once shared is dispatched through ptops.h.
+//  Nothing is probed -- a backend runs only when it is named.
 //**************************************************************************
 #ifndef NOVEW211
 
@@ -124,7 +124,7 @@ static unsigned long es_tel_bytes;
 static unsigned char es_tel_irq;
 
 // ---- card geometry -------------------------------------------------------
-#define VEW_WIN_BASE  0x530         // I/O window base (CIS idx 0x20); VEWBASE overrides
+#define VEW_WIN_BASE  0x530         // I/O window base (CIS idx 0x20); /BASE overrides
 #define VEW_CODEC_OFF  4            // CS4231A sits at window base + 4
 #define VC_IAR  0                   // Index Address Register (bit6 = MCE)
 #define VC_IDR  1                   // Indexed Data Register
@@ -149,6 +149,19 @@ static unsigned char es_tel_irq;
 #define VEW_RS_IDLE   11            // idle keep-alive = 32 Hz
 #define VEW_RING_LOW  256
 #define VEW_BURST_FRAMES 16         // per-pass ceiling = FIFO depth
+// /RESAMP pacing. The pump ISR is also the engine's render tick, so a pass
+// must fit inside one tick: at the FIXED 1024 Hz below, 22050 Hz needs ~22
+// frames per tick, so 128 is ~6x headroom while keeping each pass cheap.
+// The pump also stays fast because the codec FIFO is only 16 frames deep
+// (~0.7 ms at 22 kHz) -- which is exactly why the rate cannot simply be
+// lowered to TP755's ~43 Hz period model.
+// Pump stays at 1024 Hz (the 16-frame FIFO demands it); the RENDER runs on
+// one tick in 16 = 64 Hz, close to sc_tp755's 43 Hz period model. At 22050 Hz
+// a 64 Hz render interval needs ~345 frames, so cap 512 leaves headroom and
+// still bounds a single pass well below one pump tick's worth of work.
+#define VEW_RENDER_DIV   16
+#define VEW_RENDER_CAP   512
+#define VEW_RENDER_RS    6          // 32768>>5 = 1024 Hz, fixed (not adaptive)
 
 typedef struct vew211_card_s { uint16_t base; } vew211_card_s;
 
@@ -624,42 +637,72 @@ static const struct pt_ops_s vew211_pt_ops = {
  NULL,                              // no nesting instrument -> no depth limiter
 };
 
+// /RESAMP: no PTF_TAP, so the engine RENDERS (and resamples) the guest stream
+// and hands it to VEW211_writedata, exactly the model sc_tp755 uses. That
+// removes the passthrough's whole timing problem in one go: the codec clocks
+// ONE fixed table rate, so the frame stepper never engages, the sub-2% "raw
+// path" rate deficit cannot accumulate, and the pump stops stuffing silence
+// to cover it. The cost is CPU -- the engine resamples + mixes per sample in
+// ISR context, on a 486 -- which is the thing this switch exists to measure.
+// space/feed are NULL like sc_tp755's: unreachable with the tap disarmed.
+static const struct pt_ops_s vew211_render_ops = {
+ PTF_REAL_FM,
+ NULL, NULL, ES1688_PT_Watchdog,
+ SNDISR_dbg_tick, SNDISR_dbg_exit, SNDISR_dbg_reenter,
+ NULL,
+ VEW_RENDER_CAP,                    // frames per render pass
+ VEW_RENDER_DIV,                    // ...and render on 1 tick in N
+};
+
 static int VEW211_adetect(struct audioout_info_s *aui)
 {
  vew211_card_s *card;
  uint16_t base = VEW_WIN_BASE;
- const char *e;
- if(!PTOPS_CardWanted("vew211")) return 0;
- // VEWBASE, not SBEBASE: on this card "base" is the PCMCIA I/O WINDOW (codec
- // at +4), not an SB DSP base. Sharing one variable across backends in a
- // single binary would point one probe at another card's live registers.
- e = getenv("VEWBASE");
- const char *r = getenv("DACRATE");
  const char *t = getenv("SBERTC");
- const char *v = getenv("SBEVOL");
  const char *l = getenv("SBEPTLAT");
+ if(!PTOPS_CardIs("vew211")) return 0;
  if(getenv("SBENORS")) vew_no_step = 1;               // disable the frame stepper (A/B)
- if(e) base = (uint16_t)strtol(e, NULL, 16);
+ // /BASE here is the PCMCIA I/O WINDOW (codec at +4), not an SB DSP base --
+ // one switch, but only one backend ever reads it because /CARD is required.
+ if(FOpts.base) base = (uint16_t)FOpts.base;
  vew_base  = base;
  vew_codec = (uint16_t)(base + VEW_CODEC_OFF);
- if(r){ vew_dacrate = (unsigned)atoi(r);
+ if(FOpts.dacrate){ vew_dacrate = (unsigned)FOpts.dacrate;
         if(vew_dacrate<DAC_RATE_MIN) vew_dacrate=DAC_RATE_MIN;
         if(vew_dacrate>DAC_RATE_MAX) vew_dacrate=DAC_RATE_MAX; }
- if(v){ int a = atoi(v); if(a>=0 && a<=63) vew_vol = a; }
+ if(FOpts.cvol >= 0) vew_vol = FOpts.cvol;
  if(t){ int rs = atoi(t); if(rs>=3 && rs<=15) vew_rtc_rs = (unsigned char)rs; }
  else { vew_adaptive = 1; vew_rtc_rs = VEW_RS_IDLE; }
  if(l){ int ms = atoi(l); if(ms >= 30 && ms <= 2000) vew_pt_lat_ms = (unsigned)ms; }
 
  // Codec must already be reachable (run VEW21XGO first): 0xFF on IAR =
- // nothing decoding the port -> card not enabled.
- if((unsigned char)inportb(vew_codec + VC_IAR) == 0xFF) return 0;
+ // nothing decoding the port. This is now a VALIDATOR, not a detector --
+ // the user named this card, so an absent codec is a mistake worth stating.
+ if((unsigned char)inportb(vew_codec + VC_IAR) == 0xFF){
+  printf("CS4231A: nothing at %4.4Xh -- run VEW21XGO first, and check /BASE\n", vew_codec);
+  return 0;
+ }
  vew_ci_wait(vew_codec);
 
  card = (vew211_card_s *)pds_calloc(1,sizeof(vew211_card_s));
  if(!card) return 0;
  card->base = base; aui->card_private_data = card;
  aui->card_irq = 8;                                   // RTC drives the pump
- PTOPS_Register(&vew211_pt_ops);                      // arm the sndisr passthrough tap
+ if(FOpts.resamp){
+  // Snap to a REAL table rate first. The engine renders at freq_card and the
+  // codec clocks whatever vew_rate_pick lands on; any gap between the two is
+  // steady pitch error, which is precisely the bug we are trying to remove.
+  vew_dacrate = (unsigned)vew_rates[vew_rate_pick(vew_dacrate)].hz;
+  // Fixed pump rate, NOT the adaptive ramp: the render cap is sized against
+  // this rate, and an adaptive pump dropping to 32 Hz idle would need ~689
+  // frames a tick and starve under the cap.
+  vew_adaptive = 0;
+  vew_rtc_rs = VEW_RENDER_RS;
+  printf("CS4231A: RESAMPLED -- %u Hz, pump %u Hz, render %u Hz (<=%u frames)\n",
+         vew_dacrate, 32768u >> (VEW_RENDER_RS - 1),
+         (32768u >> (VEW_RENDER_RS - 1)) / VEW_RENDER_DIV, VEW_RENDER_CAP);
+ }
+ PTOPS_Register(FOpts.resamp ? &vew211_render_ops : &vew211_pt_ops);
  // NOFM: guest AdLib I/O at 0x388 goes untrapped to the card's DISCRETE
  // YMF262, which decodes all four OPL3 ports natively. Real FM for free.
  return 1;

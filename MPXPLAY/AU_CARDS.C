@@ -26,10 +26,9 @@
 
 extern uint8_t bOMode;
 
-/* The PCMCIA/planar passthrough backends all coexist now (the ABI they used
- * to share is dispatched through ptops.h), so all three are probed in order
- * instead of being selected at build time. SET SBECARD=es1688|vew211|tp755
- * pins one. */
+/* The PCMCIA/planar passthrough backends all coexist in one binary (the ABI
+ * they used to share is dispatched through ptops.h) and the /CARD switch
+ * selects one at run time. */
 #ifndef NOTP755
 extern struct sndcard_info_s TP755_sndcard_info;
 #endif
@@ -56,13 +55,10 @@ extern struct sndcard_info_s SBALL_sndcard_info;
 #endif
 
 static const struct sndcard_info_s *sndcard_info_table[] = {
-	/* Probe order = strongest identification first, and it also decides who
-	 * wins on a box that has both. ES1688 does a real DSP handshake at 0x220.
-	 * VEW211 follows: its whole presence test is "something answers at the
-	 * codec port", so it must not get first refusal on another card's
-	 * registers. TP755 is LAST and, additionally, never probes unless
-	 * SBECARD=tp755 names it -- its detection has to WRITE to 0x15E8 before
-	 * it knows what machine it is on, so it is opt-in (see sc_tp755.c). */
+	/* NOT a probe order: nothing here is probed any more. /CARD names exactly
+	 * one backend and the rest decline in PTOPS_CardIs() before touching a
+	 * single port, so table order carries no meaning. The launcher always
+	 * knew the card anyway -- it had to run that card's enabler first. */
 #ifndef NOES1688
 	&ES1688_sndcard_info,   /* PCMCIA ES1688 passthrough (PC110/235) */
 #endif
@@ -70,7 +66,7 @@ static const struct sndcard_info_s *sndcard_info_table[] = {
 	&VEW211_sndcard_info,   /* PCMCIA CS4231A passthrough (CF-VEW211) */
 #endif
 #ifndef NOTP755
-	&TP755_sndcard_info,    /* TP755C planar CS4248 -- opt-in, SBECARD=tp755 */
+	&TP755_sndcard_info,    /* TP755C planar CS4248 (/CARD:TP755) */
 #endif
 #ifndef NOES1371
 	&ES1371_sndcard_info,

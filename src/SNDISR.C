@@ -121,12 +121,12 @@ static const struct pt_ops_s pt_ops_default = {
 };
 const struct pt_ops_s *PT_Ops = &pt_ops_default;
 
-int PTOPS_CardWanted( const char *id )
+int PTOPS_CardIs( const char *id )
 {
-    const char *e = getenv("SBECARD");
+    const char *e = FOpts.card;
     int i;
-    if ( !e || !*e )
-        return 1;                       /* no preference: probe order decides */
+    if ( !e )
+        return 0;                       /* no /CARD: main() already refused */
     for ( i = 0; e[i] && id[i]; i++ ) {
         char a = e[i], b = id[i];
         if ( a >= 'A' && a <= 'Z' ) a += 'a' - 'A';
@@ -135,12 +135,6 @@ int PTOPS_CardWanted( const char *id )
             return 0;
     }
     return e[i] == 0 && id[i] == 0;
-}
-
-int PTOPS_CardPinned( const char *id )
-{
-    const char *e = getenv("SBECARD");
-    return ( e && *e ) ? PTOPS_CardWanted( id ) : 0;
 }
 
 void PTOPS_Register( const struct pt_ops_s *ops )
@@ -446,6 +440,18 @@ static int SNDISR_Interrupt( void )
         return(0);
     }
 
+#ifndef NOES1688
+    /* Render-rate divider (ptops.h). AU_isirq above has already run the
+     * card's irq_routine -- which is where a pump card feeds its FIFO -- so
+     * bailing here keeps the feed at full rate and only thins out the heavy
+     * render path. */
+    if ( PT_Ops->render_div > 1 ) {
+        static unsigned rdiv_cnt;
+        if ( ++rdiv_cnt % (unsigned)PT_Ops->render_div )
+            goto isrexit;
+    }
+#endif
+
 #if COMPAT4
     /* v1.8: /CF4 */
     if ( gvars.compatflags & CF_MASKPIT ) {
@@ -491,6 +497,9 @@ static int SNDISR_Interrupt( void )
     //AU_setoutbytes( isr.hAU ); //v1.9: now obsolete
     samples = AU_cardbuf_space( isr.hAU ) / ( sizeof(int16_t) * 2 ); //16 bit, 2 channels
 #ifndef NOES1688
+    /* keep one render pass inside one pump tick (see render_cap in ptops.h) */
+    if ( PT_Ops->render_cap && samples > PT_Ops->render_cap )
+        samples = PT_Ops->render_cap;
     /* PT mode: pace by ring space instead (see decl comment). samples becomes
      * a plain loop bound; keeping it small also caps the mixer / direct-DAC
      * tails so a non-PT tick stays cheap. 1024 >> any real per-tick need

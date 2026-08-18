@@ -93,7 +93,7 @@ static int tp_dos_alloc(unsigned paragraphs, int *sel)
 #define TP_CTL_AUDIO 0x1C           //   index of the audio-enable byte
 #define TP_CTL_BIT   0x02           //   bit 1 = CS4248 enabled
 
-#define TP_BASE_DEF  0x4E30         // codec block (env SBEBASE overrides)
+#define TP_BASE_DEF  0x4E30         // codec block (/BASE overrides)
 #define TC_IAR  0                   // Index Address Register (bit6 = MCE)
 #define TC_IDR  1                   // Indexed Data Register
 #define TC_SR   2                   // Status Register (bit0 = INT, write clears)
@@ -134,9 +134,9 @@ static char    *tp_ring      = NULL;         // near ptr into the DOS block
 static uint32_t tp_ring_phys = 0;            // physical addr of ring start
 static int      tp_dos_sel   = 0;            // selector for __dpmi_free_dos_memory
 static unsigned tp_period    = TP_PERIOD_DEF;
-static unsigned tp_dacrate   = TP_RATE_DEF;  // requested (env DACRATE)
+static unsigned tp_dacrate   = TP_RATE_DEF;  // requested (/DACRATE)
 static int      tp_vol       = 8;            // I6/I7 attenuation 0..63 x -1.5dB
-                                             // (env SBEVOL; default -12dB --
+                                             // (/CVOL; default -12dB --
                                              // 0dB is LOUD on the lid speaker)
 static unsigned tp_hw_rate   = 0;            // configured-format record: enables
 static unsigned tp_hw_armed  = 0;            //   cheap restart + the watchdog heal
@@ -503,15 +503,11 @@ static int TP755_adetect(struct audioout_info_s *aui)
  int seg, par;
  uint32_t lin, start;
 
- // OPT-IN ONLY (SET SBECARD=tp755). Unlike every other backend here, this
- // one cannot look before it leaps: the 755C codec powers up dark, so
- // detection REQUIRES writing the ThinkPad system-control port 0x15E8 --
- // on a machine we have not yet identified as a ThinkPad. The 0x4E30
- // pre-gate below narrows that, but it rests on "open bus always reads
- // 0xFF", which is verified on only a couple of machines. A planar device
- // is also the one thing a user always knows they have in advance, so
- // nothing is lost by requiring them to say so.
- if(!PTOPS_CardPinned("tp755")) return 0;
+ // Named explicitly like every backend now, which matters most here: this
+ // one cannot look before it leaps. The 755C codec powers up dark, so
+ // bringing it up REQUIRES writing ThinkPad system-control port 0x15E8 --
+ // something we must never do on a machine that only might be a ThinkPad.
+ if(!PTOPS_CardIs("tp755")) return 0;
 
  // real ch0 is ours; a guest on /D0 would reprogram it mid-ring
  if(aui->gvars->dma == 0){
@@ -519,18 +515,12 @@ static int TP755_adetect(struct audioout_info_s *aui)
   return 0;
  }
 
- // TPBASE, not SBEBASE: here "base" is the planar codec block (0x4E30), a
- // third meaning of the word. One binary carries all three backends now, so
- // each reads its own variable -- a shared name would aim one probe at
- // another card's live registers.
- e = getenv("TPBASE");
- if(e){ long b = strtol(e, NULL, 16); if(b > 0 && b <= 0xFFFC) tp_cb = (uint16_t)b; }
- e = getenv("DACRATE");
- if(e){ unsigned r = (unsigned)atoi(e);
-        if(r){ if(r < TP_RATE_MIN) r = TP_RATE_MIN;
-               if(r > TP_RATE_MAX) r = TP_RATE_MAX; tp_dacrate = r; } }
- e = getenv("SBEVOL");
- if(e){ int a = atoi(e); if(a >= 0 && a <= 63) tp_vol = a; }
+ // /BASE here is the planar codec block (0x4E30).
+ if(FOpts.base > 0 && FOpts.base <= 0xFFFC) tp_cb = (uint16_t)FOpts.base;
+ if(FOpts.dacrate){ unsigned r = (unsigned)FOpts.dacrate;
+        if(r < TP_RATE_MIN) r = TP_RATE_MIN;
+        if(r > TP_RATE_MAX) r = TP_RATE_MAX; tp_dacrate = r; }
+ if(FOpts.cvol >= 0) tp_vol = FOpts.cvol;
 
  // PRE-GATE, no writes: a genuine 755C answers this port whether its codec
  // is enabled or not (a disabled one reads 0x80); open bus on every other
@@ -540,7 +530,10 @@ static int TP755_adetect(struct audioout_info_s *aui)
  // PC110s, T2130CTs and OmniBooks. (A BIOS model/submodel gate via INT 15h
  // AH=C0h belongs on top of this, but its values have to be measured on the
  // bench first -- no machine identification exists in this tree yet.)
- if((unsigned char)inportb(tp_cb + TC_IAR) == 0xFF) return 0;
+ if((unsigned char)inportb(tp_cb + TC_IAR) == 0xFF){
+  printf("CS4248: nothing at %4.4Xh -- is this really a 755C? (check /BASE)\n", tp_cb);
+  return 0;
+ }
 
  tp_ctl_was_on = tp_twiddle(1);               // enable the card
  if(!(tp_ctl_was_on & TP_CTL_BIT)) TP_MS(60); // fresh power-up: let it settle

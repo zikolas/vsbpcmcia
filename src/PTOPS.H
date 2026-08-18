@@ -30,6 +30,23 @@ struct pt_ops_s {
     void (*dbg_reenter)(void);
     /* live ISR nesting depth for the sndisr depth limiter; NULL = none */
     int  (*depth)(void);
+    /* Max frames the engine may render in ONE ISR pass; 0 = no limit.
+     * Only meaningful for a render-path card whose ISR is a fast pump: with
+     * no cap, sndisr sizes the pass from AU_cardbuf_space(), which on an
+     * empty ring asks for the WHOLE buffer (8192 frames on the VEW211) --
+     * far more work than fits between two 2048 Hz pump ticks, so the machine
+     * livelocks inside the ISR before a game makes a sound. The passthrough
+     * path has always had the equivalent (PT_MODE_SAMPLES). */
+    int  render_cap;
+    /* Render on every Nth interrupt only; 0/1 = every one. The pump and the
+     * engine render share one ISR, but they want opposite rates: the CS4231A
+     * FIFO is 16 frames (~1.5 ms at 11 kHz) so feeding must be FAST, while
+     * the render path (cardbuf_space + mixer + writedata) is heavy and wants
+     * to be RARE -- sc_tp755 does it 43x/s. Running both at pump rate costs
+     * ~24x the fixed ISR overhead on a 486, starves the game, and makes
+     * passes overrun their tick (= missed feeds = static). So: pump every
+     * tick, render every Nth. render_cap must cover one render interval. */
+    int  render_div;
 };
 
 #define PTF_TAP      0x0001  /* arm the sndisr tap: raw guest DMA -> feed() */
@@ -42,18 +59,37 @@ extern const struct pt_ops_s *PT_Ops;
  * for the duration telemetry. */
 void PTOPS_Register( const struct pt_ops_s *ops );
 
-/* Runtime backend selection. SBECARD=es1688|vew211|tp755 pins the session to
- * one backend; unset means "probe in table order". Every backend's adetect
- * calls this first, so a user on an ambiguous box can always force the right
- * one without a rebuild. Init context only (it reads the environment). */
-int PTOPS_CardWanted( const char *id );
+/* Fork-side driver options, filled by main.c's command-line parser.
+ * Deliberately NOT fields of struct globalvars: that layout is an ABI shared
+ * with config.inc on the ASM side, and these are ours alone.
+ *
+ * These were environment variables until 2026-08-17. Switches replace them
+ * because env values PERSIST BETWEEN RUNS: a base or a card name left over
+ * from an earlier launcher silently redirected the next one, which is why
+ * every batch grew a row of defensive "set X=" clears. A switch dies with
+ * the invocation, so that whole class of bug cannot occur. Genuinely
+ * transient bench knobs (SBERTC, SBEPTLAT, SBENORS, ESNOI8, IRQTONE,
+ * FIFOTEST) stay in the environment on purpose: they are set once at a
+ * prompt for one experiment and never select hardware. */
+struct fork_opts_s {
+    const char *card;   /* /CARD: backend name; NULL = not given (fatal) */
+    int base;           /* /BASE: the REAL card's I/O base; 0 = card default.
+                         * NOT /A, which is the EMULATED SB base. One switch
+                         * for all three cards is unambiguous only because
+                         * /CARD is mandatory -- exactly one backend reads it. */
+    int dacrate;        /* /DACRATE: codec rate, Hz; 0 = card default */
+    int cvol;           /* /CVOL: codec DAC attenuation 0-63; -1 = default */
+    int fmshim;         /* /FMSHIM: force the FM-less detection path */
+    int resamp;         /* /RESAMP: engine resampling instead of passthrough
+                         * (VEW211 for now) -- the codec runs at ONE fixed
+                         * table rate and SBEMU resamples every guest format
+                         * onto it, so the frame stepper never engages. */
+};
+extern struct fork_opts_s FOpts;
 
-/* Stricter variant: an UNSET SBECARD means NO, so the backend is never
- * probed unless the user names it. For a backend whose probe cannot be made
- * read-only -- sc_tp755 must WRITE to ThinkPad control port 0x15E8 before it
- * can tell whether the machine is even a ThinkPad -- opt-in is the only way
- * to guarantee it never touches a machine it does not belong to. */
-int PTOPS_CardPinned( const char *id );
+/* Does /CARD name this backend? Case-insensitive, exact. There is no
+ * probing any more: a backend runs only when it is asked for by name. */
+int PTOPS_CardIs( const char *id );
 
 /* Engine-generic ISR telemetry (the BIOS 0x4F0-0x4FF map -- see
  * doc/NOTES.md), formerly duplicated in sc_es1688.c and sc_vew211.c. */

@@ -106,6 +106,10 @@ struct MAIN_s {
 
 static struct MAIN_s gm = { NULL, false, false, false, false };
 
+/* Fork-side options (ptops.h). cvol -1 means "card default", which a
+ * deliberate /CVOL0 (full scale) must not be confused with. */
+struct fork_opts_s FOpts = { NULL, 0, 0, -1, 0, 0 };
+
 struct globalvars gvars = { BASE_DEFAULT, IRQ_DEFAULT, DMA_DEFAULT, /* /A /I /D */
 #if SB16
 HDMA_DEFAULT, /* /H */
@@ -131,37 +135,55 @@ static const struct {
     const char *desc;
     int *pValue;
 } GOptions[] = {
-    "?", "Show help", &gm.bHelp,
-    "A", "Set IO base address [220|240, def 220]", &gvars.base,
-    "I", "Set IRQ number [2|5|7, def 7]", &gvars.irq,
-    "D", "Set DMA channel [0|1|3, def 1]", &gvars.dma,
+    "CARD:", "ES1688|VEW211|TP755 REQUIRED", (int *)&FOpts.card,
+    "BASE", "real card base, hex", &FOpts.base,
+    "DACRATE", "codec rate, Hz", &FOpts.dacrate,
+    "CVOL", "codec attenuation [0-63]", &FOpts.cvol,
+    "FMSHIM", "pretend card has no FM", &FOpts.fmshim,
+    "RESAMP", "resample, no PT (VEW211)", &FOpts.resamp,
+    "FMVOL", "real-OPL3 volume [0-63]", &gvars.fmvol,
+    "?", "this help", &gm.bHelp,
+    "A", "EMULATED SB base [220|240]", &gvars.base,
+    "I", "IRQ [2|5|7, def 7]", &gvars.irq,
+    "D", "DMA [0|1|3, def 1]", &gvars.dma,
 #if SB16
-    "H", "Set High DMA channel [5|6|7, no def]", &gvars.hdma,
-    "T", "Set SB Type [0-6, def 4]", &gvars.type,
+    "H", "high DMA [5|6|7, no def]", &gvars.hdma,
+    "T", "SB type [0-6, def 4]", &gvars.type,
 #else
-    "T", "Set SB Type [0-5, def 4]", &gvars.type,
+    "T", "SB type [0-5, def 4]", &gvars.type,
 #endif
 #if VMPU
-    "P", "Set Midi port [330|300, no def]", &gvars.mpu,
+    "P", "MIDI port [330|300, no def]", &gvars.mpu,
 #endif
-    "OPL","Set OPL3 emulation [0|1, def 1]", &gvars.opl3,
-    "FMVOL","Set hardware-FM volume [0-63 TL steps on the real OPL3, def off]", &gvars.fmvol,
-    "PM", "Set protected-mode support [0|1, def 1]", &gvars.pm,
-    "RM", "Set real-mode support [0|1, def 1]", &gvars.rm,
-    "F",  "Set frequency [11025|22050|44100, def 22050]", &gvars.freq,
-    "VOL", "Set master volume [0-9, def 7]", &gvars.vol,
-    "BS",  "Set PCM buffer size [in 4k pages, def 16]", &gvars.buffsize,
+#ifndef NOFM
+    /* force-zeroed under NOFM (see below), so advertising it would lie */
+    "OPL","OPL3 emulation [0|1, def 1]", &gvars.opl3,
+#endif
+    "PM", "protected mode [0|1, def 1]", &gvars.pm,
+    "RM", "real mode [0|1, def 1]", &gvars.rm,
+#ifndef NOSBLIVE
+    /* Both are inert on the PCMCIA/planar cards: their setrate() overwrites
+     * the requested freq with its own /DACRATE, and their mixer slots are
+     * NULL so AU_setmixer_outs has nothing to write. Live for the PCI cards. */
+    "F",  "freq [11025|22050|44100]", &gvars.freq,
+    "VOL", "master volume [0-9, def 7]", &gvars.vol,
+#endif
+    "BS",  "PCM buffer, 4k pages [16]", &gvars.buffsize,
 #if SLOWDOWN
-    "SD",  "Set slowdown factor [def 0]", &gvars.slowdown,
+    "SD",  "slowdown (needs a TSC)", &gvars.slowdown,
 #endif
-    "O",  "Set output (HDA/SB Live) [0=lineout|1=speaker|2=hp, def 0]", &gvars.pin,
-    "DEV", "Set start index for device scan (HDA only) [def 0]", &gvars.device,
-    "PS", "Set period size [def 512]", &gvars.period_size,
+#ifndef NOSBLIVE
+    "O",  "output [0=line|1=spk|2=hp]", &gvars.pin,
+#endif
+#ifndef NOHDA
+    "DEV", "device scan start (HDA)", &gvars.device,
+#endif
+    "PS", "period size [def 512]", &gvars.period_size,
 #if SOUNDFONT
     "SF:", "Set sound font file name", (int *)&gvars.soundfont,
     "MV", "Set voice limit [0-256, def 64]", &gvars.voices,
 #endif
-    "CF", "Set compatibility flags [def 0]", &gvars.compatflags,
+    "CF", "compat flags [def 0]", &gvars.compatflags,
 #ifdef _DEBUG
     "LF:", "Set log file name", (int *)&gvars.logfile,
 #endif
@@ -320,10 +342,12 @@ void MAIN_ReinitOPL( void )
 
 #endif
 
+/* /BASE is a hex I/O address like /A -- the parser defaults to decimal. */
 #if VMPU
-#define IsHexOption(x) (GOptions[x].pValue == &gvars.base || GOptions[x].pValue == &gvars.mpu )
+#define IsHexOption(x) (GOptions[x].pValue == &gvars.base || GOptions[x].pValue == &gvars.mpu \
+                        || GOptions[x].pValue == &FOpts.base )
 #else
-#define IsHexOption(x) (GOptions[x].pValue == &gvars.base )
+#define IsHexOption(x) (GOptions[x].pValue == &gvars.base || GOptions[x].pValue == &FOpts.base )
 #endif
 
 int main(int argc, char* argv[])
@@ -397,23 +421,75 @@ int main(int argc, char* argv[])
     /* if -? or unrecognised option was entered, display help and exit */
     if( gm.bHelp ) {
         gm.bHelp = false;
-        printf("VSBPCMCIA v" VSBPCM_VER " (VSBHDA " VERMAJOR "." VERMINOR " core); SB emulation on PCMCIA sound cards. Usage:\n");
-
-        for( i = 0; GOptions[i].option; i++ ) {
-            char *tmp;
-            tmp = strchr( GOptions[i].option, ':') ? "fn" : "";
-            printf( " /%s%s\t : %s\n", GOptions[i].option, tmp, GOptions[i].desc );
+        /* TWO COLUMNS on purpose: one option per line overflowed a 25-row
+         * screen, so the header (and the card recipes that answer most
+         * questions) scrolled away before you could read them. First half of
+         * the table goes left, second half right. */
+        int n, half, j;
+        char cell[64];
+        printf("VSBPCMCIA v" VSBPCM_VER " (VSBHDA " VERMAJOR "." VERMINOR ") - SB emulation, PCMCIA + planar\n");
+        for( n = 0; GOptions[n].option; n++ )
+            ;
+        half = (n + 1) / 2;
+        for( j = 0; j < half; j++ ) {
+            sprintf( cell, "/%s%s", GOptions[j].option,
+                     strchr( GOptions[j].option, ':') ? "nm" : "" );
+            printf( " %-9s %-29s", cell, GOptions[j].desc );
+            if ( j + half < n ) {
+                sprintf( cell, "/%s%s", GOptions[j+half].option,
+                         strchr( GOptions[j+half].option, ':') ? "nm" : "" );
+                printf( " %-8s %s", cell, GOptions[j+half].desc );
+            }
+            printf( "\n" );
         }
-
-        printf("\nNote: the BLASTER environment variable may change the default settings; " HELPNOTE );
-        printf("\nSource code used from:\n"
-               "\tMPXPlay (https://mpxplay.sourceforge.net)\n"
-               "\tDOSBox (https://www.dosbox.com)\n"
-#if SOUNDFONT
-               "\tTinySoundFont (https://www.github.com/schellingb/TinySoundFont)\n"
+        printf("\nCard recipes -- run that card's enabler FIRST and match its base:\n"
+               " /CARD:ES1688 /BASE240   after ES1688GO /SB=240   (base defaults to 220)\n"
+               " /CARD:VEW211 /BASE530   after VEW21XGO /IO=530   (base defaults to 530)\n"
+               " /CARD:TP755             no enabler, planar       (base defaults to 4E30)\n"
+               " /BASE is the REAL card; /A is the EMULATED SB the guest looks for.\n"
+               "\nBLASTER env may change defaults;" HELPNOTE );
+        /* Credit what this BUILD actually links. DOSBox's DBOPL and
+         * TinySoundFont are only present in the FM / soundfont builds
+         * (see djgpp.mak), so claiming them in a NOFM binary is untrue. */
+        printf("Built on VSBHDA (Baron-von-Riedesel) + SBEMU (crazii) + MPXplay (PDSoft)\n");
+#if !defined(NOFM) || SOUNDFONT
+        printf("  plus"
+#ifndef NOFM
+               " DOSBox DBOPL"
 #endif
-              );
+#if SOUNDFONT
+               " TinySoundFont"
+#endif
+               "\n");
+#endif
+        printf("See COPYING.\n");
         return(0);
+    }
+
+    /* /CARD is mandatory: there is no probing. Choosing the backend was never
+     * the driver's to guess -- the LAUNCHER already committed to a card one
+     * line earlier by running that card's enabler (ES1688GO / VEW21XGO, or
+     * none at all for the planar 755C). Nor is there a safe bare invocation
+     * to preserve: the driver's own defaults put the emulated SB and the real
+     * card at the SAME address (220), which is why every deployed batch has
+     * always passed explicit flags. */
+    if( FOpts.card == NULL ) {
+        printf("Error: no card selected. /CARD is required:\n"
+               "  /CARD:ES1688 [/BASE240]   Ratoc REX-557x, KXL-C101 etc; run ES1688GO\n"
+               "                            first and match its /SB= (default 220)\n"
+               "  /CARD:VEW211 [/BASE530]   Panasonic CF-VEW211; run VEW21XGO first\n"
+               "                            and match its /IO= (default 530)\n"
+               "  /CARD:TP755  [/BASE4E30]  ThinkPad 755C planar codec; no enabler\n"
+               "Note: /BASE is the REAL card. /A is the EMULATED SB the guest sees.\n");
+        return(1);
+    }
+    if( !PTOPS_CardIs("es1688") && !PTOPS_CardIs("vew211") && !PTOPS_CardIs("tp755") ) {
+        printf("Error: unknown /CARD:%s -- expected ES1688, VEW211 or TP755\n", FOpts.card );
+        return(1);
+    }
+    if( FOpts.cvol != -1 && ( FOpts.cvol < 0 || FOpts.cvol > 63 ) ) {
+        printf("Error: /CVOL takes 0-63 (codec DAC attenuation, ~1.5 dB per step)\n" );
+        return(1);
     }
 
     if( gvars.base != 0x220 && gvars.base != 0x240 ) {
@@ -505,8 +581,6 @@ int main(int argc, char* argv[])
     }
     if ( (gm.hAU = AU_init( &gvars ) ) == 0 ) {
         printf("Error: no soundcard found\n");
-        if ( !getenv("SBECARD") )
-            printf("  (ThinkPad 755C planar audio is opt-in: SET SBECARD=tp755)\n");
         goto errexit;
     }
     printf("Found sound card: %s\n", AU_getshortname( gm.hAU ) );
