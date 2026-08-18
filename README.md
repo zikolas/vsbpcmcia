@@ -251,17 +251,20 @@ VSBPCMCIA uses some source code from:
    was originally developed against SBEMU, and the DPMI helper API the PCMCIA
    backends call (DPMI_InstallISR and friends, the pds_* helpers) keeps
    crazii's shape; the DJGPP implementations behind it are ours
- * Linux ALSA wss_lib.c (GPL v2) - the ThinkPad system-control twiddle that
-   wakes the 755C's planar codec (port 0x15E8, index 0x1C, bit 0x02) in
-   mpxplay/sc_tp755.c, and the ES1688 reset semantics noted in sc_es1688.c
+ * Linux ALSA, sound/isa/wss/wss_lib.c (GPL v2) - the ThinkPad
+   system-control twiddle that wakes the 755C's planar codec (port 0x15E8,
+   index 0x1C, bit 0x02) in mpxplay/sc_tp755.c. sc_es1688.c separately cites
+   ALSA for one ES1688 reset behaviour (reset bit 1 clears the FIFO): that is
+   a documented register effect we cross-checked, not code taken from it --
+   noted here for completeness rather than because it is owed
  * DOSBox's DBOPL - OPL3 emulation, linked only by the builds that need it
    (CARD=TP755, CARD=AUDIGY)
  * Linux ALSA snd-emu10k1 (GPL v2), (C) Jaroslav Kysela and contributors -
    the EMU10K2/CA0108 register definitions (mpxplay/emu10k1.h), the Audigy 2
    ZS Notebook initialisation, the BAR+0x38 wake-up and the WM8768 DAC
-   sequences. The hardware wavetable (mpxplay/emu_wt.c) is code we wrote, but
-   it is written against those definitions and programming sequences -- it is
-   not independent of ALSA's work. The bench tools in tools/audigy/ take
+   sequences. The hardware wavetable (mpxplay/emu_wt.c) was written here, but
+   against those definitions and programming sequences -- it is not
+   independent of ALSA's work. The bench tools in tools/audigy/ take
    their chip knowledge from the same source (see tools/audigy/README.md).
  * TinySoundFont (MIT, vendored in tsf/) - optional software-synth fallback;
    the hardware wavetable does not use it
