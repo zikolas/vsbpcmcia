@@ -864,6 +864,53 @@ static void PDT_DelEntries( int start, int end, int entries )
  * forward TO -- 0x388 is open bus and the probe fails on 0xFF -- so the same
  * aliases are answered by the timer-only shim instead. See fmshim.c.
  */
+/* Write one OPL register the slow way. The chip needs a settle after the
+ * index write and a longer one after the data write; ISA port reads are the
+ * traditional ~1us delay and cost nothing on a 486. */
+static void FM_Reg( uint8_t reg, uint8_t val )
+{
+    int i;
+    UntrappedIO_OUT( 0x388, reg );
+    for ( i = 0; i < 6; i++ )  UntrappedIO_IN( 0x388 );
+    UntrappedIO_OUT( 0x389, val );
+    for ( i = 0; i < 35; i++ ) UntrappedIO_IN( 0x388 );
+}
+
+/* Does an OPL actually ANSWER at 0x388? This is the AdLib timer test itself:
+ * reset both timers, check the status bits are clear, start timer 1 on its
+ * shortest preset, wait, and check T1 reports expired. It is exactly what a
+ * guest runs to decide an FM chip exists (Duke Nukem II's SB probe gates the
+ * DSP on it), which is what makes trusting it safe: if this fails, the
+ * guest's identical probe would fail too, so the shim is the right answer no
+ * matter what the card's ops table claims.
+ *
+ * Why it is needed: one backend can serve two boards. sc_vew211 declares
+ * PTF_REAL_FM for the CF-VEW211's discrete YMF262, but the NEC PC-9801N-J04
+ * is the same MEI ASIC and CS4231A with NO FM fitted -- and the driver cannot
+ * tell them apart. Asking the hardware removes the guess.
+ *
+ * Runs from PTRAP_Prepare, before the port traps are installed, so this is
+ * the real bus and not our own shim answering. Timers are left reset.
+ */
+static int FM_Answers( void )
+{
+    uint8_t s1, s2;
+    int i;
+
+    FM_Reg( 4, 0x60 );                 /* reset timer 1 + timer 2 */
+    FM_Reg( 4, 0x80 );                 /* reset the IRQ flags */
+    s1 = UntrappedIO_IN( 0x388 );      /* must read back with bits 5-7 clear */
+    FM_Reg( 2, 0xFF );                 /* timer 1 preset: expires in ~80us */
+    FM_Reg( 4, 0x21 );                 /* unmask + start timer 1 */
+    for ( i = 0; i < 400; i++ )        /* comfortably past 80us */
+        UntrappedIO_IN( 0x388 );
+    s2 = UntrappedIO_IN( 0x388 );      /* must now report T1 expired (0xC0) */
+    FM_Reg( 4, 0x60 );                 /* leave the chip as we found it */
+    FM_Reg( 4, 0x80 );
+
+    return ( ( s1 & 0xE0 ) == 0 && ( s2 & 0xE0 ) == 0xC0 );
+}
+
 static int FmShimOn;   /* set in PTRAP_Prepare: this card has no real FM */
 
 static uint8_t FM_Alias( uint16_t port, uint8_t val, uint16_t flags )
@@ -932,7 +979,15 @@ void PTRAP_Prepare( int opl, int sbaddr, int dma, int hdma, int sndirq )
          * its ops table (ptops.h). /FMSHIM forces the FM-less path on a card
          * that does have a chip -- a bench knob for exercising the shim
          * (expect FM music to go silent while SB detection keeps working). */
-        FmShimOn = !( PT_Ops->flags & PTF_REAL_FM ) || FOpts.fmshim;
+        /* Ask the hardware rather than trusting the paperwork: a backend can
+         * serve two boards with different silicon (CF-VEW211 vs J04). */
+        FmShimOn = 1;
+        if ( FOpts.fmshim )
+            ;                                  /* forced: bench knob */
+        else if ( PT_Ops->flags & PTF_REAL_FM )
+            FmShimOn = !FM_Answers();
+        if ( FmShimOn && !FOpts.fmshim && ( PT_Ops->flags & PTF_REAL_FM ) )
+            printf("FM: card claims a chip at 388h, none answered\n");
 
         if ( FmShimOn ) {
             /* No chip anywhere: keep 0x388-0x38B TRAPPED (they would read
