@@ -945,7 +945,10 @@ void PTRAP_Prepare( int opl, int sbaddr, int dma, int hdma, int sndirq )
             FMSHIM_Reset();
             PortHandler[f+0] = FMSHIM_Acc; PortHandler[f+1] = FMSHIM_Acc;
             PortHandler[f+2] = FMSHIM_Acc; PortHandler[f+3] = FMSHIM_Acc;
-            printf("FM: no chip on this card - timer-only OPL3 shim at 388h"
+            /* 80 columns: the old wording ran to 82 and wrapped. Keep the
+             * "no music" half -- it is what stops the silence being
+             * reported as a bug -- and drop "on this card" instead. */
+            printf("FM: no chip - timer-only OPL3 shim at 388h"
                    " (detection only, no music)\n");
         } else if ( FMVOL_Active() ) {
             /* FMVOL: keep 0x388-0x38B trapped, but filtered+forwarded to the

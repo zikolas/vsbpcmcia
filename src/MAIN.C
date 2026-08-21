@@ -423,12 +423,20 @@ int main(int argc, char* argv[])
             if ( GOptions[j].option == NULL ) {
                 argv[i]--;
                 printf("%s?\n", argv[i]);
+                gm.bHelp = true;
             }
-        } else
+        } else {
             printf("%s?\n", argv[i]);
+            gm.bHelp = true;
+        }
     }
 
-    /* if -? or unrecognised option was entered, display help and exit */
+    /* if -? or unrecognised option was entered, display help and exit.
+     * An unknown switch USED to print "foo?" and carry on with defaults,
+     * which turns a typo into a hardware-shaped mystery: /BASEF40 was
+     * rejected by the old parser, the driver silently kept the 530 default
+     * and then reported "nothing at 0534h -- run VEW21XGO first", blaming
+     * the enabler. Refusing to load is the kinder failure. */
     if( gm.bHelp ) {
         gm.bHelp = false;
         /* TWO COLUMNS on purpose: one option per line overflowed a 25-row

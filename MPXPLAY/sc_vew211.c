@@ -829,7 +829,12 @@ static int VEW211_irq(struct audioout_info_s *aui)
 // VSBHDA sndcard_info_s: 14 fields. No card_info / fm / mixer slots -- the
 // discrete YMF262 rides NOFM's untrapped 0x388 directly.
 struct sndcard_info_s VEW211_sndcard_info={
- "VEW211",                                            // shortname
+ // Name the SILICON, not a board: this backend drives the CS4231A on the
+ // Panasonic CF-VEW211 AND on the NEC PC-9801N-J04 (same MEI ASIC, no FM
+ // fitted), so "Found sound card: VEW211" was simply wrong on a J04.
+ // Matches sc_tp755 ("CS4248") and sc_es1688 ("ES1688"). This string is
+ // display only -- /CARD:VEW211 is matched by PTOPS_CardIs, not by this.
+ "CS4231A",                                           // shortname
  0,                                                   // infobits
  &VEW211_adetect,                                     // card_detect
  &VEW211_start, &VEW211_stop, &VEW211_close,          // start / stop / close
