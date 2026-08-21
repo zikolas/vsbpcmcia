@@ -346,7 +346,12 @@ void MAIN_ReinitOPL( void )
 
 #endif
 
-/* /BASE is a hex I/O address like /A -- the parser defaults to decimal. */
+/* /BASE is a hex I/O address like /A -- the parser defaults to decimal.
+ * A hex value may of course begin A-F (the J04's codec base is F40, and
+ * E80 is a legal CF-VEW211 base), so hex options accept a hex digit as
+ * the first character; decimal ones still take digits only. */
+#define IsHexDigit(c) ( ((c) >= '0' && (c) <= '9') || ((c) >= 'A' && (c) <= 'F') \
+                     || ((c) >= 'a' && (c) <= 'f') )
 #if VMPU
 #define IsHexOption(x) (GOptions[x].pValue == &gvars.base || GOptions[x].pValue == &gvars.mpu \
                         || GOptions[x].pValue == &FOpts.base )
@@ -405,7 +410,8 @@ int main(int argc, char* argv[])
                     if ( strchr( GOptions[j].option, ':' ) ) {
                         *GOptions[j].pValue = (int)&argv[i][len];
                         break;
-                    } else if ( argv[i][len] >= '0' && argv[i][len] <= '9' ) {
+                    } else if ( IsHexOption(j) ? IsHexDigit(argv[i][len])
+                                : ( argv[i][len] >= '0' && argv[i][len] <= '9' ) ) {
                         *GOptions[j].pValue = strtol(&argv[i][len], NULL, IsHexOption(j) ? 16 : 10 );
                         break;
                     } else if ( argv[i][len] == 0 && *GOptions[j].pValue == false ) {

@@ -7,7 +7,7 @@
  * FM for free. VMPU 0 = no 0x330 MPU trap. SOUNDFONT 0 = no TinySoundFont MIDI. */
 /* VSBPCMCIA: our fork version (the banner shows this; VERMAJOR/VERMINOR in
  * version.h stay upstream's VSBHDA core version for lineage/merge sanity). */
-#define VSBPCM_VER "1.0"
+#define VSBPCM_VER "1.0.1"
 
 /* VSBPCMCIA card backends are RUNTIME-selected: sc_es1688.c (ES1688 PCMCIA),
  * sc_vew211.c (CF-VEW211 CS4231A) and sc_tp755.c (TP755C planar CS4248) are
