@@ -123,9 +123,37 @@ DJGPP v2.05 and JWasm v2.17+ are required.
    detection-only shim. A feature flag, not a card selector.
  * `CARD=AUDIGY` — **VSBPCMA.EXE**, see below.
 
-The 16-bit Open Watcom variant of upstream VSBHDA is not built here; it would
-be the way to support 16-bit protected-mode games, which this 32-bit build
-cannot serve (DPMI gives 16- and 32-bit clients separate interrupt tables).
+### 16-bit protected-mode games — VSBPCM16.EXE
+
+DPMI 0.9 gives 16-bit and 32-bit clients separate protected-mode interrupt
+tables, so the 32-bit binaries above cannot serve a 16-bit PM game — Tyrian
+and the rest of the Borland RTM / Phar Lap 286 / DOS16M catalogue. Those need
+a driver that is itself a 16-bit client:
+
+    ./tools/build16.sh        ->  ow16/VSBPCM16.EXE
+
+built with Open Watcom (`ow16.mak` is the on-box equivalent) rather than
+DJGPP. On the box it differs from the 32-bit stack in exactly two words —
+`HDPMI16I -x` instead of `HDPMI32I -x`, and `VSBPCM16` instead of `VSBPCM`;
+see `deploy/go16es.bat` and `deploy/go16vew.bat`. Run `UNINST.EXE` before
+switching between the two: neither reliably detects the other. Both serve
+real-mode games.
+
+Bench-verified on the ThinkPad 235 + KXL-C101 (2026-08-23): **Tyrian**
+(Borland RTM, 16-bit PM) with digital SFX and AdLib FM both working, and
+**Jazz Jackrabbit** clean throughout. Known wart: Tyrian's own menu shell
+runs slightly slow (jukebox and gameplay are full speed) — see
+`doc/16bit.md` for the analysis, the staged experiments, and the three port
+bugs the bench shook out. The new protected-mode interrupt trampolines
+(`src/pmisr.asm`, replacing a DJGPP libc facility Open Watcom has no
+equivalent for) are proven on both hosts; `PMISR=1 ./tools/build.sh` builds
+the 32-bit A/B binary that runs them where known-good results exist —
+re-run it after any trampoline change.
+
+`doc/vdpmi.md` covers the related question of whether crazii's VDPMI could
+replace this: it cannot — it is Pentium-only, it is at its worst on 16-bit
+clients, and VSBPCM's synchronous IRQ delivery is not the design VDPMI's
+virtual PIC serves.
 
 ## CardBus backend: Audigy 2 ZS Notebook
 
