@@ -91,6 +91,18 @@ if [ -n "$OPLDEF" ] && [ "$CARD" != "TP755" ] && [ "$CARD" != "AUDIGY" ]; then
   echo "build.sh: WARNING -- OPLGEN=$OPLGEN is inert without CARD=TP755/AUDIGY (NOFM strips dbopl)" >&2
 fi
 
+# PMISR=1: swap go32's PM interrupt chain wrapper for src/pmisr.asm's own
+# trampolines -- the ones the 16-bit build is forced to use. This is an A/B
+# rig, not a shipping build: it exists so the trampolines can be proven on
+# the 32-bit stack, where there are known-good results to compare against,
+# before the 16-bit build depends on them. Suffix keeps it a distinct 8.3
+# name so it can sit next to the real binary.
+if [ -n "$PMISR" ] && [ "$PMISR" != "0" ]; then
+  CARDDEF="$CARDDEF -DPMISR_CHAIN"
+  OUTNAME="${OUTNAME}p"
+  echo "build.sh: PMISR=1 -- chained PM ISRs via src/pmisr.asm (A/B build, not for release)" >&2
+fi
+
 rm -f "$REPO"/djgpp/*.o "$REPO"/djgpp/*.ar
 
 docker run --rm --platform linux/amd64 \

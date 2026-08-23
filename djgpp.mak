@@ -62,6 +62,18 @@ OBJFILES+= $(OUTD)/pcibios.o	$(OUTD)/ac97mix.o	$(OUTD)/sc_sbliv.o	$(OUTD)/sc_sbl
 OBJFILES+= $(OUTD)/emu_sf2.o	$(OUTD)/emu_wt.o
 endif
 
+# PMISR_CHAIN: build the 32-bit binary with src/pmisr.asm's chained PM
+# interrupt trampolines instead of go32's chain wrapper (PMISR=1
+# ./tools/build.sh). The trampolines are what the 16-bit build has to use --
+# Open Watcom has no go32 -- and they are the one piece of that port with no
+# bench history. This switch runs them on the stack that IS proven, so the
+# 16-bit build is not the first place they ever execute. Not a shipping
+# configuration; the default build does not compile these two objects at all,
+# which is why the 32-bit object set is unchanged by the port.
+ifneq (,$(findstring PMISR_CHAIN,$(CFLAGS)))
+OBJFILES+= $(OUTD)/hostsvc.o	$(OUTD)/pmisr.o
+endif
+
 # CARD_TP755: the 755C build keeps the OPL3 emulation (no FM hardware on
 # that machine -- see config.h), so dbopl.o comes back for it only.
 ifneq (,$(findstring CARD_TP755,$(CFLAGS)))
@@ -146,6 +158,7 @@ $(OUTD)/pic.o::      pic.c       pic.h platform.h ptrap.h
 $(OUTD)/ptrap.o::    ptrap.c     linear.h platform.h ptrap.h config.h fmshim.h ptops.h
 $(OUTD)/fmvol.o::    fmvol.c     platform.h ptrap.h fmvol.h
 $(OUTD)/fmshim.o::   fmshim.c    platform.h ptrap.h fmshim.h config.h
+$(OUTD)/hostsvc.o::  hostsvc.c   hostsvc.h hostisr.h platform.h
 $(OUTD)/sndisr.o::   sndisr.c    linear.h platform.h vopl3.h pic.h config.h vsb.h vdma.h virq.h ctadpcm.h au.h ptops.h
 $(OUTD)/tsf.o::      tsf.c       tsf/tsf.h
 $(OUTD)/vdma.o::     vdma.c      linear.h platform.h ptrap.h vdma.h config.h
@@ -160,6 +173,7 @@ $(OUTD)/fileacc.o::  fileacc.asm
 $(OUTD)/hapi.o::     hapi.asm
 $(OUTD)/int31.o::    int31.asm
 $(OUTD)/mixer.o::    mixer.asm
+$(OUTD)/pmisr.o::    pmisr.asm
 $(OUTD)/sbisr.o::    sbisr.asm
 $(OUTD)/stackio.o::  stackio.asm
 $(OUTD)/stackisr.o:: stackisr.asm
