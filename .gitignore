@@ -1,4 +1,5 @@
 /djgpp/
+/ow16/
 *.o
 *.obj
 *.ar

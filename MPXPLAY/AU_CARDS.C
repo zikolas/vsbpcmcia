@@ -95,7 +95,10 @@ void * FAREXP AU_init( const struct globalvars *gvars )
 	struct audioout_info_s *aui;
 	int i;
 
-#ifdef NOTFLAT
+/* Split-build only: sndcard.drv has its OWN bOMode, so it needs its own
+ * copy of these fixups. In a one-module build main.c already owns them
+ * (main.c:599 and :758) and a second copy would fire at the wrong time. */
+#if defined(NOTFLAT) && !defined(ONEMODULE)
 # ifdef _DEBUG
 	if ( gvars->logfile )
 		bOMode = OM_BUFFERED;
@@ -211,7 +214,7 @@ void FAREXP AU_start( struct audioout_info_s *aui )
 		aui->card_infobits |= AUINFOS_CARDINFOBIT_PLAYING;
 		//aui->card_infobits |= AUINFOS_CARDINFOBIT_DMAFULL;
 	}
-#ifdef NOTFLAT
+#if defined(NOTFLAT) && !defined(ONEMODULE)
 	if ( bOMode == OM_DOS ) bOMode = OM_DIRECT;  /* no DOS output anymore */
 #endif
 	return;

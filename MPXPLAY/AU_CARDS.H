@@ -150,7 +150,14 @@ struct sndcard_info_s {
  const struct aucards_mixerchan_s **card_mixerchans;
 };
 
-#ifdef NOTFLAT
+/* The AU_* entry points are the sndcard.drv EXPORTS in upstream's two-module
+ * 16-bit layout, so they are far there and auimp16.asm's thunks far-call them.
+ * VSBPCMCIA links one module instead (ow16.mak; the reasons are in doc/16bit.md),
+ * and then there is no module boundary to cross: the engine calls them through
+ * src/au.h, which declares them NEAR. Far definitions behind near calls put an
+ * extra 4 bytes of "CS" into every return -- AU_init's retf popped the TSS
+ * selector and #GP'd on the 235, which is how this was found. */
+#if defined(NOTFLAT) && !defined(ONEMODULE)
 #define FAREXP _far
 #else
 #define FAREXP
