@@ -91,6 +91,11 @@ extern struct fork_opts_s FOpts;
  * probing any more: a backend runs only when it is asked for by name. */
 int PTOPS_CardIs( const char *id );
 
+/* PTDIAG: passthrough-tap forensics build (short-SFX stretch, 2026-08-21).
+ * Borrows two 0x4F0 slots from sc_vew211's reconfig counters, which are
+ * silenced while it is on. Set to 0 (or drop the branch) to ship. */
+#define PTDIAG 1
+
 /* Engine-generic ISR telemetry (the BIOS 0x4F0-0x4FF map -- see
  * doc/NOTES.md), formerly duplicated in sc_es1688.c and sc_vew211.c. */
 void SNDISR_dbg_tick(void);

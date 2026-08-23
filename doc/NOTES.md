@@ -179,3 +179,108 @@ it from a remote-control agent kills the agent.)
   is `#ifdef CARD_VEW211`-guarded ONLY so the default ES build stays
   byte-identical during bench testing -- UNGUARD AT MERGE (the ES1688 build
   shares the bug).
+
+## Short one-shot SFX play stretched (the tap loop is NOT the culprit)
+
+Duke Nukem II's intro SFX arrive as a stream of ~12-byte 8-bit single-cycle
+blocks (DSP `0x14`), each ended by a TC-IRQ that prompts the guest to program
+the next. Under passthrough they play stretched. The standing theory was that
+`sndisr.c`'s tap loop "breaks after one SB block" and the fix was to let it
+iterate until `pt_space` is spent. **Reading the code says that theory is
+wrong, and the proposed change would be a no-op.**
+
+The loop tail already continues on a completed block:
+
+```c
+if( VSB_GetIRQStatus() ) {
+    if ( VSB_IsAuto() ) VSB_SetPos(0); else VSB_Stop();
+    if ( !SNDISR_ReviveSquelch ) VIRQ_Invoke();   /* <- guest ISR runs HERE */
+} else break;                                     /* only a PARTIAL block exits */
+```
+
+and `VIRQ_Invoke()` is **synchronous**: `SBIsrCall` in `sbisr.asm` does a plain
+`int 8+irq`, so the guest's SB ISR runs to completion inside our tap loop. A
+DSP play command issued from that ISR lands in `DSP_DoCommand` and sets
+`vsb.Started = true` with no "we are inside the ISR" guard, so `VSB_Running()`
+in the `for` condition is true again and the loop carries straight on to the
+next block. Nothing else binds it either: `samples` is `PT_MODE_SAMPLES` (1024)
+against ~12 guest samples per block, and `pt_space` at the default 250 ms
+latency target is ~5.5 KB against the same 12 bytes -- which is also why the
+SBEPTLAT ladder produced byte-identical results.
+
+So the loop stops for exactly one reason: **the guest did not re-arm inside its
+own ISR**, and the next block cannot arrive until its main loop runs, which
+cannot happen until our ISR returns. That makes playback speed one block per
+RTC tick -- the same failure class as SimCity 2000's 4-byte torrent.
+
+The rate arithmetic fits: `vew_rs_for_frate()` picks the pump rate from the
+codec rate, so `/DACRATE11025` gives rs=6 = **1024 Hz** (12288 B/s delivered)
+and `/DACRATE22050` gives rs=5 = **2048 Hz** (24576 B/s) against a 21376 Hz
+guest that wants 21376 B/s. That is why `/DACRATE22050` helped -- it crossed
+from below demand to 15% above it -- and why it did not cure: at 15% margin
+every lost tick is an audible gap.
+
+### Measuring it: PTDIAG + TEST05
+
+`PTDIAG` (`src/ptops.h`) builds the tap forensics into `sndisr.c` and silences
+the two `sc_vew211.c` pokes whose slots it borrows:
+
+| slot | meaning |
+|---|---|
+| 0x4F2 | most guest DMA blocks consumed in ONE tick. **1 = never more than one** |
+| 0x4FA | bitmap of loop-exit reasons: 01 guest never re-armed, 02 sample bound, 04 ring full (correct backpressure), 08 partial block, 10 a tick took 2+ blocks |
+
+`test/test05.asm` (derived from upstream's TEST01) reproduces the block pattern
+without the game, in 3 KB -- so it runs with comrade resident and the whole
+measurement is scriptable, instead of needing Duke's 560 K and a human at the
+keyboard:
+
+```
+TEST05 [blocksize] [rate] [mode] [seconds]      ; defaults 12 21376 0 5
+  mode 0 = re-arm inside the SB ISR   (the tap loop CAN chase this)
+  mode 1 = re-arm from the main loop  (it cannot -- the worst case)
+```
+
+It reports achieved bytes/sec and a stretch factor x100, so `100` means the
+engine keeps up. Mode 0 vs mode 1 is the decisive pair: if mode 0 reaches ~100
+while mode 1 stretches, the engine is fine and the guest's re-arm placement is
+the whole story -- which rules the tap loop out for good and points at
+servicing the block at trap time (SimCity 2000's "option A") as the only fix
+that does not need a faster tick. `SBERTC=5` is not an option: it hard-wedges
+the 486.
+
+### First bench result: an in-ISR re-arm WEDGES the box
+
+`TEST05 12 21376 0 5 7` -- the mode where the guest re-arms inside its own SB
+ISR -- hard-hung the T2130CT within seconds (comrade stopped answering
+entirely; physical power cycle required). Mode 1 has not been run yet, so this
+is not yet isolated from a bug in the test program -- **run mode 1 first.**
+
+The mechanism that fits: when the guest *does* re-arm in-ISR, the tap loop
+iterates freely, bounded only by `pt_space` and `PT_MODE_SAMPLES`. At
+SBEPTLAT=60 that is ~1.3 KB, i.e. **~85-110 twelve-byte blocks in ONE tick**,
+each costing a full `VIRQ_Invoke` round trip plus ~10 trapped I/O ops. That is
+milliseconds inside a 0.49 ms tick period at 2048 Hz; SETIF lets the following
+ticks nest, and each nested `SwitchStackISR` carving takes STACKCORR off the
+private ISR stack -- the founding bug's march into `.data`.
+
+So "let the tap loop iterate until `pt_space` is spent" is not merely a no-op,
+it is **the hazard**. `pt_space` is sized by the ring's *latency target*, not by
+what one tick can *drain*, so it licenses a single tick to swallow roughly 120
+ticks' worth of audio. Anything built here needs a **blocks-per-tick cap**.
+
+`SNDISR_PtBlkCap` (env `SBEPTBLK`, PTDIAG builds, default 8, 0 = uncapped) is
+that cap: it stops the tick *after* the completion IRQ has been delivered, so
+the guest is simply throttled to the next tick exactly as a real SB would
+throttle it. `0x4FA` bit `20` records when it fired.
+
+### The number that does not add up yet
+
+At `/DACRATE22050` the picker gives rs=5 = **2048 Hz**, so even at today's
+~1 block/tick the tap delivers 2048 x 12 = **24576 B/s against Duke's 21376
+B/s** -- 15% *more* than demand. Duke should not stretch at all, and it does.
+Either the pump is not really at 2048 Hz during the game, ticks are being lost,
+or the guest's own re-arm latency exceeds a tick. **Measure the live tick rate
+before designing a fix**: read the 16-bit counter (`0x4F7` lo / `0x4F9` hi)
+twice a known interval apart *while a sound plays* -- it wraps every 32 s at
+2048 Hz, and idle throttles to 32 Hz so an idle read tells you nothing.
