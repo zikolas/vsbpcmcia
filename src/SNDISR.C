@@ -18,8 +18,7 @@
 #include "PTRAP.H"
 #include "PTOPS.H"
 
-#include <go32.h>          /* _dos_ds: the engine telemetry pokes below */
-#include <sys/farptr.h>
+#include "HOSTSVC.H"       /* LOW_PokeB: the engine telemetry pokes below */
 
 #ifdef _DEBUG
 //#define SNDISRLOG /* usually defined in makefile */
@@ -78,6 +77,10 @@ static uint16_t dbg_tel_sndisr;
 static unsigned char dbg_depth, dbg_maxdepth, dbg_skips;
 static unsigned long long dbg_t0;
 static unsigned dbg_maxdur;
+/* Kept spelled out for DJGPP rather than routed through platform.h/hostsvc.h
+ * so this build's object code does not move; the Open Watcom equivalents are
+ * platform.h's rdtsc() and hostsvc.c's HOST_HasTsc(). */
+#ifdef DJGPP
 static unsigned long long dbg_rdtsc(void){ unsigned long long v; __asm__ __volatile__("rdtsc" : "=A"(v)); return v; }
 static int dbg_tsc_check(void)
 {
@@ -90,12 +93,16 @@ static int dbg_tsc_check(void)
     __asm__ __volatile__("cpuid" : "=d"(d) : "a"(1) : "ebx", "ecx");
     return (d >> 4) & 1;
 }
+#else
+#define dbg_rdtsc()     rdtsc()
+#define dbg_tsc_check() HOST_HasTsc()
+#endif
 void SNDISR_dbg_tick(void)
 {
     ++dbg_tel_sndisr;
-    _farpokeb(_dos_ds, 0x4F7, (unsigned char)dbg_tel_sndisr);
-    _farpokeb(_dos_ds, 0x4F9, (unsigned char)(dbg_tel_sndisr >> 8));
-    if(++dbg_depth > dbg_maxdepth){ dbg_maxdepth = dbg_depth; _farpokeb(_dos_ds, 0x4F0, dbg_maxdepth); }
+    LOW_PokeB(0x4F7, (unsigned char)dbg_tel_sndisr);
+    LOW_PokeB(0x4F9, (unsigned char)(dbg_tel_sndisr >> 8));
+    if(++dbg_depth > dbg_maxdepth){ dbg_maxdepth = dbg_depth; LOW_PokeB(0x4F0, dbg_maxdepth); }
     if(SNDISR_HasTsc && dbg_depth == 1) dbg_t0 = dbg_rdtsc();
 }
 void SNDISR_dbg_exit(void)
@@ -105,13 +112,47 @@ void SNDISR_dbg_exit(void)
         unsigned u = ((dt >> 8) > 0xFFFFULL) ? 0xFFFFu : (unsigned)(dt >> 8);
         if(u > dbg_maxdur){
             dbg_maxdur = u;
-            _farpokeb(_dos_ds, 0x4FC, (unsigned char)u);
-            _farpokeb(_dos_ds, 0x4FD, (unsigned char)(u >> 8));
+            LOW_PokeB(0x4FC, (unsigned char)u);
+            LOW_PokeB(0x4FD, (unsigned char)(u >> 8));
         }
     }
     if(dbg_depth) dbg_depth--;
 }
-void SNDISR_dbg_reenter(void){ _farpokeb(_dos_ds, 0x4F1, ++dbg_skips); }
+void SNDISR_dbg_reenter(void){ LOW_PokeB(0x4F1, ++dbg_skips); }
+
+#if PTDIAG
+/* PT-TAP FORENSICS (short-SFX stretch, 2026-08-21). The open question is why
+ * the tap loop stops after ~one guest DMA block per tick: Duke Nukem II's
+ * intro SFX arrive as ~12-byte single-cycle blocks, so one-block-per-tick
+ * slaves the guest's playback speed to our RTC rate. The loop is NOT written
+ * to stop there -- VIRQ_Invoke() runs the guest's SB ISR synchronously (an
+ * int 8+irq in sbisr.asm), so a guest that re-arms inside its own ISR would
+ * let the for-condition carry straight on to the next block. These two
+ * counters say whether it ever does, and what stops it when it doesn't.
+ *   0x4F2 = most blocks consumed in ONE tick (1 => never more than one)
+ *   0x4FA = bitmap of the loop-exit reasons seen since load */
+#define PTD_NOREARM  0x01   /* !VSB_Running(): guest never re-armed in its ISR */
+#define PTD_SAMPBND  0x02   /* IdxSm >= samples: PT_MODE_SAMPLES bound hit */
+#define PTD_NOSPACE  0x04   /* pt_space spent: ring full = correct backpressure */
+#define PTD_PARTIAL  0x08   /* block unfinished: our credit < the guest's block */
+#define PTD_MULTI    0x10   /* at least one tick consumed 2+ blocks */
+#define PTD_BLKCAP   0x20   /* SNDISR_PtBlkCap stopped the tick */
+static unsigned char dbg_pt_maxblk, dbg_pt_exit;
+
+/* BLOCKS-PER-TICK CAP. Bench knob (SBEPTBLK), and probably the shape of the
+ * real fix. `pt_space` is sized by the ring LATENCY TARGET (~1.3 KB at
+ * SBEPTLAT=60), not by what one tick can drain (~11 bytes at 2048 Hz), so a
+ * guest that re-arms inside its own SB ISR lets one tick swallow ~100 twelve-
+ * byte blocks -- each an `int 8+irq` round trip plus ~10 trapped I/O ops.
+ * That is milliseconds inside a 0.49 ms tick, the next ticks nest, and the
+ * private ISR stack marches into .data. Measured: it hard-hung the T2130CT.
+ * 0 = uncapped (the wedge); the PTDIAG default is deliberately conservative. */
+int SNDISR_PtBlkCap = 8;
+static void dbg_pt_why(unsigned char bit)
+{
+    if(!(dbg_pt_exit & bit)){ dbg_pt_exit |= bit; LOW_PokeB(0x4FA, dbg_pt_exit); }
+}
+#endif
 
 static const struct pt_ops_s pt_ops_default = {
     0,                          /* no tap; no card has claimed the session */
@@ -142,6 +183,10 @@ void PTOPS_Register( const struct pt_ops_s *ops )
     PT_Ops = ops;
     SNDISR_PassThru = ( ops->flags & PTF_TAP ) ? 1 : 0;
     SNDISR_HasTsc = dbg_tsc_check();    /* adetect context, never ISR */
+#if PTDIAG
+    { const char *e = getenv("SBEPTBLK");
+      if(e){ int n = atoi(e); if(n >= 0 && n <= 255) SNDISR_PtBlkCap = n; } }
+#endif
 }
 
 bool _SND_InstallISR( uint8_t, int(*ISR)(void) );
@@ -426,6 +471,9 @@ static int SNDISR_Interrupt( void )
      * runaway re-entry that marched the ISR stack into .data (#GP). */
     int pt_mode = 0, pt_took = 0;
     int pt_space = 0;
+#if PTDIAG
+    int pt_blocks = 0, pt_brk = 0;
+#endif
 #endif
 
 #ifndef NOES1688
@@ -651,14 +699,21 @@ static int SNDISR_Interrupt( void )
          * the per-tick ISR work (part of the keep-it-inside-one-RTC-period
          * reentrancy fix). */
         if ( pt_block ) {
-            if ( pt_space < samplesize * channels )
+            if ( pt_space < samplesize * channels ) {
+#if PTDIAG
+                pt_brk = 1; dbg_pt_why( PTD_NOSPACE );
+#endif
                 break;
+            }
             if ( bytes > pt_space ) {
                 count = pt_space / (samplesize * channels);
                 bytes = count * samplesize * channels;
             }
             pt_space -= bytes;
             pt_took = 1;
+#if PTDIAG
+            if ( pt_blocks < 255 ) pt_blocks++;
+#endif
         }
 #endif
 
@@ -787,6 +842,15 @@ static int SNDISR_Interrupt( void )
              * the pending status is delivered late (or dropped) by the
              * top-of-tick gate once the squelch window has passed */
             if ( !SNDISR_ReviveSquelch ) VIRQ_Invoke();
+#if PTDIAG
+            /* Cap AFTER the completion IRQ: the guest has been told this
+             * block finished, so stopping here just defers its successor to
+             * the next tick -- the same throttle a real SB applies. */
+            if ( pt_mode && SNDISR_PtBlkCap && pt_blocks >= SNDISR_PtBlkCap ) {
+                pt_brk = 1; dbg_pt_why( PTD_BLKCAP );
+                break;
+            }
+#endif
         } else {
 #ifdef SNDISRLOG
             dbgprintf(("isr(%u): s/c(o)/b=0x%02X/0x%02X(0x%02X)/0x%03X SB Pos=0x%X DMA Idx/Cnt=%X/%X\n", loop, samples, count, ocnt, bytes, SB_Pos, DMA_Index, DMA_Count ));
@@ -797,6 +861,9 @@ static int SNDISR_Interrupt( void )
              *       however, exit if DMA autoinit isn't active should be ok.
              * v2.0: now unconditional exit is correct - DMA underrun is handled within loop.
              */
+#if PTDIAG
+            if ( pt_mode ) { pt_brk = 1; dbg_pt_why( PTD_PARTIAL ); }
+#endif
             break;
             //if ( !VDMA_IsAuto(dmachannel) ) break;
         }
@@ -804,6 +871,24 @@ static int SNDISR_Interrupt( void )
 
 #ifndef NOES1688
     es_in_render = 0;   /* render owner done (re-entrant path skipped this via goto isrexit) */
+#if PTDIAG
+    if ( pt_mode ) {
+        if ( pt_blocks > dbg_pt_maxblk ) {
+            dbg_pt_maxblk = (unsigned char)pt_blocks;
+            LOW_PokeB(0x4F2, dbg_pt_maxblk);
+        }
+        if ( pt_blocks >= 2 ) dbg_pt_why( PTD_MULTI );
+        /* Attribute an exit reason only when the loop actually CONSUMED
+         * something. An idle tick never enters the body at all -- the
+         * for-condition is false on the first test -- and scoring that as
+         * "the guest did not re-arm" lights PTD_NOREARM from the moment the
+         * driver loads, which is exactly what the first bench read showed. */
+        if ( pt_blocks && !pt_brk ) {   /* fell out of the for-condition */
+            if ( !VSB_Running() )        dbg_pt_why( PTD_NOREARM );
+            else if ( IdxSm >= samples ) dbg_pt_why( PTD_SAMPBND );
+        }
+    }
+#endif
     if ( pt_took )
         goto isrexit;   /* PT consumed this tick's audio raw: there is no render
                          * output to pad/mix/write, and skipping that tail is

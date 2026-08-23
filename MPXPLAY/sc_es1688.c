@@ -48,11 +48,9 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <go32.h>
-#include <sys/farptr.h>   // telemetry pokes into the BIOS IAC area (0x4F0)
-#include <dpmi.h>         // _go32_dpmi_* : the IRQ0 watchdog heartbeat is a REAL hook now
 #include <stdlib.h>
-#include <pc.h>
+#include "hostsvc.h"      // toolchain compat: LOW_*, inportb (see the header)
+#include "hostisr.h"      // chained/iret PM interrupt vectors, both builds
 #include "au_cards.h"
 #include "ptops.h"        // engine passthrough ops table (we register in adetect)
 
@@ -86,30 +84,13 @@
  * watchdog host (crazii-proven design): the PIT always ticks, so RTC death
  * heals within ~110ms. go32's chain wrapper handles the jump to the old
  * handler (BIOS EOIs); our handler just runs the watchdog and returns. */
-typedef struct { int intno; _go32_dpmi_seginfo si, oldsi; } DPMI_ISR_HANDLE;
-static int DPMI_InstallISR(int intno, void (*isr)(void), DPMI_ISR_HANDLE *h, int chain)
-{
- h->intno = intno;
- if(_go32_dpmi_get_protected_mode_interrupt_vector(intno, &h->oldsi)) return -1;
- h->si.pm_offset = (unsigned long)isr;
- h->si.pm_selector = _go32_my_cs();
- if(chain)
-  return _go32_dpmi_chain_protected_mode_interrupt_vector(intno, &h->si) ? -1 : 0;
- if(_go32_dpmi_allocate_iret_wrapper(&h->si)) return -1;
- return _go32_dpmi_set_protected_mode_interrupt_vector(intno, &h->si) ? -1 : 0;
-}
-static void DPMI_UninstallISR(DPMI_ISR_HANDLE *h)
-{ _go32_dpmi_set_protected_mode_interrupt_vector(h->intno, &h->oldsi); }
+/* DPMI_ISR_HANDLE / DPMI_InstallISR / DPMI_UninstallISR now live in
+ * src/hostisr.h, which keeps the go32 chain wrapper for the 32-bit build and
+ * substitutes src/PMISR.ASM's trampolines when there is no go32 (the 16-bit
+ * NOTFLAT build). Same names, same signature, same DJGPP object code. */
 static void DPMI_CallOldISR(DPMI_ISR_HANDLE *h){ (void)h; }   // still unused: IRQ5 TC handler stays opt-in (see es_i5_install)
-static uint8_t DPMI_DisableInterrupt(void)
-{
- unsigned f;
- __asm__ __volatile__("pushfl; popl %0" : "=r"(f));           // capture virtual IF
- __asm__ __volatile__("movw $0x0900,%%ax; int $0x31" ::: "eax","cc");
- return (f & 0x200) ? 1 : 0;
-}
-static void DPMI_RestoreInterrupt(uint8_t prev)
-{ if(prev) __asm__ __volatile__("movw $0x0901,%%ax; int $0x31" ::: "eax","cc"); }
+#define DPMI_DisableInterrupt  HOST_DisableInterrupt   /* int 31h ax=0900h/0901h */
+#define DPMI_RestoreInterrupt  HOST_RestoreInterrupt
 
 // crazii mpxplay heap/print helpers -> DJGPP libc
 #define pds_calloc            calloc
@@ -203,10 +184,10 @@ static int                es_pt_ever;         // a passthrough stream has run ->
 // poll-pump when a guest polls during starvation).
 static void es_watchdog(void)
 {
- uint32_t now = _farpeekl(_dos_ds, 0x46C);
+ uint32_t now = LOW_PeekD(0x46C);
  if(now - es_last_tick >= 2){                 // >=~110ms without a tick: re-arm
   static unsigned char es_tel_revive;
-  _farpokeb(_dos_ds, 0x4F4, ++es_tel_revive); // DIAG: RTC revivals (how often a guest kills the RTC)
+  LOW_PokeB(0x4F4, ++es_tel_revive); // DIAG: RTC revivals (how often a guest kills the RTC)
   rtc_enable();
  }
 }
@@ -291,7 +272,7 @@ static void es_pt_reconfig(unsigned rate, unsigned bits, unsigned channels)
  // ticks. An idle-STALLED or stopped chip fails the drain test and still
  // gets the full re-arm (the pinball->idle->pinball lesson stands).
  if(rate == es_hw_rate && bits == es_hw_bits && channels == es_hw_channels
-    && (uint32_t)(_farpeekl(_dos_ds, 0x46C) - es_last_drain) <= 4){
+    && (uint32_t)(LOW_PeekD(0x46C) - es_last_drain) <= 4){
   es_pt_rate = rate; es_pt_bits = bits; es_pt_channels = channels;
   if(es_adaptive){                            // same feed-forward pump re-arm as the full path
    unsigned fifob2 = rate * ((channels >= 2) ? 2U : 1U);
@@ -348,8 +329,8 @@ static void es_pt_reconfig(unsigned rate, unsigned bits, unsigned channels)
  for(i=0;i<256;i++) outportb(base+ES_FIFO, (bits>=16)?0x00:0x80);  // prime AFTER run
  es_pt_rate = rate; es_pt_bits = bits; es_pt_channels = channels;
  es_hw_rate = rate; es_hw_bits = bits; es_hw_channels = channels;  // chip armed with this format
- es_last_drain = _farpeekl(_dos_ds, 0x46C);                        // fresh arm = draining
- _farpokeb(_dos_ds, 0x4FA, ++es_tel_recfg);                    // telemetry (FULL reconfigs only)
+ es_last_drain = LOW_PeekD(0x46C);                        // fresh arm = draining
+ LOW_PokeB(0x4FA, ++es_tel_recfg);                    // telemetry (FULL reconfigs only)
  if(es_adaptive){                             // FEED-FORWARD: size the pump to this stream, re-arm.
   unsigned fifob = brate * ((bits >= 16) ? 2U : 1U);  // true FIFO drain bytes/sec (16-bit doubles it)
   es_rs_want = es_rs_for_brate(fifob);        // feedback ratchets faster from here if the game starves it
@@ -390,7 +371,7 @@ static void es_fifo_pump(void)
  }
  while((inportb(base+ES_STAT) & FIFO_HE) && guard < 512){
   unsigned rd = ring_rd, wr = ring_wr; int k;
-  es_last_drain = _farpeekl(_dos_ds, 0x46C);   // FIFO_HE set = the DAC is consuming (fast-resume liveness)
+  es_last_drain = LOW_PeekD(0x46C);   // FIFO_HE set = the DAC is consuming (fast-resume liveness)
   for(k=0;k<128;k+=(int)unit){
    unsigned u;
    if((((wr - rd) & RING_MASK)) >= unit){
@@ -441,13 +422,13 @@ static unsigned char es_reentry;   // DIAG: reentrant PT_Feed calls skipped (0x4
 static void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, unsigned bits, unsigned channels)
 {
  unsigned wr;
- _farpokeb(_dos_ds, 0x4F2, 1);                                 // DIAG stage: entry
- if(es_pt_feed_busy){ _farpokeb(_dos_ds, 0x4F3, ++es_reentry); return; }   // re-entered -> skip
+ LOW_PokeB(0x4F2, 1);                                 // DIAG stage: entry
+ if(es_pt_feed_busy){ LOW_PokeB(0x4F3, ++es_reentry); return; }   // re-entered -> skip
  es_pt_feed_busy = 1;
  ++es_tel_feed16;                                              // telemetry (16-bit, lo/hi)
- _farpokeb(_dos_ds, 0x4FB, (unsigned char)es_tel_feed16);
- _farpokeb(_dos_ds, 0x4FF, (unsigned char)(es_tel_feed16 >> 8));
- es_last_feed = _farpeekl(_dos_ds, 0x46C);                     // audio flowing -> keep the pump fast
+ LOW_PokeB(0x4FB, (unsigned char)es_tel_feed16);
+ LOW_PokeB(0x4FF, (unsigned char)(es_tel_feed16 >> 8));
+ es_last_feed = LOW_PeekD(0x46C);                     // audio flowing -> keep the pump fast
  // Waking from the idle throttle: between same-format sounds no reconfig runs,
  // so restore the stream's pump rate HERE, on the first feed. Rate-UP only
  // (never slow down mid-play), one compare per feed.
@@ -455,12 +436,12 @@ static void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, u
  if(!es_pt_active || rate != es_pt_rate || bits != es_pt_bits || channels != es_pt_channels)
  {
   uint8_t f = DPMI_DisableInterrupt();         // IF off: SNDISR can't re-enter during the long reconfig
-  _farpokeb(_dos_ds, 0x4F2, 2);                                // DIAG stage: reconfig
+  LOW_PokeB(0x4F2, 2);                                // DIAG stage: reconfig
   es_pt_reconfig(rate, bits, channels);
   es_pt_active = 1; es_pt_ever = 1;            // passthrough confirmed -> self-pacer runs
   DPMI_RestoreInterrupt(f);
  }
- _farpokeb(_dos_ds, 0x4F2, 3);                                 // DIAG stage: ring fill
+ LOW_PokeB(0x4F2, 3);                                 // DIAG stage: ring fill
  wr = ring_wr;
  // Ring overrun guard: never write past the read pointer. sndisr.c paces the
  // tap by ES1688_PT_Space(), so this should never clamp (0x4FE counts if it
@@ -468,14 +449,14 @@ static void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, u
  { unsigned es_free = (ring_rd - wr - 1u) & RING_MASK;
    if((unsigned)bytes > es_free){
     static unsigned char es_tel_drop;
-    _farpokeb(_dos_ds, 0x4FE, ++es_tel_drop);
+    LOW_PokeB(0x4FE, ++es_tel_drop);
     bytes = (int)es_free;
    } }
  es_tel_bytes += (unsigned long)bytes;         // PT byte-rate telemetry (no-TSC boxes: 0x4FC/D = bytes>>4, 16-bit)
  if(!SNDISR_HasTsc){
   unsigned u16 = (unsigned)((es_tel_bytes >> 4) & 0xFFFF);
-  _farpokeb(_dos_ds, 0x4FC, (unsigned char)u16);
-  _farpokeb(_dos_ds, 0x4FD, (unsigned char)(u16 >> 8));
+  LOW_PokeB(0x4FC, (unsigned char)u16);
+  LOW_PokeB(0x4FD, (unsigned char)(u16 >> 8));
  }
  while(bytes > 0){
   int chunk = (int)(RING_BYTES - wr);      // contiguous space to end of ring
@@ -485,9 +466,9 @@ static void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, u
   wr = (wr + chunk) & RING_MASK;
  }
  ring_wr = wr;
- _farpokeb(_dos_ds, 0x4F2, 4);                                 // DIAG stage: pump
+ LOW_PokeB(0x4F2, 4);                                 // DIAG stage: pump
  es_fifo_pump();   // keep the FIFO fed inline, so it never drains during the fill
- _farpokeb(_dos_ds, 0x4F2, 5);                                 // DIAG stage: done
+ LOW_PokeB(0x4F2, 5);                                 // DIAG stage: done
  es_pt_feed_busy = 0;
 }
 
@@ -526,7 +507,7 @@ static void es_fifo_setup(uint16_t base, unsigned rate)
  // (mixer 0x0E stereo/filter bits differ), so never fast-resume onto it --
  // the first PT stream after any bring-up does one full reconfig.
  es_hw_rate = es_hw_bits = es_hw_channels = 0;
- es_last_drain = _farpeekl(_dos_ds, 0x46C);
+ es_last_drain = LOW_PeekD(0x46C);
 }
 static void es_fifo_stop(uint16_t base)
 {
@@ -644,6 +625,8 @@ static void es_irq0_isr(void)
 }
 static void es_i8_install(void)
 {
+ if(getenv("SBENOI8")) return;   // bench knob: run without the IRQ0 heartbeat
+
  if(es_i8_on) return;
  if(getenv("ESNOI8")) return;   // diagnostic kill-switch: run without the IRQ0 heartbeat (v0.3 behavior)
  if(DPMI_InstallISR(0x08, &es_irq0_isr, &es_i8_handle, TRUE) != 0) return;  // IRQ0, CHAINED
@@ -658,6 +641,8 @@ static void es_i8_remove(void)
 
 static void es_i5_install(void)
 {
+ if(getenv("SBENOI5")) return;   // bench knob: run without the IRQ5 TC handler
+
  if(es_i5_on) return;
  // OPT-IN only (SET ESIRQ5=1): every stream on this stack has run fine with
  // the card's TC IRQ unserviced, and DPMI_InstallISR is REAL now -- silently
@@ -679,7 +664,7 @@ static void es_i5_remove(void)
 static void ES1688_start(struct audioout_info_s *aui)
 {
  es1688_card_s *card = aui->card_private_data;
- _farpokeb(_dos_ds, 0x4F6, 0xAA);         // DIAG: start ran + poke mechanism works
+ LOW_PokeB(0x4F6, 0xAA);         // DIAG: start ran + poke mechanism works
  ring_wr = ring_rd = 0;
  es_base = card->base;
  es_irqtone = getenv("IRQTONE") ? 1 : 0;  // diag: feed a tone from the IRQ handler
@@ -765,9 +750,9 @@ static long ES1688_getbufpos(struct audioout_info_s *aui)
 static int ES1688_irq(struct audioout_info_s *aui)
 {
  int guard; uint16_t base = es_base;
- _farpokeb(_dos_ds, 0x4F8, ++es_tel_irq);                   // DIAG: irq_routine called (SNDISR reached AU_isirq)
+ LOW_PokeB(0x4F8, ++es_tel_irq);                   // DIAG: irq_routine called (SNDISR reached AU_isirq)
  es_watchdog();                                             // re-arm if ticks died
- es_last_tick = _farpeekl(_dos_ds, 0x46C);                  // stamp this run
+ es_last_tick = LOW_PeekD(0x46C);                  // stamp this run
  { uint8_t f = DPMI_DisableInterrupt();                     // ack RTC. cli: with the IRQ0 heartbeat live,
    outportb(0x70,0x0C); (void)inportb(0x71);                // a tick landing between index and data would
    DPMI_RestoreInterrupt(f); }                              // leave the CMOS index clobber-prone
@@ -791,7 +776,7 @@ static int ES1688_irq(struct audioout_info_s *aui)
   es_fifo_pump();
  }
  else es_fifo_pump();                                       // normal / passthrough feed
- _farpokeb(_dos_ds, 0x4F5, (unsigned char)(((ring_wr - ring_rd) & RING_MASK) >> 5));  // DIAG: ring fill, 32-byte units
+ LOW_PokeB(0x4F5, (unsigned char)(((ring_wr - ring_rd) & RING_MASK) >> 5));  // DIAG: ring fill, 32-byte units
  // SELF-PACING. Idle needs BOTH signals, because each alone is wrong somewhere:
  //  - es_pt_active flickers off every cycle during single-cycle DMA detection
  //    (SBEMU_Stop per cycle) -> using it alone stalls the pump mid-detect (slow launch)

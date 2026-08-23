@@ -56,9 +56,8 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <pc.h>
-#include <dpmi.h>       /* system header: _go32_dpmi_* chain for the IRQ0  */
-#include <go32.h>       /*   guardian (sc_vew211 i8-heartbeat precedent)   */
+#include "hostsvc.h"    /* toolchain compat: LOW_*, inportb                */
+#include "hostisr.h"    /* chained/iret PM interrupt vectors, both builds  */
 
 #include "config.h"
 #include "au_cards.h"
@@ -69,23 +68,16 @@
 #include "dma.h"
 
 /* NOT linear.h: it pulls the fork's DJDPMI.H which conflicts with the
- * system <dpmi.h> we need for the go32 chain API. NearPtr re-rolled: */
+ * system <dpmi.h> hostisr.h includes for the go32 chain API. DSBase is all
+ * that was wanted from it. NearPtr works in BOTH builds: init1632.asm gives
+ * the 16-bit build's DGROUP a full 4GB limit, so a near pointer wraps round
+ * to any linear address there just as it does under DJGPP. */
 extern uint32_t DSBase;
 #define TP_NEARPTR(a) ((void *)((uint32_t)(a) - DSBase))
 
-/* DPMI 0100h: allocate DOS conventional memory; selector stored for free */
-static int tp_dos_alloc(unsigned paragraphs, int *sel)
-{
- uint32_t eax = 0x0100, edx = 0;
- uint8_t err;
- __asm__ __volatile__("int $0x31; setc %0"
-                      : "=q"(err), "+a"(eax), "=d"(edx)
-                      : "b"(paragraphs)
-                      : "cc", "memory");
- if(err) return -1;
- *sel = (int)(edx & 0xFFFF);
- return (int)(eax & 0xFFFF);
-}
+/* DPMI 0100h (allocate DOS conventional memory) is HOST_DosAlloc in
+ * src/hostsvc.c now -- same body under DJGPP, a #pragma aux under OW. */
+#define tp_dos_alloc  HOST_DosAlloc
 
 //------------------------------------------------------------- geometry ---
 #define TP_CTL_IDX   0x15E8         // ThinkPad system control: index port
@@ -159,16 +151,11 @@ static uint8_t *tp_iac = NULL;   /* NearPtr(0x4F0), set in adetect */
 #define TP_IAC(off, v) do{ if(tp_iac) tp_iac[off] = (uint8_t)(v); }while(0)
 
 //-------------------------------------------------------------- helpers ---
-static uint8_t DPMI_DisableInterrupt(void)
-{
- uint32_t f;
- __asm__ __volatile__("pushfl; popl %0; cli":"=r"(f)::"memory");
- return (uint8_t)((f >> 9) & 1);
-}
-static void DPMI_RestoreInterrupt(uint8_t on)
-{
- if(on) __asm__ __volatile__("sti":::"memory");
-}
+/* This backend masks with a RAW cli/sti, not the DPMI host's 0900h/0901h
+ * that sc_es1688 and sc_vew211 use. Which is right is a bench question, so
+ * hostsvc.h carries both and each backend keeps the one it was proven with. */
+#define DPMI_DisableInterrupt  HOST_CliSave
+#define DPMI_RestoreInterrupt  HOST_StiRestore
 
 static void tp_iodelay(unsigned n){ while(n--) (void)inportb(0x80); }
 #define TP_MS(x) tp_iodelay((unsigned)(x) * 1000U)
@@ -288,7 +275,7 @@ static void tp_pen(int on)
 // a tiny chained IRQ0 hook (the sc_vew211 i8-heartbeat pattern -- keep it
 // TRIVIAL, it borrows the guest's ISR stack) watches our own tick counter
 // and unsticks everything when it freezes while PEN is on.
-static _go32_dpmi_seginfo tp_i8_old, tp_i8_new;
+static DPMI_ISR_HANDLE tp_i8_handle;
 static uint8_t tp_i8_hooked = 0;
 static uint8_t tp_g_last = 0, tp_g_frozen = 0, tp_g_begging = 0;
 static uint8_t tp_g_futile = 0;      // consecutive heals with no tick advance
@@ -427,17 +414,14 @@ static void tp_i8_install(void)
  if(tp_i8_hooked) return;
  tp_imr_a1_boot = (uint8_t)inportb(0xA1);   // healthy-baseline IMRs for the
  tp_imr_21_boot = (uint8_t)inportb(0x21);   // tier-2 restore (pre-guest)
- _go32_dpmi_get_protected_mode_interrupt_vector(0x08, &tp_i8_old);
- tp_i8_new.pm_offset = (unsigned long)tp_guardian;
- tp_i8_new.pm_selector = _go32_my_cs();
- if(_go32_dpmi_chain_protected_mode_interrupt_vector(0x08, &tp_i8_new) == 0)
+ if(DPMI_InstallISR(0x08, &tp_guardian, &tp_i8_handle, 1) == 0)
   tp_i8_hooked = 1;
 }
 
 static void tp_i8_remove(void)
 {
  if(!tp_i8_hooked) return;
- _go32_dpmi_set_protected_mode_interrupt_vector(0x08, &tp_i8_old);
+ DPMI_UninstallISR(&tp_i8_handle);
  tp_i8_hooked = 0;
 }
 

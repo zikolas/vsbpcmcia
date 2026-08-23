@@ -68,11 +68,9 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <go32.h>
-#include <sys/farptr.h>   // telemetry pokes into the BIOS IAC area (0x4F0)
-#include <dpmi.h>         // _go32_dpmi_* : the IRQ0 watchdog heartbeat
 #include <stdlib.h>
-#include <pc.h>
+#include "hostsvc.h"      // toolchain compat: LOW_*, inportb (see the header)
+#include "hostisr.h"      // chained/iret PM interrupt vectors, both builds
 #include "au_cards.h"
 #include "ptops.h"        // engine passthrough ops table (we register in adetect)
 
@@ -83,29 +81,12 @@
 #define TRUE  1
 #define FALSE 0
 #endif
-typedef struct { int intno; _go32_dpmi_seginfo si, oldsi; } DPMI_ISR_HANDLE;
-static int DPMI_InstallISR(int intno, void (*isr)(void), DPMI_ISR_HANDLE *h, int chain)
-{
- h->intno = intno;
- if(_go32_dpmi_get_protected_mode_interrupt_vector(intno, &h->oldsi)) return -1;
- h->si.pm_offset = (unsigned long)isr;
- h->si.pm_selector = _go32_my_cs();
- if(chain)
-  return _go32_dpmi_chain_protected_mode_interrupt_vector(intno, &h->si) ? -1 : 0;
- if(_go32_dpmi_allocate_iret_wrapper(&h->si)) return -1;
- return _go32_dpmi_set_protected_mode_interrupt_vector(intno, &h->si) ? -1 : 0;
-}
-static void DPMI_UninstallISR(DPMI_ISR_HANDLE *h)
-{ _go32_dpmi_set_protected_mode_interrupt_vector(h->intno, &h->oldsi); }
-static uint8_t DPMI_DisableInterrupt(void)
-{
- unsigned f;
- __asm__ __volatile__("pushfl; popl %0" : "=r"(f));
- __asm__ __volatile__("movw $0x0900,%%ax; int $0x31" ::: "eax","cc");
- return (f & 0x200) ? 1 : 0;
-}
-static void DPMI_RestoreInterrupt(uint8_t prev)
-{ if(prev) __asm__ __volatile__("movw $0x0901,%%ax; int $0x31" ::: "eax","cc"); }
+/* DPMI_ISR_HANDLE / DPMI_InstallISR / DPMI_UninstallISR now live in
+ * src/hostisr.h, which keeps the go32 chain wrapper for the 32-bit build and
+ * substitutes src/PMISR.ASM's trampolines when there is no go32 (the 16-bit
+ * NOTFLAT build). Same names, same signature, same DJGPP object code. */
+#define DPMI_DisableInterrupt  HOST_DisableInterrupt   /* int 31h ax=0900h/0901h */
+#define DPMI_RestoreInterrupt  HOST_RestoreInterrupt
 
 #define pds_calloc            calloc
 #define pds_free              free
@@ -317,8 +298,12 @@ static void vew_codec_config(unsigned rate, unsigned bits, unsigned channels)
  vew_step_acc = 0;
  { unsigned long d = vew_frate > rate ? vew_frate - rate : rate - vew_frate;
    vew_step_on = (!vew_no_step && d * 50UL > (unsigned long)rate) ? 1 : 0; }
- _farpokeb(_dos_ds, 0x4F2, (unsigned char)(rate >> 8));  // guest rate >> 8 (pitch-bug forensics)
- _farpokeb(_dos_ds, 0x4FA, ++vew_tel_recfg);          // FULL reconfigs only
+#if !PTDIAG
+ LOW_PokeB(0x4F2, (unsigned char)(rate >> 8));  // guest rate >> 8 (pitch-bug forensics)
+ LOW_PokeB(0x4FA, ++vew_tel_recfg);          // FULL reconfigs only
+#else
+ (void)vew_tel_recfg;   // 0x4F2/0x4FA are on loan to the PT-tap forensics
+#endif
 }
 static void vew_codec_stop(void)
 {
@@ -371,7 +356,7 @@ static void vew_pio_pump(void)
    if(vew_pt_active && (sr & 0x10)){
     static unsigned char vew_tel_ser;
     vew_fr_acc = hz * VEW_BURST_FRAMES;
-    _farpokeb(_dos_ds, 0x4F6, ++vew_tel_ser);         // SER catch-up count
+    LOW_PokeB(0x4F6, ++vew_tel_ser);         // SER catch-up count
    }
    outportb(cb+VC_SR, 0); }                           // clear SER/INT for the next interval
  while(vew_fr_acc >= hz && guard < VEW_BURST_FRAMES){
@@ -419,14 +404,14 @@ static void vew_watchdog(void)
  DPMI_RestoreInterrupt(f);
  if(!(b & 0x40)){                                     // PIE killed (the TH-class death)
   rtc_enable();
-  _farpokeb(_dos_ds, 0x4F4, ++es_tel_revive);
+  LOW_PokeB(0x4F4, ++es_tel_revive);
   return;
  }
  if(inportb(0xA1) & 0x01){                            // IRQ8 masked at the slave PIC
   f = DPMI_DisableInterrupt();
   outportb(0xA1, (unsigned char)(inportb(0xA1) & ~0x01));
   DPMI_RestoreInterrupt(f);
-  _farpokeb(_dos_ds, 0x4F4, ++es_tel_revive);
+  LOW_PokeB(0x4F4, ++es_tel_revive);
   return;
  }
  if(sec != wd_sec){                                   // armed yet silent: confirm by
@@ -436,7 +421,7 @@ static void vew_watchdog(void)
    f = DPMI_DisableInterrupt();
    outportb(0x70,0x0C); (void)inportb(0x71);
    DPMI_RestoreInterrupt(f);
-   _farpokeb(_dos_ds, 0x4F4, ++es_tel_revive);
+   LOW_PokeB(0x4F4, ++es_tel_revive);
   }
  }
 }
@@ -481,11 +466,11 @@ static unsigned char es_tel_drop;                     // 0x4FE: ring-full feed c
 static void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, unsigned bits, unsigned channels)
 {
  unsigned wr;
- if(vew_pt_feed_busy){ _farpokeb(_dos_ds, 0x4F3, ++es_reentry); return; }
+ if(vew_pt_feed_busy){ LOW_PokeB(0x4F3, ++es_reentry); return; }
  vew_pt_feed_busy = 1;
  ++es_tel_feed16;
- _farpokeb(_dos_ds, 0x4FB, (unsigned char)es_tel_feed16);
- _farpokeb(_dos_ds, 0x4FF, (unsigned char)(es_tel_feed16 >> 8));
+ LOW_PokeB(0x4FB, (unsigned char)es_tel_feed16);
+ LOW_PokeB(0x4FF, (unsigned char)(es_tel_feed16 >> 8));
  vew_feed_seq = vew_tick_seq;
  // Waking from the idle throttle: between same-format sounds no reconfig
  // runs, so restore the stream's pump rate HERE (rate-up only).
@@ -519,7 +504,7 @@ static void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, u
   // Raw path: guest rate lands on (or within 2% of) a codec table rate.
   { unsigned es_free = (ring_rd - wr - 1u) & RING_MASK;  // never lap the consumer
     if((unsigned)bytes > es_free){
-     _farpokeb(_dos_ds, 0x4FE, ++es_tel_drop);
+     LOW_PokeB(0x4FE, ++es_tel_drop);
      bytes = (int)es_free;
     } }
   es_tel_bytes += (unsigned long)bytes;
@@ -543,7 +528,7 @@ static void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, u
     unsigned u;
     vew_step_acc -= vew_step_in;
     if(es_free < unit){                               // ring full: count + stop
-     _farpokeb(_dos_ds, 0x4FE, ++es_tel_drop);
+     LOW_PokeB(0x4FE, ++es_tel_drop);
      bytes = 0;
      break;
     }
@@ -557,8 +542,8 @@ static void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, u
  }
  if(!SNDISR_HasTsc){
   unsigned u16 = (unsigned)((es_tel_bytes >> 4) & 0xFFFF);
-  _farpokeb(_dos_ds, 0x4FC, (unsigned char)u16);
-  _farpokeb(_dos_ds, 0x4FD, (unsigned char)(u16 >> 8));
+  LOW_PokeB(0x4FC, (unsigned char)u16);
+  LOW_PokeB(0x4FD, (unsigned char)(u16 >> 8));
  }
  ring_wr = wr;
  vew_pio_pump();                                      // keep the FIFO fed inline
@@ -790,7 +775,7 @@ static long VEW211_getbufpos(struct audioout_info_s *aui)
 static int VEW211_irq(struct audioout_info_s *aui)
 {
  (void)aui;
- _farpokeb(_dos_ds, 0x4F8, ++es_tel_irq);
+ LOW_PokeB(0x4F8, ++es_tel_irq);
  ++vew_tick_seq;
  vew_watchdog();
  { uint8_t f = DPMI_DisableInterrupt();               // cli: the IRQ0 heartbeat could
@@ -802,7 +787,7 @@ static int VEW211_irq(struct audioout_info_s *aui)
    if(vew_fr_acc > hz * VEW_BURST_FRAMES)             // run the pump ahead into full-
     vew_fr_acc = hz * VEW_BURST_FRAMES; }             // FIFO writes (silently dropped)
  vew_pio_pump();
- _farpokeb(_dos_ds, 0x4F5, (unsigned char)(((ring_wr - ring_rd) & RING_MASK) >> 5));  // ring gauge
+ LOW_PokeB(0x4F5, (unsigned char)(((ring_wr - ring_rd) & RING_MASK) >> 5));  // ring gauge
 
  // Self-pacing keyed on FEED RECENCY (our tick units) + RING OCCUPANCY --
  // deliberately NOT on vew_pt_active (which sticks at 1 when a guest exits
