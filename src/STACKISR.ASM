@@ -20,6 +20,13 @@ externdef bIntSnd:byte
 ;--- #GP). With the PT-mode speedups in sndisr.c depth should stay 1.
 STACKCHECK equ 1
 
+if STACKCHECK
+externdef c DSBase:dword	; top-level on purpose: declared inside .code it
+				; associates with CS and the ref gets a CS
+				; prefix -- the diag path #GP'd exactly there
+externdef c STACKLOW:dword	; OW startup's _STACKLOW (model c adds the _)
+endif
+
 ifdef NOTFLAT
 
 STACKCORR equ 2048
@@ -113,9 +120,33 @@ prevhdlr:
 	jmp cs:[dfOldSndVec]
 if STACKCHECK
 failure:
+ifdef STKDIAG
+;--- DIAG build (bench autopsy, 2026-08-23 "fatal error 3" on the 235):
+;--- SURVIVE the trip instead of dying, so COMRADE stays up and the 0x4F0
+;--- telemetry (SNDISR maxdepth at 0x4F0, PMISR depth/max at 0x4FC/0x4FD)
+;--- can be read after the event. Mask the RTC so an IRQ8 storm stops at
+;--- the source, EOI both PICs so nothing stays in-service, mark 0x4FE=F3,
+;--- unwind this entry and iret. Registers: pushad/ds/es are on the entry
+;--- stack and SS has not been switched yet; DS is ours.
+	in  al, 0A1h
+	or  al, 1
+	out 0A1h, al		; mask IRQ8: if the storm is RTC re-fire, it ends here
+	mov al, 20h
+	out 0A0h, al		; EOI slave + master: leave no in-service bits behind
+	out 20h, al
+	mov eax, 4FEh
+	sub eax, [DSBase]
+	mov byte ptr [eax], 0F3h	; marker: the stack check tripped
+	add [__djgpp_stack_top], STACKCORR	; unwind our carve
+	pop es
+	pop ds
+	popad
+	insIRET
+else
 externdef c fatal_error:near
 	push 3
 	call fatal_error
+endif
 endif
 SwitchStackISR endp
 
@@ -227,8 +258,18 @@ ifdef NOTFLAT
 endif
 
 if STACKCHECK
+ifdef NOTFLAT
+;--- the stack here is the OW startup's 16K STACK segment inside a ~41K
+;--- DGROUP: top - 64K UNDERFLOWS, the bottom bound wraps huge, and the
+;--- check trips on the FIRST SwitchStackISR entry -- the 2026-08-23
+;--- "fatal error 3" on the 235 was exactly this false alarm (telemetry:
+;--- SNDISR had never run once). The honest bound is the segment's real
+;--- floor, which the startup publishes as _STACKLOW.
+	mov eax, [STACKLOW]
+else
 	mov eax, [__djgpp_stack_top]
 	sub eax, 10000h
+endif
 	mov [dwStackBottom], eax
 endif
 
