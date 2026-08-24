@@ -123,7 +123,7 @@ echo "=== C objects ==="
 for f in main sndisr ptrap linear pic vsb vdma virq vmpu tsf fmvol fmshim hostsvc; do try cc $f.c $f.obj; done
 try cpp vopl3.cpp vopl3.obj
 echo "=== card objects ==="
-for f in au_cards dmabuff physmem timer sc_es1688 sc_vew211 sc_tp755; do try ccx $f.c $f.obj; done
+for f in au_cards dmabuff physmem timer sc_es1688 sc_vew211 sc_scp55 sc_tp755; do try ccx $f.c $f.obj; done
 echo "=== asm objects ==="
 for f in stackio stackisr sbisr int31 mixer hapi dprintf vioout djdpmi uninst fileacc pmisr rte200 logfile cv1to2; do
   try asm $f.asm $f.obj
@@ -142,7 +142,7 @@ if [ $fail -ne 0 ]; then echo "=== COMPILE FAILED ==="; exit 1; fi
 
 echo "=== link ==="
 OBJ="main sndisr ptrap linear pic vsb vdma virq vmpu tsf fmvol fmshim hostsvc vopl3 \
-  au_cards dmabuff physmem timer sc_es1688 sc_vew211 sc_tp755 \
+  au_cards dmabuff physmem timer sc_es1688 sc_vew211 sc_scp55 sc_tp755 \
   stackio stackisr sbisr int31 mixer hapi dprintf vioout djdpmi uninst fileacc \
   pmisr rte200 logfile cv1to2 rmwrap malloc sbrk"
 

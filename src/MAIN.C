@@ -505,6 +505,7 @@ int main(int argc, char* argv[])
         return(1);
     }
     if( !PTOPS_CardIs("es1688") && !PTOPS_CardIs("vew211") && !PTOPS_CardIs("tp755")
+        && !PTOPS_CardIs("scp55")
 #ifndef NOSBLIVE
         /* CARD_AUDIGY build: the SB Live/Audigy driver is linked and its entry
          * sits after the PCMCIA ones in the card table, so naming it lets
@@ -515,9 +516,9 @@ int main(int argc, char* argv[])
 #endif
       ) {
 #ifndef NOSBLIVE
-        printf("Error: unknown /CARD:%s -- expected ES1688, VEW211, TP755 or AUDIGY\n", FOpts.card );
+        printf("Error: unknown /CARD:%s -- expected ES1688, VEW211, SCP55, TP755 or AUDIGY\n", FOpts.card );
 #else
-        printf("Error: unknown /CARD:%s -- expected ES1688, VEW211 or TP755\n", FOpts.card );
+        printf("Error: unknown /CARD:%s -- expected ES1688, VEW211, SCP55 or TP755\n", FOpts.card );
 #endif
         return(1);
     }

@@ -38,6 +38,9 @@ extern struct sndcard_info_s ES1688_sndcard_info;
 #ifndef NOVEW211
 extern struct sndcard_info_s VEW211_sndcard_info;
 #endif
+#ifndef NOSCP55
+extern struct sndcard_info_s SCP55_sndcard_info;
+#endif
 #ifndef NOES1371
 extern struct sndcard_info_s ES1371_sndcard_info;
 #endif
@@ -64,6 +67,9 @@ static const struct sndcard_info_s *sndcard_info_table[] = {
 #endif
 #ifndef NOVEW211
 	&VEW211_sndcard_info,   /* PCMCIA CS4231A passthrough (CF-VEW211) */
+#endif
+#ifndef NOSCP55
+	&SCP55_sndcard_info,    /* PCMCIA CS4231A, split map (Roland SCP-55) */
 #endif
 #ifndef NOTP755
 	&TP755_sndcard_info,    /* TP755C planar CS4248 (/CARD:TP755) */

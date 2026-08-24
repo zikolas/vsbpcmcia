@@ -96,6 +96,17 @@ fi
 # rig, not a shipping build: it exists so the trampolines can be proven on
 # the 32-bit stack, where there are known-good results to compare against,
 # before the 16-bit build depends on them. Suffix keeps it a distinct 8.3
+# STKDIAG=1: make the stackisr.asm STACKCHECK tripwire SURVIVABLE instead of
+# fatal. On a trip it masks IRQ8, EOIs both PICs, marks 0x4FE=F3 and unwinds,
+# so COMRADE stays up and the 0x4F0-0x4FF telemetry can be read AFTER the
+# event -- the only way to autopsy a wedge that kills ctrl-alt-del. Built for
+# the 235's "fatal error 3" autopsy; reused here for the SCP-55 PM-game wedge.
+if [ -n "$STKDIAG" ] && [ "$STKDIAG" != "0" ]; then
+  CARDDEF="$CARDDEF -DSTKDIAG=1"
+  OUTNAME="${OUTNAME}s"
+  echo "build.sh: STKDIAG=1 -- survivable stack tripwire, 0x4FE=F3 on trip" >&2
+fi
+
 # name so it can sit next to the real binary.
 if [ -n "$PMISR" ] && [ "$PMISR" != "0" ]; then
   CARDDEF="$CARDDEF -DPMISR_CHAIN"

@@ -96,7 +96,8 @@ OBJFILES = &
 	$(OUTD)/vsb.obj			$(OUTD)/vdma.obj		$(OUTD)/virq.obj		$(OUTD)/vopl3.obj		$(OUTD)/vmpu.obj		$(OUTD)/tsf.obj &
 	$(OUTD)/fmvol.obj		$(OUTD)/fmshim.obj		$(OUTD)/hostsvc.obj &
 	$(OUTD)/au_cards.obj	$(OUTD)/dmabuff.obj		$(OUTD)/physmem.obj		$(OUTD)/timer.obj &
-	$(OUTD)/sc_es1688.obj	$(OUTD)/sc_vew211.obj	$(OUTD)/sc_tp755.obj &
+	$(OUTD)/sc_es1688.obj	$(OUTD)/sc_vew211.obj	$(OUTD)/sc_scp55.obj &
+	$(OUTD)/sc_tp755.obj &
 	$(OUTD)/stackio.obj		$(OUTD)/stackisr.obj	$(OUTD)/sbisr.obj		$(OUTD)/int31.obj		$(OUTD)/rmwrap.obj		$(OUTD)/mixer.obj &
 	$(OUTD)/hapi.obj		$(OUTD)/dprintf.obj		$(OUTD)/vioout.obj		$(OUTD)/djdpmi.obj		$(OUTD)/uninst.obj		$(OUTD)/fileacc.obj &
 	$(OUTD)/pmisr.obj		$(OUTD)/rte200.obj		$(OUTD)/logfile.obj		$(OUTD)/cv1to2.obj &
@@ -153,6 +154,7 @@ $(OUTD)/physmem.obj:   mpxplay\physmem.c
 $(OUTD)/timer.obj:     mpxplay\timer.c
 $(OUTD)/sc_es1688.obj: mpxplay\sc_es1688.c
 $(OUTD)/sc_vew211.obj: mpxplay\sc_vew211.c
+$(OUTD)/sc_scp55.obj:  mpxplay\sc_scp55.c
 $(OUTD)/sc_tp755.obj:  mpxplay\sc_tp755.c
 
 $(OUTD)/cv1to2.obj:    src\cv1to2.asm
