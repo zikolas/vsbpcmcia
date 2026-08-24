@@ -11,17 +11,21 @@ real OPL directly at 0x388, untrapped. Validated from a Pentium MMX down to a
 386-bus 486SLC/25 (HP OmniBook 425) — see COMPATIBILITY.md for the measured
 floor and slow-CPU tuning.
 
-VSBPCM.EXE contains the ES1688, CS4231 and CS4248 backends; `/CARD:` picks 
-one at load time. Nothing is probed — you already have to run that card's 
+VSBPCM.EXE contains the ES1688, CS4231/CS4231A and CS4248 backends; `/CARD:`
+picks one at load time. Nothing is probed — you already have to run that card's 
 enabler first, so the launcher always knew which card it was talking to.
 
 Supported sound cards:
- * ES1688-based PCMCIA cards: Ratoc REX-5571/5572, Panasonic KXL-C101
+ * ES1688-based PCMCIA cards:
+   - Ratoc REX-5571/5572, Panasonic KXL-C101
    (bring the card up with ES1688GO first,
    https://github.com/zikolas/es1688go) — `/CARD:ES1688`
- * CS4231A based PCMCIA cards: Panasonic CF-VEW211
+ * CS4231A based PCMCIA cards:
+   - Panasonic CF-VEW211
    (bring the card up with VEW21XGO first,
-   https://github.com/zikolas/vew21xgo) — `/CARD:VEW211`
+   https://github.com/zikolas/vew21xgo) — `/CARD:VEW211`. 
+   - Roland SCP-55 (bring the card up with SCP55GO first,
+   https://github.com/zikolas/scp55-enabler) — `/CARD:SCP55`
  * BONUS: ThinkPad 755C Crystal CS4248: The planar codec is the sound card
    and the driver wakes it up — `/CARD:TP755`
  
@@ -40,8 +44,8 @@ guessing. Two addresses are easy to confuse, so the help says it too:
  * `/A` is the **emulated** SB base — the address the guest looks for.
  * `/BASE` is the **real** card's base — match it to the enabler's setting.
 
-`/BASE` defaults per card to that card's own enabler default (220 / 530 /
-4E30), so it can be omitted when you left the enabler at its default.
+`/BASE` defaults per card to that card's own enabler default (220 / 330 / 530
+/ 4E30), so it can be omitted when you left the enabler at its default.
 
 **Emulated SB at 220, real chip elsewhere.** Games that scan for a Sound
 Blaster probe 0x220 first and must find the emulation there; if they find the
@@ -66,6 +70,14 @@ CF-VEW211 PCMCIA card:
     HDPMI32I -r -x -v
     VSBPCM /CARD:VEW211 /BASE530 /DACRATE11025 /CVOL0 /A220
 
+Roland SCP-55 PCMCIA card:
+
+    SCP55GO /PCIC /I=0 /W=DC00
+    SET BLASTER=A220 I7 D1 T4
+    JLOAD QPIEMU.DLL
+    HDPMI32I -r -x -v
+    VSBPCM /CARD:SCP55 /BASE330 /CVOL0 /A220
+
 ThinkPad 755C planar codec (no enabler):
 
     SET BLASTER=A220 I7 D1 T4
@@ -83,11 +95,11 @@ See deploy/ for working batches.
 
 `/CARD:name` selects the backend and is required. The rest are optional:
 
- * `/BASE`    real card's IO base, hex (def per card: 220 / 530 / 4E30)
+ * `/BASE`    real card's IO base, hex (def per card: 220 / 330 / 530 / 4E30)
  * `/DACRATE` codec rate in Hz (def per card). On the ES1688 passthrough this
    only sets the idle/bring-up rate — the guest's own format wins on the first
-   feed. On the VEW211 and TP755 it is the codec's actual rate.
- * `/CVOL`    codec DAC attenuation 0-63, ~1.5 dB per step (VEW211/TP755)
+   feed. On the VEW211, SCP55 and TP755 it is the codec's actual rate.
+ * `/CVOL`    codec DAC attenuation 0-63, ~1.5 dB per step (VEW211/SCP55/TP755)
  * `/FMVOL`   volume trim on a REAL OPL3, 0-63 TL steps
  * `/FMSHIM`  pretend the card has no FM chip (bench diagnostic; see below)
  * `/A /I /D /T /H` the emulated SB's geometry (base, IRQ, DMA, type, high DMA)
@@ -96,7 +108,8 @@ Configuration by environment variable was removed in v1.0: values persisted
 between runs, so a base or card left over from one launcher silently
 redirected the next. Only transient bench knobs remain in the environment —
 `SBERTC` (fixed RTC pump rate-select 3-15), `SBEPTLAT` (passthrough ring
-latency target, ms), `SBENORS` (VEW211: disable the frame stepper), `ESNOI8`
+latency target, ms), `SBENORS` (VEW211/SCP55: disable the frame stepper),
+`SBEMAXHZ` (SCP55: cap the codec rate), `ESNOI8`
 (disable the IRQ0 watchdog heartbeat), `ESIRQ5`, `IRQTONE`, `FIFOTEST`.
 
 ### FM and the detection shim
@@ -104,12 +117,14 @@ latency target, ms), `SBENORS` (VEW211: disable the frame stepper), `ESNOI8`
 Cards with real FM silicon (ES1688's ESFM, the VEW211's discrete YMF262) get
 it for free: 0x388 is left untrapped and guest AdLib rides the hardware.
 
-A card with NO FM chip — the 755C — cannot simply ignore those ports. Era
+A card with NO FM chip — the 755C and the SCP-55 — cannot simply ignore those
+ports. Era
 games run an AdLib timer test on the SB's FM aliases BEFORE they will touch
 the DSP, so an unanswered 0x388 costs you digital sound as well as music.
 The driver therefore answers those ports from a timer-only shim: enough to
 pass detection, with no synthesis behind it. FM music is silent on such a
-card unless the software OPL is compiled in (see the TP755 build below).
+card unless the software OPL is compiled in (see the TP755 build below). The
+SCP-55 has a better option than either — see its section below.
 `/FMSHIM` forces that path on a card that does have a chip, to exercise it.
 
 ## Builds
@@ -117,8 +132,9 @@ card unless the software OPL is compiled in (see the TP755 build below).
 `tools/build.sh` runs the whole build in a Linux container (see doc/NOTES.md);
 DJGPP v2.05 and JWasm v2.17+ are required.
 
- * plain — **VSBPCM.EXE**, the unified NOFM binary (ES1688 + VEW211 + TP755)
- * `CARD=TP755` — **VSBPCMT.EXE**: the same three backends PLUS the DOSBox
+ * plain — **VSBPCM.EXE**, the unified NOFM binary (ES1688 + VEW211 + SCP55
+   + TP755)
+ * `CARD=TP755` — **VSBPCMT.EXE**: the same four backends PLUS the DOSBox
    OPL3 emulation, i.e. real FM MUSIC on the FM-less 755C instead of the
    detection-only shim. A feature flag, not a card selector.
  * `CARD=AUDIGY` — **VSBPCMA.EXE**, see below.
@@ -195,6 +211,24 @@ decays run slightly short; playback only, no MPU MIDI-in.
 Chip-level bench tools (cbinit, fxvol, dacvol, the audmix mixer) live in
 tools/audigy/.
 
+## The Roland SCP-55
+
+`/CARD:SCP55`, after bringing the card up with SCP55GO. `/BASE` is 330, which
+is the enabler's own default, so you can leave it off.
+
+The card has no FM chip, but it does carry a real MPU-401 Sound Canvas. So set
+the game's music to **General MIDI on port 330** rather than AdLib, and its
+digital sound to Sound Blaster on 220 — both play at once, and the music is a
+GS synth instead of emulated OPL. Never pass `/P`, and keep `P=` out of
+BLASTER: either traps 330 and takes the Sound Canvas away.
+
+Verified on a Pentium MMX. On 486 machines digital audio plays but can crackle.
+`SBEMAXHZ` caps the codec rate and the pump rate follows it; `SBERTC` pins the
+pump directly. Lower is safer, at the cost of bandwidth.
+
+Why the card needs its own backend, and why it cannot pace audio from a card
+interrupt, is written up in the enabler repository.
+
 ## The TP755 planar backend
 
 `/CARD:TP755` drives the ThinkPad 755C's internal Crystal CS4248 (AD1848/WSS
@@ -262,7 +296,8 @@ Sound Blaster 1.0, 2.0, Pro, Pro2, 16.
    real-mode support, or hang).
  * An enabler that powers/configures the card (not needed for the 755C):
    ES1688GO https://github.com/zikolas/es1688go (v1.4+ for game-native ESFM),
-   or VEW21XGO https://github.com/zikolas/vew21xgo.
+   VEW21XGO https://github.com/zikolas/vew21xgo, or SCP55GO
+   https://github.com/zikolas/scp55-enabler.
 
 ## Credits and licence
 
@@ -296,8 +331,9 @@ parts stays with their authors.
 
 Written here and (C) 2026 zikolas, GPL v2 with the rest of the tree: the
 passthrough architecture (ring, RTC pump, tick-credit pacing, frame stepper,
-watchdogs); the three backends mpxplay/sc_es1688.c, sc_vew211.c and
-sc_tp755.c, built on the interfaces and sequences credited above; the codec
+watchdogs); the four backends mpxplay/sc_es1688.c, sc_vew211.c, sc_scp55.c
+(forked from sc_vew211.c) and sc_tp755.c, built on the interfaces and
+sequences credited above; the codec
 bring-up recipes worked out on the bench; the 755C's 8237 DMA ring; the
 telemetry; the SF2 reader mpxplay/emu_sf2.c, written from the published
 SoundFont 2.01 specification; and the Audigy wavetable mpxplay/emu_wt.c,

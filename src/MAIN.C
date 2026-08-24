@@ -136,11 +136,11 @@ static const struct {
     int *pValue;
 } GOptions[] = {
 #ifndef NOSBLIVE
-    "CARD:", "ES1688|VEW211|TP755|AUDIGY req.", (int *)&FOpts.card,
+    "CARD:", "REQUIRED -- see recipes below", (int *)&FOpts.card,
 #else
-    "CARD:", "ES1688|VEW211|TP755 REQUIRED", (int *)&FOpts.card,
+    "CARD:", "REQUIRED -- see recipes below", (int *)&FOpts.card,
 #endif
-    "BASE", "real card base, hex", &FOpts.base,
+    "BASE", "real card base, hex (enabler)", &FOpts.base,
     "DACRATE", "codec rate, Hz", &FOpts.dacrate,
     "CVOL", "codec attenuation [0-63]", &FOpts.cvol,
     "FMSHIM", "pretend card has no FM", &FOpts.fmshim,
@@ -463,6 +463,7 @@ int main(int argc, char* argv[])
         printf("\nCard recipes -- run that card's enabler FIRST and match its base:\n"
                " /CARD:ES1688 /BASE240   after ES1688GO /SB=240   (base defaults to 220)\n"
                " /CARD:VEW211 /BASE530   after VEW21XGO /IO=530   (base defaults to 530)\n"
+               " /CARD:SCP55  /BASE330   after SCP55GO            (base defaults to 330)\n"
                " /CARD:TP755             no enabler, planar       (base defaults to 4E30)\n"
                " /BASE is the REAL card; /A is the EMULATED SB the guest looks for.\n"
                "\nBLASTER env may change defaults;" HELPNOTE );
