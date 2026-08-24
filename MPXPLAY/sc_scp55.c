@@ -62,6 +62,22 @@ static uint16_t es_tel_feed16;
 static unsigned long es_tel_bytes;
 static unsigned char es_tel_irq;
 
+// RCDIAG: forensics for the /RESAMP render path only (build.sh RCDIAG=1).
+// SCP55_writedata clamps to ring space and cannot tell the engine it took
+// less, so once the ring saturates the engine's write pointer runs ahead of
+// what was stored and the difference is DROPPED audio -- the suspected cause
+// of the sped-up playback measured on the T2130CT 2026-08-24. These reuse
+// bytes that are provably dead in render mode: 0x4FB/0x4FF are the PT_Feed
+// counter and 0x4FE the PT ring-full clamp, and PT_Feed never runs with the
+// tap disarmed. Never enabled in a shipping build.
+#ifndef RCDIAG
+#define RCDIAG 0
+#endif
+#if RCDIAG
+static unsigned char rc_events;      // 0x4FE: clamp events (wraps)
+static uint16_t      rc_lost;        // 0x4FB/0x4FF: frames discarded, 16-bit
+#endif
+
 // ---- card geometry -------------------------------------------------------
 #define SCP_WIN_BASE  0x330         // I/O window base (CIS default cfg 1); /BASE overrides
 #define SCP_CODEC_OFF  0            // see VC_* below: this card SPLITS the codec
@@ -361,7 +377,15 @@ static void scp_pio_pump(void)
  // full burst. Average delivery stays locked to the codec clock as long as
  // delivered ticks * burst >= the frame rate (33% headroom at the ceiling).
  { unsigned char sr = (unsigned char)inportb(cb+VC_SR);
-   if(scp_pt_active && (sr & 0x10)){
+   // NOT gated on scp_pt_active (2026-08-24): /RESAMP runs with the tap
+   // disarmed, so gating here left the RENDER path with no tick-loss
+   // recovery whatever -- 0x4F6 read 0 through an entire Epic Pinball run
+   // while the watchdog logged a lost tick. SER is the codec's own missed-
+   // sample flag, clocked by its crystal: guest-independent, and just as
+   // true when the engine renders as when the tap feeds. EP saturates the
+   // game-timer ISR and costs pump ticks; without the catch-up that is
+   // chronic underfeed, and the codec stretches samples = the wobble.
+   if(sr & 0x10){
     static unsigned char scp_tel_ser;
     scp_fr_acc = hz * SCP_BURST_FRAMES;
     LOW_PokeB(0x4F6, ++scp_tel_ser);         // SER catch-up count
@@ -444,6 +468,16 @@ static void ES1688_PT_Watchdog(void)
 }
 
 static unsigned scp_pt_lat_ms = 250;
+
+// RENDER LATENCY CAP (2026-08-24). Passthrough bounds queued audio with
+// SBEPTLAT via pt_space; the render path had NO equivalent, so the engine was
+// free to fill all 8192 ring frames -- 743 ms at 11025, measured pinned at
+// 252/256 on the T2130CT, which is the key-to-sound delay. The engine never
+// touches the ring: it sees only getbufpos() and card_dmasize, so we can show
+// it a SMALLER virtual buffer and it will queue no more than that, while the
+// real ring stays 8192 for the passthrough path. Must divide RING_BYTES or
+// ring_rd's wrap would make bufpos jump, so it is snapped to a power of two.
+static unsigned scp_virt_frames = RING_BYTES;
 static int ES1688_PT_Space(void)
 {
  unsigned used = (ring_wr - ring_rd) & RING_MASK;
@@ -776,7 +810,12 @@ static void SCP55_setrate(struct audioout_info_s *aui)
  aui->freq_card = scp_dacrate;
  aui->chan_card = 2;
  aui->bits_card = 16;
- aui->card_dmasize = RING_BYTES * BYTES_PER_SBSAMPLE;
+ // Show the engine only SBEPTLAT ms of buffer (see RENDER LATENCY CAP).
+ { unsigned long want = (unsigned long)scp_dacrate * scp_pt_lat_ms / 1000UL;
+   unsigned f = 256;
+   while((unsigned long)(f << 1) <= want && (f << 1) <= RING_BYTES) f <<= 1;
+   scp_virt_frames = f; }
+ aui->card_dmasize = (unsigned long)scp_virt_frames * BYTES_PER_SBSAMPLE;
  scp_base  = card->base;
  scp_codec = (uint16_t)(card->base + SCP_CODEC_OFF);
 }
@@ -822,16 +861,37 @@ static void SCP55_close(struct audioout_info_s *aui)
 }
 
 // Render-path pump (non-passthrough): 16-bit stereo -> 8-bit UNSIGNED mono.
+// ENGINE WRITE POINTER (2026-08-24). A card with its OWN writedata must
+// advance aui->card_dmalastput itself: during playback the ONLY routine that
+// moves it is MDma_writedata (dmabuff.c), and the writedata() wrapper in
+// au_cards.c updates card_dmaspace but never the pointer. Leave it frozen and
+// AU_cardbuf_space computes bufpos - card_dmalastput against a constant, so
+// what it returns is not free space at all -- it tracks the PLAY position,
+// growing as ring_rd advances and collapsing when it wraps. sndisr then sizes
+// every render pass from that, pins the render_cap most passes and renders
+// ~3x the frames the codec consumes: audio races ahead, perfectly resampled
+// (hence "sounds clean"), while the clamp below silently eats the excess.
+// Advance by what was ACTUALLY stored -- the post-clamp count -- so the
+// engine's idea of the buffer matches the ring even when we take less than
+// it offered. sc_tp755 never had this bug: it uses MDma_writedata.
 static void SCP55_writedata(struct audioout_info_s *aui, char *src, unsigned long bytes)
 {
  short *p = (short *)src;
- unsigned long n, free_;
+ unsigned long n, free_, stored;
  unsigned wr;
- (void)aui;
  if(scp_pt_active) return;                            // one producer at a time
  n = bytes / BYTES_PER_SBSAMPLE;
  free_ = (unsigned long)((ring_rd - ring_wr - 1) & RING_MASK);
- if(n > free_) n = free_;                             // never lap the consumer
+ if(n > free_){                                       // never lap the consumer
+#if RCDIAG
+  rc_lost = (uint16_t)(rc_lost + (n - free_));
+  LOW_PokeB(0x4FE, ++rc_events);
+  LOW_PokeB(0x4FB, (unsigned char)rc_lost);
+  LOW_PokeB(0x4FF, (unsigned char)(rc_lost >> 8));
+#endif
+  n = free_;
+ }
+ stored = n;                                          // post-clamp count
  wr = ring_wr;
  while(n--){
   int mono = ((int)p[0] + (int)p[1]) >> 1;
@@ -840,12 +900,18 @@ static void SCP55_writedata(struct audioout_info_s *aui, char *src, unsigned lon
   wr = (wr+1)&RING_MASK;
  }
  ring_wr = wr;
+ // see ENGINE WRITE POINTER above
+ aui->card_dmalastput += stored * BYTES_PER_SBSAMPLE;
+ while(aui->card_dmalastput >= aui->card_dmasize)
+  aui->card_dmalastput -= aui->card_dmasize;
 }
 
 static long SCP55_getbufpos(struct audioout_info_s *aui)
 {
  (void)aui;
- return (long)((unsigned long)ring_rd * BYTES_PER_SBSAMPLE);
+ // Position inside the VIRTUAL buffer, not the real ring (power of two, so
+ // this stays continuous across ring_rd's own wrap).
+ return (long)((unsigned long)(ring_rd & (scp_virt_frames - 1)) * BYTES_PER_SBSAMPLE);
 }
 
 // IRQ8/RTC: ack, feed the codec, self-pace, claim the interrupt.

@@ -114,6 +114,17 @@ if [ -n "$PMISR" ] && [ "$PMISR" != "0" ]; then
   echo "build.sh: PMISR=1 -- chained PM ISRs via src/pmisr.asm (A/B build, not for release)" >&2
 fi
 
+# RCDIAG=1: count the frames SCP55_writedata discards when the /RESAMP render
+# ring is full. The clamp is silent -- the engine is never told it wrote less
+# -- so this is the only way to tell "dropped audio" from "clocked wrong".
+# 0x4FE counts clamp events, 0x4FB/0x4FF the frames lost (16-bit). Diagnostic
+# only: it borrows PT_Feed's telemetry bytes, which are dead in render mode.
+if [ -n "$RCDIAG" ] && [ "$RCDIAG" != "0" ]; then
+  CARDDEF="$CARDDEF -DRCDIAG=1"
+  OUTNAME="${OUTNAME}r"
+  echo "build.sh: RCDIAG=1 -- render-clamp forensics, 0x4FE/0x4FB/0x4FF (not for release)" >&2
+fi
+
 rm -f "$REPO"/djgpp/*.o "$REPO"/djgpp/*.ar
 
 docker run --rm --platform linux/amd64 \

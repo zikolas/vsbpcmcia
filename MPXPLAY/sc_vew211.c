@@ -745,16 +745,29 @@ static void VEW211_close(struct audioout_info_s *aui)
 }
 
 // Render-path pump (non-passthrough): 16-bit stereo -> 8-bit UNSIGNED mono.
+// ENGINE WRITE POINTER (2026-08-24). A card with its OWN writedata must
+// advance aui->card_dmalastput itself: during playback the ONLY routine that
+// moves it is MDma_writedata (dmabuff.c), and the writedata() wrapper in
+// au_cards.c updates card_dmaspace but never the pointer. Leave it frozen and
+// AU_cardbuf_space computes bufpos - card_dmalastput against a constant, so
+// what it returns is not free space at all -- it tracks the PLAY position,
+// growing as ring_rd advances and collapsing when it wraps. sndisr then sizes
+// every render pass from that, pins the render_cap most passes and renders
+// ~3x the frames the codec consumes: audio races ahead, perfectly resampled
+// (hence "sounds clean"), while the clamp below silently eats the excess.
+// Advance by what was ACTUALLY stored -- the post-clamp count -- so the
+// engine's idea of the buffer matches the ring even when we take less than
+// it offered. sc_tp755 never had this bug: it uses MDma_writedata.
 static void VEW211_writedata(struct audioout_info_s *aui, char *src, unsigned long bytes)
 {
  short *p = (short *)src;
- unsigned long n, free_;
+ unsigned long n, free_, stored;
  unsigned wr;
- (void)aui;
  if(vew_pt_active) return;                            // one producer at a time
  n = bytes / BYTES_PER_SBSAMPLE;
  free_ = (unsigned long)((ring_rd - ring_wr - 1) & RING_MASK);
  if(n > free_) n = free_;                             // never lap the consumer
+ stored = n;                                          // post-clamp count
  wr = ring_wr;
  while(n--){
   int mono = ((int)p[0] + (int)p[1]) >> 1;
@@ -763,6 +776,10 @@ static void VEW211_writedata(struct audioout_info_s *aui, char *src, unsigned lo
   wr = (wr+1)&RING_MASK;
  }
  ring_wr = wr;
+ // see ENGINE WRITE POINTER above
+ aui->card_dmalastput += stored * BYTES_PER_SBSAMPLE;
+ while(aui->card_dmalastput >= aui->card_dmasize)
+  aui->card_dmalastput -= aui->card_dmasize;
 }
 
 static long VEW211_getbufpos(struct audioout_info_s *aui)
