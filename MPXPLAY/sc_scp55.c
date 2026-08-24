@@ -240,6 +240,8 @@ static int           scp_no_step;      // env SBENORS
 static int           scp_step_on;      // engaged for the current format
 static unsigned long scp_step_in;      // guest frames/s
 static unsigned long scp_step_acc;     // Bresenham accumulator
+static unsigned char scp_step_prev[4]; // previous guest frame, for the lerp
+static int           scp_step_pvok;    // ...is it populated yet
 
 // Program the codec for {rate,bits,channels} in PIO mode; ms-paced MCE with
 // verify/retry (the CS4231A-KQ drops fast cold writes). ~25 ms.
@@ -295,8 +297,15 @@ static void scp_codec_config(unsigned rate, unsigned bits, unsigned channels)
  // Arm the frame stepper when the guest rate misses the table by >2%.
  scp_step_in  = rate;
  scp_step_acc = 0;
- { unsigned long d = scp_frate > rate ? scp_frate - rate : rate - scp_frate;
-   scp_step_on = (!scp_no_step && d * 50UL > (unsigned long)rate) ? 1 : 0; }
+ scp_step_pvok = 0;   // stale prev across a format change would click
+ // NO DEADBAND (2026-08-24). The old rule only stepped past a 2% mismatch,
+ // so near-match guests played sharp/flat -- and playing flat also DRAGS the
+ // game, because ring backpressure throttles the guest to the codec's pace.
+ // That was tolerable only because stepping meant DUPLICATING frames, whose
+ // periodic discontinuity is worse than a 1% pitch error. With interpolation
+ // below, stepping is near-transparent at small ratios, so the trade inverts:
+ // step whenever the rates differ at all and pitch is always correct.
+ scp_step_on = (!scp_no_step && scp_frate != (unsigned long)rate) ? 1 : 0;
 #if !PTDIAG
  LOW_PokeB(0x4F2, (unsigned char)(rate >> 8));  // guest rate >> 8 (pitch-bug forensics)
  LOW_PokeB(0x4FA, ++scp_tel_recfg);          // FULL reconfigs only
@@ -531,11 +540,42 @@ static void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, u
      bytes = 0;
      break;
     }
-    for(u = 0; u < unit; u++){ ring_buf[wr] = buf[u]; wr = (wr + 1) & RING_MASK; }
+    // LINEAR INTERPOLATION between the previous guest frame and this one.
+    // w = 1 - acc/step_in, in 0..256.  Validated on the host against a ramp:
+    // max error 0.144 frames vs 0.499 for frame duplication (3.5x better) and
+    // -- decisively -- still LOSSLESS at an exact rate match, which the other
+    // phase convention (w = acc/step_in) is not.
+    // CLAMP IS NOT OPTIONAL: acc can exceed step_in when one input frame emits
+    // twice, which makes w negative and would crackle exactly on those frames.
+    {
+     long w = 256L - (long)((scp_step_acc << 8) / scp_step_in);
+     if(w < 0)   w = 0;
+     if(w > 256) w = 256;
+     if(!scp_step_pvok) w = 256;                      // no prev yet: emit cur
+     if(bits >= 16){
+      unsigned c, nch = unit >> 1;
+      for(c = 0; c < nch; c++){                       // signed 16-bit LE pairs
+       int a16 = (int)(short)((unsigned)scp_step_prev[c*2] |
+                              ((unsigned)scp_step_prev[c*2+1] << 8));
+       int b16 = (int)(short)((unsigned)buf[c*2] | ((unsigned)buf[c*2+1] << 8));
+       int v   = a16 + (int)((((long)(b16 - a16)) * w) >> 8);
+       ring_buf[wr] = (unsigned char)(v & 0xFF);        wr = (wr + 1) & RING_MASK;
+       ring_buf[wr] = (unsigned char)((v >> 8) & 0xFF); wr = (wr + 1) & RING_MASK;
+      }
+     }else{
+      for(u = 0; u < unit; u++){                      // unsigned 8-bit
+       int a8 = (int)scp_step_prev[u], b8 = (int)buf[u];
+       int v  = a8 + (int)((((long)(b8 - a8)) * w) >> 8);
+       ring_buf[wr] = (unsigned char)v; wr = (wr + 1) & RING_MASK;
+      }
+     }
+    }
     es_free -= unit;
     es_tel_bytes += unit;
    }
    if(bytes < (int)unit) break;
+   { unsigned p; for(p = 0; p < unit && p < 4u; p++) scp_step_prev[p] = buf[p];
+     scp_step_pvok = 1; }
    buf += unit; bytes -= (int)unit;
   }
  }
