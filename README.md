@@ -21,9 +21,9 @@ Supported sound cards:
    (bring the card up with ES1688GO first,
    https://github.com/zikolas/es1688go) — `/CARD:ES1688`
  * CS4231A based PCMCIA cards:
-   - Panasonic CF-VEW211
-   (bring the card up with VEW21XGO first,
-   https://github.com/zikolas/vew21xgo) — `/CARD:VEW211`. 
+   - Panasonic CF-VEW211 and CF-VEW212 "Sound Card PRO"
+   (bring the card up with VEW21XGO first — 2.5+ for the 212,
+   https://github.com/zikolas/vew21xgo) — `/CARD:VEW211` for both. 
    - Roland SCP-55 (bring the card up with SCP55GO first,
    https://github.com/zikolas/scp55-enabler) — `/CARD:SCP55`
  * BONUS: ThinkPad 755C Crystal CS4248: The planar codec is the sound card
@@ -70,6 +70,21 @@ CF-VEW211 PCMCIA card:
     HDPMI32I -r -x -v
     VSBPCM /CARD:VEW211 /BASE530 /DACRATE11025 /CVOL0 /A220
 
+CF-VEW212 PCMCIA card — same backend, same command line:
+
+    VEW21XGO /PCIC /VOL=0 /W=DC00
+    SET BLASTER=A220 I7 D1 T4
+    JLOAD QPIEMU.DLL
+    HDPMI32I -r -x -v
+    VSBPCM /CARD:VEW211 /BASE530 /DACRATE11025 /CVOL0 /A220
+
+The 212 carries the same CS4231A behind a different ASIC, on a config index
+its own CIS never declares; VEW21XGO 2.5 sets that index itself, and there is
+only one codec base on this card, so `/IO=` is overridden to 530 (2.3 and 2.4
+recognise a 212 and decline it, leaving the card unconfigured).
+FM comes from the OPL4's OPL3-compatible half at 0x388 and rides it untrapped
+exactly like the 211's YMF262.
+
 Roland SCP-55 PCMCIA card:
 
     SCP55GO /PCIC /I=0 /W=DC00
@@ -114,8 +129,9 @@ latency target, ms), `SBENORS` (VEW211/SCP55: disable the frame stepper),
 
 ### FM and the detection shim
 
-Cards with real FM silicon (ES1688's ESFM, the VEW211's discrete YMF262) get
-it for free: 0x388 is left untrapped and guest AdLib rides the hardware.
+Cards with real FM silicon (ES1688's ESFM, the VEW211's discrete YMF262, the
+VEW212's OPL4) get it for free: 0x388 is left untrapped and guest AdLib
+rides the hardware.
 
 A card with NO FM chip — the 755C and the SCP-55 — cannot simply ignore those
 ports. Era
@@ -296,7 +312,8 @@ Sound Blaster 1.0, 2.0, Pro, Pro2, 16.
    real-mode support, or hang).
  * An enabler that powers/configures the card (not needed for the 755C):
    ES1688GO https://github.com/zikolas/es1688go (v1.4+ for game-native ESFM),
-   VEW21XGO https://github.com/zikolas/vew21xgo, or SCP55GO
+   VEW21XGO https://github.com/zikolas/vew21xgo (2.5+ for the CF-VEW212),
+   or SCP55GO
    https://github.com/zikolas/scp55-enabler.
 
 ## Credits and licence
