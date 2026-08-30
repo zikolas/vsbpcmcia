@@ -87,6 +87,22 @@ C_OPT_FLAGS=-Os -fno-asynchronous-unwind-tables
 # ES1688 port: i486, not i586 -- this stack exists FOR the 486 fleet (vdpmi
 # covers Pentiums); i586 scheduling is worthless there and risks 586-isms.
 C_EXTRA_FLAGS=-march=i486
+
+# HOT OBJECTS: -O2, not -Os. -Os is size-first -- it suppresses loop
+# transformations and caps inlining -- and these files ARE the CPU cost of
+# the driver on a 486: the sound ISR, the port-trap dispatch, the DMA
+# virtualiser, and whichever PCMCIA backend /CARD selects. Everything else
+# stays -Os, so resident growth is bounded to these objects.
+# Aliasing is unchanged: -Os and -O2 both enable -fstrict-aliasing, so this
+# makes no assumption the shipping build did not already make.
+# vsb.o is deliberately NOT here yet -- vsb.c's DSP_Read0A does an
+# overlapping memcpy, which is UB that -Os happens to compile benignly.
+# Turn it into a memmove before raising that file's level.
+# This intentionally breaks the object-code-identity invariant tools/cmp32.sh
+# checks (see src/hostsvc.h): moving this code is the point of the change.
+HOTOBJS=$(OUTD)/sndisr.o $(OUTD)/ptrap.o $(OUTD)/vdma.o \
+	$(OUTD)/sc_es1688.o $(OUTD)/sc_vew211.o $(OUTD)/sc_scp55.o $(OUTD)/sc_tp755.o
+$(HOTOBJS): C_OPT_FLAGS=-O2 -fno-asynchronous-unwind-tables
 LD_FLAGS=$(addprefix -Xlinker ,$(LD_EXTRA_FLAGS))
 LD_EXTRA_FLAGS=-Map $(OUTD)/$(NAME).map
 
