@@ -926,11 +926,25 @@ static uint8_t FM_Alias( uint16_t port, uint8_t val, uint16_t flags )
         default: return FMVOL_38B( fm, val, flags );
         }
     }
+    /* DIRECT I/O, not UntrappedIO_*: this tail runs only when neither the
+     * shim nor the attenuator is active, and that is EXACTLY the branch
+     * below that deletes 0x388-0x38B from the port table (search
+     * PDT_DelEntries/OPL3_PDT). The destination is therefore untrapped, so
+     * the UntrappedIO_* detour -- a second round trip into the host on top
+     * of the trap exception that got us here -- buys nothing. Halving that
+     * cost matters because guests drive FM from a timer ISR in bursts: on a
+     * 486SX the ISR overran its period and Duke3D's music played SLOW with
+     * Sound Blaster (not AdLib) selected as the music source. Bench-found
+     * on the PC110, 2026-08-23.
+     * DO NOT hoist this above the two early returns. FMVOL keeps
+     * 0x388-0x38B TRAPPED on purpose and must forward through the host
+     * (fmvol.c FV_OUTB); a direct outp there would re-enter its own trap.
+     * FMSHIM keeps them trapped too and does no hardware I/O at all. */
     if ( flags & TRAPF_OUT ) {
-        UntrappedIO_OUT( fm, val );
+        outp( fm, val );
         return val;
     }
-    return UntrappedIO_IN( fm );
+    return (uint8_t)inp( fm );
 }
 
 void PTRAP_Prepare( int opl, int sbaddr, int dma, int hdma, int sndirq )
