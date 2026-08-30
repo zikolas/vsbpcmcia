@@ -439,15 +439,27 @@ static unsigned vew_pt_lat_ms = 250;
 static int ES1688_PT_Space(void)
 {
  unsigned used = (ring_wr - ring_rd) & RING_MASK;
- unsigned target = RING_BYTES - 64;
- if(vew_pt_rate){
-  // The ring holds OUTPUT-rate bytes (the stepper may have re-stepped the
-  // guest stream), so the latency target is sized from the codec rate.
-  unsigned bps = (unsigned)vew_frate * vew_pt_channels * ((vew_pt_bits + 7) / 8);
-  target = (unsigned)((unsigned long)bps * vew_pt_lat_ms / 1000UL);
-  if(target > RING_BYTES - 64) target = RING_BYTES - 64;
-  if(target < 512) target = 512;
+ // The target depends only on the stream format, which changes at reconfig --
+ // but this runs once per ISR tick, so a 32-bit multiply and divide were paid
+ // thousands of times a second for an answer that had not moved. Three
+ // compares instead; sp_rate starts at ~0u so the first call always computes.
+ static unsigned sp_rate = ~0u, sp_frate, sp_chan, sp_bits, sp_target;
+ unsigned target;
+ if(vew_pt_rate != sp_rate || (unsigned)vew_frate != sp_frate
+    || vew_pt_channels != sp_chan || vew_pt_bits != sp_bits){
+  sp_rate = vew_pt_rate; sp_frate = (unsigned)vew_frate;
+  sp_chan = vew_pt_channels; sp_bits = vew_pt_bits;
+  sp_target = RING_BYTES - 64;
+  if(vew_pt_rate){
+   // The ring holds OUTPUT-rate bytes (the stepper may have re-stepped the
+   // guest stream), so the latency target is sized from the codec rate.
+   unsigned bps = (unsigned)vew_frate * vew_pt_channels * ((vew_pt_bits + 7) / 8);
+   sp_target = (unsigned)((unsigned long)bps * vew_pt_lat_ms / 1000UL);
+   if(sp_target > RING_BYTES - 64) sp_target = RING_BYTES - 64;
+   if(sp_target < 512) sp_target = 512;
+  }
  }
+ target = sp_target;
  if(used >= target) return 0;
  { unsigned space = target - used;
    // The caller counts GUEST bytes; the stepper shrinks (or grows) them on
@@ -818,10 +830,22 @@ static int VEW211_irq(struct audioout_info_s *aui)
  if(vew_adaptive && vew_pt_ever){
   unsigned used = (ring_wr - ring_rd) & RING_MASK;
   uint32_t gap = vew_tick_seq - vew_feed_seq;
-  uint32_t lim = (VEW_RTC_HZ() * (220UL + 2UL * vew_pt_lat_ms)) / 1000UL;  // scale-invariant ~720ms
+  // lim is a 32-bit DIVIDE and this runs on every ISR tick, up to 2048 Hz.
+  // Only vew_rtc_rs varies (vew_pt_lat_ms is set once in adetect and never
+  // again), so recompute it when the pump rate actually changes.
+  static unsigned char lim_rs;
+  static uint32_t lim;
+  if(lim_rs != vew_rtc_rs){
+   lim_rs = vew_rtc_rs;
+   lim = (VEW_RTC_HZ() * (220UL + 2UL * vew_pt_lat_ms)) / 1000UL;  // scale-invariant ~720ms
+  }
   if(gap >= lim){
    if(!used && vew_rtc_rs != VEW_RS_IDLE) vew_rtc_setrate(VEW_RS_IDLE);
-  }else if(used < VEW_RING_LOW && vew_rtc_rs > vew_rs_for_frate((unsigned)vew_frate)){
+  // vew_rs_want IS vew_rs_for_frate(vew_frate): PT_Feed recomputes it from
+  // vew_frate on every format change, in the same block that sets
+  // vew_pt_ever, and this branch is gated on vew_pt_ever. Calling it again
+  // per tick just repeats a divide plus a search loop for the same answer.
+  }else if(used < VEW_RING_LOW && vew_rtc_rs > vew_rs_want){
    // FLOOR IS THE STREAM'S NEED, NOT THE GLOBAL RS_MIN (2026-08-24).
    // The ratchet used to run all the way to VEW_RS_MIN = 2048 Hz even when
    // vew_rs_for_frate() says 1024 Hz suffices -- at 11025 that is 689 f/s per

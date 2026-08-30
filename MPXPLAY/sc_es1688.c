@@ -400,13 +400,23 @@ static unsigned es_pt_lat_ms = 250;
 static int ES1688_PT_Space(void)
 {
  unsigned used = (ring_wr - ring_rd) & RING_MASK;
- unsigned target = RING_BYTES - 64;
- if(es_pt_rate){
-  unsigned bps = es_pt_rate * es_pt_channels * ((es_pt_bits + 7) / 8);
-  target = (unsigned)((unsigned long)bps * es_pt_lat_ms / 1000UL);
-  if(target > RING_BYTES - 64) target = RING_BYTES - 64;
-  if(target < 512) target = 512;                  // never starve the FIFO pump
+ // The target depends only on the stream format, which changes at reconfig --
+ // but this runs once per ISR tick, so a 32-bit multiply and divide were paid
+ // thousands of times a second for an answer that had not moved. Three
+ // compares instead; sp_rate starts at ~0u so the first call always computes.
+ static unsigned sp_rate = ~0u, sp_chan, sp_bits, sp_target;
+ unsigned target;
+ if(es_pt_rate != sp_rate || es_pt_channels != sp_chan || es_pt_bits != sp_bits){
+  sp_rate = es_pt_rate; sp_chan = es_pt_channels; sp_bits = es_pt_bits;
+  sp_target = RING_BYTES - 64;
+  if(es_pt_rate){
+   unsigned bps = es_pt_rate * es_pt_channels * ((es_pt_bits + 7) / 8);
+   sp_target = (unsigned)((unsigned long)bps * es_pt_lat_ms / 1000UL);
+   if(sp_target > RING_BYTES - 64) sp_target = RING_BYTES - 64;
+   if(sp_target < 512) sp_target = 512;           // never starve the FIFO pump
+  }
  }
+ target = sp_target;
  if(used >= target) return 0;
  return (int)(target - used);
 }

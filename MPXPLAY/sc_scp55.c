@@ -481,15 +481,27 @@ static unsigned scp_virt_frames = RING_BYTES;
 static int ES1688_PT_Space(void)
 {
  unsigned used = (ring_wr - ring_rd) & RING_MASK;
- unsigned target = RING_BYTES - 64;
- if(scp_pt_rate){
-  // The ring holds OUTPUT-rate bytes (the stepper may have re-stepped the
-  // guest stream), so the latency target is sized from the codec rate.
-  unsigned bps = (unsigned)scp_frate * scp_pt_channels * ((scp_pt_bits + 7) / 8);
-  target = (unsigned)((unsigned long)bps * scp_pt_lat_ms / 1000UL);
-  if(target > RING_BYTES - 64) target = RING_BYTES - 64;
-  if(target < 512) target = 512;
+ // The target depends only on the stream format, which changes at reconfig --
+ // but this runs once per ISR tick, so a 32-bit multiply and divide were paid
+ // thousands of times a second for an answer that had not moved. Three
+ // compares instead; sp_rate starts at ~0u so the first call always computes.
+ static unsigned sp_rate = ~0u, sp_frate, sp_chan, sp_bits, sp_target;
+ unsigned target;
+ if(scp_pt_rate != sp_rate || (unsigned)scp_frate != sp_frate
+    || scp_pt_channels != sp_chan || scp_pt_bits != sp_bits){
+  sp_rate = scp_pt_rate; sp_frate = (unsigned)scp_frate;
+  sp_chan = scp_pt_channels; sp_bits = scp_pt_bits;
+  sp_target = RING_BYTES - 64;
+  if(scp_pt_rate){
+   // The ring holds OUTPUT-rate bytes (the stepper may have re-stepped the
+   // guest stream), so the latency target is sized from the codec rate.
+   unsigned bps = (unsigned)scp_frate * scp_pt_channels * ((scp_pt_bits + 7) / 8);
+   sp_target = (unsigned)((unsigned long)bps * scp_pt_lat_ms / 1000UL);
+   if(sp_target > RING_BYTES - 64) sp_target = RING_BYTES - 64;
+   if(sp_target < 512) sp_target = 512;
+  }
  }
+ target = sp_target;
  if(used >= target) return 0;
  { unsigned space = target - used;
    // The caller counts GUEST bytes; the stepper shrinks (or grows) them on
@@ -944,10 +956,22 @@ static int SCP55_irq(struct audioout_info_s *aui)
  if(scp_adaptive && scp_pt_ever){
   unsigned used = (ring_wr - ring_rd) & RING_MASK;
   uint32_t gap = scp_tick_seq - scp_feed_seq;
-  uint32_t lim = (SCP_RTC_HZ() * (220UL + 2UL * scp_pt_lat_ms)) / 1000UL;  // scale-invariant ~720ms
+  // lim is a 32-bit DIVIDE and this runs on every ISR tick, up to 2048 Hz.
+  // Only scp_rtc_rs varies (scp_pt_lat_ms is set once in adetect and never
+  // again), so recompute it when the pump rate actually changes.
+  static unsigned char lim_rs;
+  static uint32_t lim;
+  if(lim_rs != scp_rtc_rs){
+   lim_rs = scp_rtc_rs;
+   lim = (SCP_RTC_HZ() * (220UL + 2UL * scp_pt_lat_ms)) / 1000UL;  // scale-invariant ~720ms
+  }
   if(gap >= lim){
    if(!used && scp_rtc_rs != SCP_RS_IDLE) scp_rtc_setrate(SCP_RS_IDLE);
-  }else if(used < SCP_RING_LOW && scp_rtc_rs > scp_rs_for_frate((unsigned)scp_frate)){
+  // scp_rs_want IS scp_rs_for_frate(scp_frate): PT_Feed recomputes it from
+  // scp_frate on every format change, in the same block that sets
+  // scp_pt_ever, and this branch is gated on scp_pt_ever. Calling it again
+  // per tick just repeats a divide plus a search loop for the same answer.
+  }else if(used < SCP_RING_LOW && scp_rtc_rs > scp_rs_want){
    // FLOOR IS THE STREAM'S NEED, NOT THE GLOBAL RS_MIN (2026-08-24).
    // The ratchet used to run all the way to SCP_RS_MIN = 2048 Hz even when
    // scp_rs_for_frate() says 1024 Hz suffices -- at 11025 that is 689 f/s per

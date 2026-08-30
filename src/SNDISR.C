@@ -517,9 +517,19 @@ static int SNDISR_Interrupt( void )
      * bailing here keeps the feed at full rate and only thins out the heavy
      * render path. */
     if ( PT_Ops->render_div > 1 ) {
+        /* Countdown, not a modulo. render_div is loaded from the ops table,
+         * so the compiler cannot strength-reduce the % into a mask even
+         * though every value we ship is a power of two -- it emitted a
+         * 32-bit DIV (~40 cycles on a 486) on EVERY ISR entry purely to
+         * decide whether to render. Same 1-in-N rate, different phase
+         * (renders on the first tick rather than the Nth), which nothing
+         * depends on. */
         static unsigned rdiv_cnt;
-        if ( ++rdiv_cnt % (unsigned)PT_Ops->render_div )
+        if ( rdiv_cnt ) {
+            rdiv_cnt--;
             goto isrexit;
+        }
+        rdiv_cnt = (unsigned)PT_Ops->render_div - 1;
     }
 #endif
 
