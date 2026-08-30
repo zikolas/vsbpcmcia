@@ -227,12 +227,42 @@ struct SNDISR_s {
 
 static struct SNDISR_s isr = {NULL,-1,0,0};
 
-#ifndef DJGPP
-/* here malloc/free is superfast since it's a very simple "stack" */
-#define MALLOCSTATIC 0
-#else
-#define MALLOCSTATIC 1
-#endif
+/* ---- ISR scratch buffer -------------------------------------------------
+ * DecodeADPCM and cv_rate each need a temporary the size of one conversion
+ * pass, and both used to malloc()/free() it PER CALL in interrupt context.
+ * DJGPP's malloc is not reentrant, so that was a latent hazard as much as a
+ * cost. One linear block is taken at init instead, with the same uncommitted
+ * guard page pPCM gets, so an overrun faults loudly instead of corrupting.
+ *
+ * The busy flag exists because SETIF=1 lets a second SNDISR nest. The two
+ * users are never live at once within a pass -- DecodeADPCM has copied back
+ * and released before cv_rate runs -- but a nested pass could ask while the
+ * outer one holds the buffer. That case falls back to malloc, i.e. exactly
+ * the behaviour being replaced, so the fast path is allocation-free and the
+ * slow path is no worse than today. (This also replaces MALLOCSTATIC, whose
+ * two branches differed only in where the same temporary came from.) */
+static uint8_t *isr_scratch;
+static uint32_t isr_scratch_size;
+static volatile int isr_scratch_busy;
+
+static void *ISR_ScratchGet( uint32_t need, int *owned )
+{
+    if ( !isr_scratch_busy && isr_scratch && need <= isr_scratch_size ) {
+        isr_scratch_busy = 1;
+        *owned = 1;
+        return isr_scratch;
+    }
+    *owned = 0;
+    return malloc( need );
+}
+
+static void ISR_ScratchPut( void *p, int owned )
+{
+    if ( owned )
+        isr_scratch_busy = 0;
+    else
+        free( p );
+}
 
 #if SLOWDOWN
 
@@ -268,6 +298,7 @@ static int DecodeADPCM(uint8_t *adpcm, int bytes)
     int bits = VSB_GetBits();
     int outbytes;
     int outcount = 0;
+    int owned;
     uint8_t* pcm;
 
     if( ISR_adpcm_state.useRef ) {
@@ -279,8 +310,12 @@ static int DecodeADPCM(uint8_t *adpcm, int bytes)
 
     /* bits may be 2,3,4 -> outbytes = bytes * 4,3,2 */
     outbytes = bytes * ( 9 / bits );
-    pcm = (uint8_t*)malloc( outbytes );
-    dbgprintf(("DecodeADPCM( %X, %u ): malloc(%u)=%X, bits=%u\n", adpcm, bytes, outbytes, pcm, bits ));
+    pcm = (uint8_t*)ISR_ScratchGet( (uint32_t)outbytes, &owned );
+    dbgprintf(("DecodeADPCM( %X, %u ): scratch(%u)=%X, bits=%u\n", adpcm, bytes, outbytes, pcm, bits ));
+    /* the old code dereferenced this unchecked; a NULL deref in the sound ISR
+     * is a hard wedge, and 0 samples for one block is merely a dropout */
+    if ( !pcm )
+        return 0;
 
     switch ( bits ) {
     case 2:
@@ -308,7 +343,7 @@ static int DecodeADPCM(uint8_t *adpcm, int bytes)
     //assert(outcount <= outbytes);
     dbgprintf(("DecodeADPCM: outcount=%u\n", outcount ));
     memcpy( adpcm, pcm, outcount );
-    free(pcm);
+    ISR_ScratchPut( pcm, owned );
     return outcount;
 }
 #endif
@@ -346,26 +381,16 @@ static unsigned int cv_rate( PCM_CV_TYPE_S *pcmsrc, const unsigned int nSamples,
 	unsigned int ipi;
 	//unsigned int inpos = (srcrate < dstrate) ? (instep >> 1) : 0;
 	unsigned int inpos = 0;
-#if MALLOCSTATIC
-	static int maxsample = 0;
-	static PCM_CV_TYPE_S* buff = NULL;
-#else
 	PCM_CV_TYPE_S* buff;
-#endif
+	int buffowned;
 
 	if(!nSamples)
 		return 0;
 
-#if MALLOCSTATIC
-	if ( nSamples > maxsample ) {
-		if ( buff )
-			free( buff );
-		buff = (PCM_CV_TYPE_S*)malloc( (nSamples+2) * sizeof(PCM_CV_TYPE_S) );
-		maxsample = nSamples;
-	}
-#else
-	buff = (PCM_CV_TYPE_S*)malloc( (nSamples+2) * sizeof(PCM_CV_TYPE_S));
-#endif
+	buff = (PCM_CV_TYPE_S*)ISR_ScratchGet(
+	           (uint32_t)((nSamples+2) * sizeof(PCM_CV_TYPE_S)), &buffowned );
+	if ( !buff )
+		return 0;   /* was an unchecked deref; 0 leaves the block unconverted */
 	memcpy( buff, pcmsrc, (nSamples+2) * sizeof(PCM_CV_TYPE_S) );
 
 	pcmdst = pcmsrc;
@@ -393,9 +418,7 @@ static unsigned int cv_rate( PCM_CV_TYPE_S *pcmsrc, const unsigned int nSamples,
 
 	//dbgprintf(("cv_rate(src/dst rates=%u/%u chn=%u smpl=%u step=%x end=%x)=%u\n", srcrate, dstrate, channels, nSamples, instep, inend, pcmdst - pcmsrc ));
 
-#if !MALLOCSTATIC
-	free(buff);
-#endif
+	ISR_ScratchPut( buff, buffowned );
     //return ( pcmdst - pcmsrc ); /* v2.0: shift added to return "true" sample count */
 	return ( (pcmdst - pcmsrc) >> ( channels - 1 ) );
 }
@@ -1162,6 +1185,20 @@ bool SNDISR_Init( void *hAU, uint16_t vol )
     __dpmi_set_page_attr( info.handle, gvars.buffsize * 4096, 1, 0);
     isr.pPCM = NearPtr( info.address );
     dbgprintf(("SNDISR_Init: pPCM=%X\n", isr.pPCM ));
+
+    /* ISR scratch (see ISR_ScratchGet): same size and same guard page as the
+     * PCM buffer, which covers both users comfortably -- cv_rate needs
+     * (nSamples+2)*2 bytes for at most 2*samples samples, and DecodeADPCM's
+     * output is about one guest block. Failure is NOT fatal: ScratchGet then
+     * falls back to malloc, i.e. the previous behaviour. */
+    info.address = 0;
+    info.size = ( gvars.buffsize + 1 ) * 4096;
+    if ( __dpmi_allocate_linear_memory( &info, 1 ) != -1 ) {
+        __dpmi_set_page_attr( info.handle, gvars.buffsize * 4096, 1, 0);
+        isr_scratch = (uint8_t *)NearPtr( info.address );
+        isr_scratch_size = gvars.buffsize * 4096;
+        dbgprintf(("SNDISR_Init: scratch=%X size=%X\n", isr_scratch, isr_scratch_size ));
+    }
 
     /* allocate a 128k uncommitted region used for DMA mappings */
     info.address = 0;
