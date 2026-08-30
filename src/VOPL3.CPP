@@ -60,6 +60,7 @@ DBOPL::Chip * Chip;
 uint32_t TimerCtrlReg[2]; //if start 1 and 2 seperately we will miss one, so use 2 cache
 uint32_t ADLG_Volume[2];  /* AdLib Gold reg 9/10; todo: add ref to docs */
 uint16_t IndexReg[2];
+int SetupRate;            //rate Chip::Setup() last built its tables for (0 = never)
 uint8_t ADLG_CtrlEnable;  //seems not working for Miles Sound, don't use it
 #if NOSILENTGEN
 bool bWritten;
@@ -75,6 +76,7 @@ void VOPL3_Init(int samplerate)
 	opl3.ADLG_Volume[0] = 0x08;
 	opl3.ADLG_Volume[1] = 0x08;
 	opl3.Chip->Setup(samplerate);
+	opl3.SetupRate = samplerate;   /* tables now match this rate; see VOPL3_Reinit */
 #if NOSILENTGEN
 	opl3.bWritten = false;
 #endif
@@ -84,13 +86,42 @@ void VOPL3_Init(int samplerate)
 void VOPL3_Reinit(int samplerate)
 /////////////////////////////////
 {
+    /* Chip::Setup() is NOT a cheap poke -- it is a search. For each of 62
+     * attack rates it runs up to 16 passes of a loop bounded by
+     * originalAmount*2, where originalAmount = (AttackSamplesTable[i] <<
+     * shift) / scale; with shift up to 12 that is ~125k iterations for the
+     * slowest rate alone, and the whole call lands in the 10^6-10^7
+     * inner-iteration range (dbopl.cpp, Chip::Setup). It runs from
+     * DSP_Reset -- i.e. inside a trapped guest I/O write, with the guest
+     * blocked -- and bWritten is essentially always true while a game is
+     * playing FM, so a guest that DSP-resets per sound effect (SC2K, DOOM
+     * ~every 2s) paid it per effect. That is a large fraction of a second
+     * on a 486.
+     *
+     * Everything Setup() computes depends ONLY on the rate, and the rate is
+     * fixed for a session (AU_getfreq). So rebuild the tables only when the
+     * rate actually changes.
+     *
+     * Deliberate, documented delta: skipping Setup() also skips its five
+     * counter resets (noiseCounter/noiseValue/lfoCounter/vibratoIndex/
+     * tremoloIndex). Those are free-running LFO and noise PHASES, not
+     * guest-visible register state -- Setup() touches no channel or
+     * operator state at all -- so not re-zeroing them is inaudible. The
+     * alternative was splitting Chip::Setup inside dbopl.cpp, which is
+     * vendored DOSBox code we keep unmodified to hold merge cost down. */
 # if NOSILENTGEN
     if ( opl3.bWritten ) {
-        opl3.Chip->Setup(samplerate);
+        if ( samplerate != opl3.SetupRate ) {
+            opl3.Chip->Setup(samplerate);
+            opl3.SetupRate = samplerate;
+        }
         opl3.bWritten = false;
     }
 # else
-    opl3.Chip->Setup(samplerate);
+    if ( samplerate != opl3.SetupRate ) {
+        opl3.Chip->Setup(samplerate);
+        opl3.SetupRate = samplerate;
+    }
 # endif
 }
 #endif
