@@ -906,8 +906,13 @@ static int SNDISR_Interrupt( void )
         if ( IdxSm < samples )
             dbgprintf(("isr: %u samples to add\n", samples - IdxSm ));
 # endif
-        for( i = IdxSm; i < samples; i++ )
-            *(isr.pPCM + i*2+1) = *(isr.pPCM + i*2) = 0;
+        /* memset, not a per-sample walk: 16-bit silence is byte-zero, so this
+         * is one rep stosd instead of (samples-IdxSm) iterations of an index
+         * multiply and two 16-bit stores. On the render path that bound is
+         * render_cap - up to 512 frames per ISR tick on the VEW211. */
+        if ( IdxSm < samples )
+            memset( isr.pPCM + IdxSm * 2, 0,
+                    (size_t)(samples - IdxSm) * 2 * sizeof(int16_t) );
 #else
         samples = IdxSm;
 #endif
@@ -929,8 +934,13 @@ static int SNDISR_Interrupt( void )
         cv_bits_8_to_16( isr.pPCM, IdxSm + 1, 0 );
         IdxSm = cv_rate( isr.pPCM, IdxSm, 1, SB_Rate, freq );
         cv_channels_1_to_2( isr.pPCM, IdxSm );
-        for( i = IdxSm; i < samples; i++ )
-            *(isr.pPCM + i*2+1) = *(isr.pPCM + i*2) = 0;
+        /* memset, not a per-sample walk: 16-bit silence is byte-zero, so this
+         * is one rep stosd instead of (samples-IdxSm) iterations of an index
+         * multiply and two 16-bit stores. On the render path that bound is
+         * render_cap - up to 512 frames per ISR tick on the VEW211. */
+        if ( IdxSm < samples )
+            memset( isr.pPCM + IdxSm * 2, 0,
+                    (size_t)(samples - IdxSm) * 2 * sizeof(int16_t) );
     }
 
 #ifndef NOES1688
