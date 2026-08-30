@@ -279,6 +279,8 @@ static unsigned m8_rs_ct;                             // resync divider
 // open-loop error has no path to accumulate. SBEM8RS=1 re-enables the
 // closed loop for experiments; the 0x4F9 breadcrumb only exists there.
 static int      m8_norsync = 1;
+static int      m8_noflush;                           // SBEM8NF=1: no ring flush
+                                                      // on guest DSP reset
 // Deferred pitch: a rate change is a BOUNDARY in the ring, not an event.
 // DMX-class guests (DOOM) flap between the SFX rate and a low-rate silence
 // loop constantly; retargeting the voice instantly replayed ~60 ms of
@@ -705,6 +707,12 @@ static void M8_PT_Watchdog(void)                      // vsb.c: every guest DSP 
 {
  m8_watchdog();
  LOW_PokeB(0x4F9, ++m8_tel_rst);                      // guest DSP resets seen
+ // SBEM8NF=1 skips the ring flush. Each flush empties the ring, so the
+ // pump writes SILENCE into DRAM for a full lead while the voice loops
+ // over it = one click per guest DSP reset. DOOM resets ~every 2 s (30
+ // resets in a 1-minute run), which matches the observed 2 s tick exactly.
+ // Kept as a knob rather than a default until it is bench-decided: with no
+ // flush, audio the guest queued before the reset still plays out.
  // The flush IS required (235, 2026-08-30): dropping it to chase the
  // combined-stack tick DISTORTED SFX (stale ring content overlaps the new
  // sound) and did NOT stop the tick -- because the tick is NOT from the
@@ -713,7 +721,7 @@ static void M8_PT_Watchdog(void)                      // vsb.c: every guest DSP 
  // (TDKSYN + this backend) driving the EMU with uncoordinated PTR access.
  // The real fix is the TDKSYN pairing (cli/sti PTR interlock + NVOICE<=27),
  // not anything here. Keep the flush.
- m8_flush_gen++;
+ if(!m8_noflush) m8_flush_gen++;
  m8_pt_active = 0;
  m8_pt_rate = m8_pt_bits = m8_pt_channels = 0;
 }
@@ -1085,6 +1093,7 @@ static int MC8K_adetect(struct audioout_info_s *aui)
  if(getenv("SBEWRAI")) m8_wrai = 1;                   // auto-inc A/B (see knob note)
  if(getenv("SBEM8RS")) m8_norsync = 0;                // closed-loop resync A/B
  if(getenv("SBEM8WC")) m8_usewc = 1;                  // chip-clock pacing (unverified)
+ if(getenv("SBEM8NF")) m8_noflush = 1;                // no flush on DSP reset (A/B)
  { const char *pn = getenv("SBEM8PAN");               // LLRR hex pan trim
    if(pn && pn[0]){ long v = strtol(pn, NULL, 16);
      if(v > 0 && v <= 0xFFFFL){ m8_pan_l = (unsigned)((v >> 8) & 0xFF);
