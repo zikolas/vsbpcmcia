@@ -1005,17 +1005,36 @@ static int SNDISR_Interrupt( void )
             voicevol2 = ( ((voicevol2 | 0xF) + 1) * ((mastervol2 | 0xF) + 1) - 1) >> 8;
             if ( voicevol2 == 0xff ) voicevol2 = 0x100;
 #  endif
+            /* a and b are PROVABLY 0..65535 once the +32768 bias is applied
+             * (the scaled sample spans -32768..32767), so mix in UNSIGNED.
+             * Two reasons, and the first one is a bug:
+             *   - a*b reaches 65535*65535 = 0xFFFE0001, which OVERFLOWS a
+             *     signed 32-bit int. The wrapped product fed the screen-blend
+             *     branch a bogus term: e.g. a=b=50000 should mix to 58171 but
+             *     computed 189240 and hit the full-scale clamp instead. So on
+             *     loud FM-plus-digital material this clipped where it should
+             *     have mixed. Unsigned holds the product exactly.
+             *   - /256 and /32768 on a SIGNED value are not shifts; the
+             *     compiler has to emit the round-toward-zero bias sequence.
+             *     Unsigned makes them >>8 and >>15. Together with the three
+             *     IMULs (13-42 cycles each on a 486) this loop is the whole
+             *     per-sample cost of an FM build, so it is worth the care.
+             * The sample scaling stays SIGNED - the PCM is signed - and >>8
+             * there rounds toward -inf rather than toward zero: one LSB, at
+             * -90 dBFS. The non-FM path below already scales with >>8. */
             for( i = 0; i < samples * 2; i++ ) {
-                int a = (*(isr.pPCM+i) * (int)voicevol / 256) + 32768;    /* convert to 0-65535 */
-                int b = (*(pPCMOPL+i) * (int)midivol / 256 ) + 32768; /* convert to 0-65535 */
-                int mixed = (a < 32768 || b < 32768) ? ((a*b)/32768) : ((a+b)*2 - (a*b)/32768 - 65536);
-                *(isr.pPCM+i) = (mixed > 65535 ) ? 0x7fff : mixed - 32768;
+                unsigned a = (unsigned)(((*(isr.pPCM+i) * (int)voicevol) >> 8) + 32768);
+                unsigned b = (unsigned)(((*(pPCMOPL+i) * (int)midivol)  >> 8) + 32768);
+                unsigned mixed = (a < 32768 || b < 32768) ? ((a*b) >> 15)
+                                 : ((a+b)*2 - ((a*b) >> 15) - 65536);
+                *(isr.pPCM+i) = (mixed > 65535 ) ? 0x7fff : (int16_t)(mixed - 32768);
 #  if VOICELR
                 i++;
-                a = (*(isr.pPCM+i) * (int)voicevol2 / 256) + 32768;    /* convert to 0-65535 */
-                b = (*(pPCMOPL+i) * (int)midivol / 256 ) + 32768; /* convert to 0-65535 */
-                mixed = (a < 32768 || b < 32768) ? ((a*b)/32768) : ((a+b)*2 - (a*b)/32768 - 65536);
-                *(isr.pPCM+i) = (mixed > 65535 ) ? 0x7fff : mixed - 32768;
+                a = (unsigned)(((*(isr.pPCM+i) * (int)voicevol2) >> 8) + 32768);
+                b = (unsigned)(((*(pPCMOPL+i) * (int)midivol)   >> 8) + 32768);
+                mixed = (a < 32768 || b < 32768) ? ((a*b) >> 15)
+                        : ((a+b)*2 - ((a*b) >> 15) - 65536);
+                *(isr.pPCM+i) = (mixed > 65535 ) ? 0x7fff : (int16_t)(mixed - 32768);
 #  endif
             }
 # elif MIXERROUTINE==1
