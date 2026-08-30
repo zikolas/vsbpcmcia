@@ -1010,7 +1010,7 @@ static int SNDISR_Interrupt( void )
                 int b = (*(pPCMOPL+i) * (int)midivol / 256 ) + 32768; /* convert to 0-65535 */
                 int mixed = (a < 32768 || b < 32768) ? ((a*b)/32768) : ((a+b)*2 - (a*b)/32768 - 65536);
                 *(isr.pPCM+i) = (mixed > 65535 ) ? 0x7fff : mixed - 32768;
-#  if VOICERL
+#  if VOICELR
                 i++;
                 a = (*(isr.pPCM+i) * (int)voicevol2 / 256) + 32768;    /* convert to 0-65535 */
                 b = (*(pPCMOPL+i) * (int)midivol / 256 ) + 32768; /* convert to 0-65535 */
