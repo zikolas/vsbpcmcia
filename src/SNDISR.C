@@ -974,9 +974,15 @@ static int SNDISR_Interrupt( void )
     }
 #else
     /* min: 10*10-1=ff ; ff >> 8 = 0, max: 100*100-1=ffff ; ffff >> 8 = ff */
-    voicevol = ( (voicevol | 0xF + 1) * (mastervol | 0xF + 1) - 1) >> 8;
+    /* PRECEDENCE: '+' binds tighter than '|', so "v | 0xF + 1" was "v | 0x10",
+     * never (v | 0xF) + 1. The comment above states the intent exactly -- the
+     * operand range is meant to be 0x10..0x100 -- but 0xF0|0x10 is 0xF0, so
+     * the product topped out at (0xF0*0xF0-1)>>8 = 0xE0. The 0xff test on the
+     * next line was therefore UNREACHABLE, unity never happened, and every
+     * sample paid a multiply for a permanent ~1.2 dB of attenuation. */
+    voicevol = ( ((voicevol | 0xF) + 1) * ((mastervol | 0xF) + 1) - 1) >> 8;
     if ( voicevol == 0xff ) voicevol = 0x100;
-    midivol  = ( (midivol  | 0xF + 1) * (mastervol | 0xF + 1) - 1) >> 8;
+    midivol  = ( ((midivol  | 0xF) + 1) * ((mastervol | 0xF) + 1) - 1) >> 8;
     if ( midivol == 0xff ) midivol = 0x100;
 #endif
 
@@ -996,7 +1002,7 @@ static int SNDISR_Interrupt( void )
         if( IdxSm ) {
 # if MIXERROUTINE==0
 #  if VOICELR
-            voicevol2 = ( (voicevol2 | 0xF + 1) * (mastervol2 | 0xF + 1) - 1) >> 8;
+            voicevol2 = ( ((voicevol2 | 0xF) + 1) * ((mastervol2 | 0xF) + 1) - 1) >> 8;
             if ( voicevol2 == 0xff ) voicevol2 = 0x100;
 #  endif
             for( i = 0; i < samples * 2; i++ ) {
@@ -1023,15 +1029,26 @@ static int SNDISR_Interrupt( void )
             if ( (( pPCMOPL + samples * 2 ) - isr.pPCM ) * sizeof(int16_t) > isr.dwMaxBytes )
                 isr.dwMaxBytes = (( pPCMOPL + samples * 2 ) - isr.pPCM ) * sizeof(int16_t);
 # endif
-        } else
+        } else if ( midivol != 0x100 )   /* unity: x * 0x100 >> 8 == x, skip */
             for( i = 0; i < samples * 2; i++, pPCMOPL++ ) *pPCMOPL = ( *pPCMOPL * midivol ) >> 8;
     } else {
 #endif
         if( IdxSm ) {
 # if VOICELR
-            voicevol2 = ( (voicevol2 | 0xF + 1) * (mastervol2 | 0xF + 1) - 1) >> 8;
+            voicevol2 = ( ((voicevol2 | 0xF) + 1) * ((mastervol2 | 0xF) + 1) - 1) >> 8;
             if ( voicevol2 == 0xff ) voicevol2 = 0x100;
 # endif
+            /* Unity is the COMMON case -- both mixer sliders at max -- and the
+             * precedence fix above is what finally lets voicevol reach 0x100.
+             * x * 0x100 >> 8 == x, so this whole pass over samples*2 values is
+             * a no-op there; skipping it is free CPU at full volume. */
+            if ( voicevol == 0x100
+# if VOICELR
+                 && voicevol2 == 0x100
+# endif
+               ) {
+                pPCMOPL = isr.pPCM + samples * 2;  /* where the loop would end */
+            } else
             for( i = 0, pPCMOPL = isr.pPCM; i < samples * 2; i++, pPCMOPL++ ) {
                 *pPCMOPL = ( *pPCMOPL * voicevol ) >> 8;
 # if VOICELR
