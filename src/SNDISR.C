@@ -150,7 +150,11 @@ static unsigned char dbg_pt_maxblk, dbg_pt_exit;
 int SNDISR_PtBlkCap = 8;
 static void dbg_pt_why(unsigned char bit)
 {
-    if(!(dbg_pt_exit & bit)){ dbg_pt_exit |= bit; LOW_PokeB(0x4FA, dbg_pt_exit); }
+    if(!(dbg_pt_exit & bit)){ dbg_pt_exit |= bit;
+#if !RATEDIAG
+        LOW_PokeB(0x4FA, dbg_pt_exit);   /* 0x4FA belongs to RATEDIAG's direct-DAC rate */
+#endif
+    }
 }
 #endif
 
@@ -961,6 +965,26 @@ static int SNDISR_Interrupt( void )
          * x = src-smpl * dst-freq / dst-smpls
          */
         uint32_t SB_Rate = IdxSm * freq / samples;
+#if RATEDIAG
+        /* DIRECT-DAC RATE (the RATEDIAG blind spot). DSP cmd 0x10 never sets
+         * vsb.Started, so VSB_Running() is false, the block loop never runs,
+         * and VSB_GetSampleRate() -- sndisr's only route into CalcSampleRate,
+         * where the 0x4F2/0x4F3 readout lives -- is never reached. Throughout
+         * direct-DAC playback that pair therefore holds a STALE time-constant
+         * reading left by the guest's SB detection, which is very easy to
+         * misread as live.
+         * This path derives its own rate above, so publish it: same rate>>8
+         * units as 0x4F2, so the two are directly comparable, and 0 until
+         * direct-DAC has actually run (which is the provenance signal -- no
+         * spare byte exists for a flag).
+         * 0x4FA IS ON LOAN. It normally carries sc_es1688's FULL-reconfig
+         * count and, under PTDIAG, the tap loop's exit bitmap; both are
+         * frozen while this path runs, since neither the tap nor PT_Feed
+         * executes without vsb.Started. Those two already wrote the same byte
+         * as each other, so RATEDIAG taking it removes an existing ambiguity
+         * rather than creating one. Both are silenced under RATEDIAG. */
+        LOW_PokeB( 0x4FA, (uint8_t)( SB_Rate >> 8 ) );
+#endif
 
         /* v2.0: cv_rate() now expects an extra, final sample */
         *(pDest + IdxSm) = *(pDest + IdxSm - 1);

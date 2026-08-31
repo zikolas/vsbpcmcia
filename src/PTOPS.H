@@ -91,6 +91,20 @@ extern struct fork_opts_s FOpts;
  * probing any more: a backend runs only when it is asked for by name. */
 int PTOPS_CardIs( const char *id );
 
+/* RATEDIAG: measure what the guest actually asks of the DSP rate path (Epic
+ * Pinball "Very High" played ~1.9x slow). Lends 0x4F2/0x4F3/0x4F6 to vsb.c's
+ * rate readout and 0x4FA to sndisr.c's DIRECT-DAC rate, silencing every other
+ * writer of those four slots.
+ *
+ * IT LIVES HERE, NOT IN config.h, ON PURPOSE. sc_vew211.c and sc_scp55.c do
+ * NOT include config.h, so a guard written against a config.h macro compiles
+ * to the UNGUARDED branch in those two files -- silently, because the C
+ * preprocessor evaluates an undefined name in #if as 0. That is exactly how
+ * the first cut of this switch shipped inert in sc_es1688.c. Every backend
+ * already includes ptops.h, so putting it here makes the guards real.
+ * Set to 0 to ship. */
+#define RATEDIAG 1
+
 /* PTDIAG: passthrough-tap forensics build (short-SFX stretch, 2026-08-21).
  * Borrows two 0x4F0 slots from sc_vew211's reconfig counters, which are
  * silenced while it is on. Set to 0 (or drop the branch) to ship. */

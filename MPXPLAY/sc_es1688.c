@@ -49,7 +49,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include "config.h"       // build switches (RATEDIAG owns the 4F2/4F3/4F6 slots)
+#include "config.h"       // NOES1688 build switch (RATEDIAG lives in ptops.h)
 #include "hostsvc.h"      // toolchain compat: LOW_*, inportb (see the header)
 #include "hostisr.h"      // chained/iret PM interrupt vectors, both builds
 #include "au_cards.h"
@@ -343,7 +343,11 @@ static void es_pt_reconfig(unsigned rate, unsigned bits, unsigned channels)
  es_pt_rate = rate; es_pt_bits = bits; es_pt_channels = channels;
  es_hw_rate = rate; es_hw_bits = bits; es_hw_channels = channels;  // chip armed with this format
  es_last_drain = LOW_PeekD(0x46C);                        // fresh arm = draining
+#if !RATEDIAG
  LOW_PokeB(0x4FA, ++es_tel_recfg);                    // telemetry (FULL reconfigs only)
+#else
+ ++es_tel_recfg;   // 0x4FA is on loan to RATEDIAG's direct-DAC rate readout
+#endif
  if(es_adaptive){                             // FEED-FORWARD: size the pump to this stream, re-arm.
   unsigned fifob = brate * ((bits >= 16) ? 2U : 1U);  // true FIFO drain bytes/sec (16-bit doubles it)
   es_rs_want = es_rs_for_brate(fifob);        // feedback ratchets faster from here if the game starves it

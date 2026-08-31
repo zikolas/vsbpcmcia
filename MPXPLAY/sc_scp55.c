@@ -322,11 +322,12 @@ static void scp_codec_config(unsigned rate, unsigned bits, unsigned channels)
  // below, stepping is near-transparent at small ratios, so the trade inverts:
  // step whenever the rates differ at all and pitch is always correct.
  scp_step_on = (!scp_no_step && scp_frate != (unsigned long)rate) ? 1 : 0;
-#if !PTDIAG
+#if !PTDIAG && !RATEDIAG
  LOW_PokeB(0x4F2, (unsigned char)(rate >> 8));  // guest rate >> 8 (pitch-bug forensics)
  LOW_PokeB(0x4FA, ++scp_tel_recfg);          // FULL reconfigs only
 #else
- (void)scp_tel_recfg;   // 0x4F2/0x4FA are on loan to the PT-tap forensics
+ (void)scp_tel_recfg;   // 0x4F2/0x4FA on loan: to the PT-tap forensics under
+                        // PTDIAG, to the rate readouts under RATEDIAG
 #endif
 }
 static void scp_codec_stop(void)
@@ -388,7 +389,10 @@ static void scp_pio_pump(void)
    if(sr & 0x10){
     static unsigned char scp_tel_ser;
     scp_fr_acc = hz * SCP_BURST_FRAMES;
-    LOW_PokeB(0x4F6, ++scp_tel_ser);         // SER catch-up count
+    ++scp_tel_ser;
+#if !RATEDIAG
+    LOW_PokeB(0x4F6, scp_tel_ser);           // SER catch-up count
+#endif                                       // (0x4F6 on loan to RATEDIAG)
    }
    outportb(cb+VC_SR, 0); }                           // clear SER/INT for the next interval
  while(scp_fr_acc >= hz && guard < SCP_BURST_FRAMES){
@@ -520,7 +524,11 @@ static unsigned char es_tel_drop;                     // 0x4FE: ring-full feed c
 static void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, unsigned bits, unsigned channels)
 {
  unsigned wr;
- if(scp_pt_feed_busy){ LOW_PokeB(0x4F3, ++es_reentry); return; }
+ if(scp_pt_feed_busy){ ++es_reentry;
+#if !RATEDIAG
+  LOW_PokeB(0x4F3, es_reentry);              // 0x4F3 on loan to RATEDIAG
+#endif
+  return; }
  scp_pt_feed_busy = 1;
  ++es_tel_feed16;
  LOW_PokeB(0x4FB, (unsigned char)es_tel_feed16);

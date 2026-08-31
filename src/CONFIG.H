@@ -40,12 +40,9 @@
 #define NOFM      1   /* strip DOSBox OPL3 emulation; leave 0x388 to the hardware */
 #endif
 
-/* RATEDIAG: measure what the guest actually asks for at the DSP rate path
- * (Epic Pinball "Very High" plays ~1.9x slow on every backend). Lends the
- * 0x4F2/0x4F3/0x4F6 scratch slots to VSB.C, silencing sc_es1688.c's stage
- * markers and sndisr.c's PTDIAG block counter -- all stale forensics from
- * hunts that closed. Set to 0 to ship. */
-#define RATEDIAG  1
+/* RATEDIAG moved to src/ptops.h -- sc_vew211.c and sc_scp55.c do not include
+ * this header, so a guard written against a macro defined here compiles to
+ * the unguarded branch in those two files without a warning. */
 
 #define SB16      1   /* 1=support SB16 */
 #define ADPCM     1   /* 1=support ADPCM */

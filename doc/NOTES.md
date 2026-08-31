@@ -61,7 +61,7 @@ Cleared before a test with 16 zero bytes. All counters wrap.
 | 0x4F6 | VEW211 build: SER catch-up count (codec-starvation refills -- pump ticks were lost to the guest; sustained growth in-game = tick loss, benign at idle); ES build: 0xAA once ES1688_start ran |
 | 0x4F7/0x4F9 | SNDISR tick counter, 16-bit lo/hi |
 | 0x4F8 | ES1688_irq calls (8-bit; tracks 0x4F7 lo) |
-| 0x4FA | FULL chip reconfigs (fast-resumes not counted) |
+| 0x4FA | FULL chip reconfigs (fast-resumes not counted). Under `RATEDIAG`: the direct-DAC inferred rate, see below |
 | 0x4FB/0x4FF | PT_Feed calls, 16-bit lo/hi |
 | 0x4FC/0x4FD | TSC boxes: longest outermost ISR pass, 256-cycle units; no-TSC boxes: PT bytes >> 4, 16-bit |
 | 0x4FE | PT_Feed ring-overfeed clamps (goal: 0) |
@@ -229,6 +229,28 @@ the two `sc_vew211.c` pokes whose slots it borrows:
 |---|---|
 | 0x4F2 | most guest DMA blocks consumed in ONE tick. **1 = never more than one** |
 | 0x4FA | bitmap of loop-exit reasons: 01 guest never re-armed, 02 sample bound, 04 ring full (correct backpressure), 08 partial block, 10 a tick took 2+ blocks |
+
+`RATEDIAG` (`src/ptops.h`) measures what the guest actually asks of the DSP
+rate path, and silences every other writer of the slots it borrows -- the
+`sc_es1688.c` stage markers, `sndisr.c`'s PTDIAG block counter and exit
+bitmap, and `sc_es1688.c`'s reconfig count:
+
+| slot | meaning |
+|---|---|
+| 0x4F2 | rate >> 8 as computed from the guest's time constant (169=43478, 88=22727, 43=11025) |
+| 0x4F3 | the raw time constant the guest wrote |
+| 0x4F6 | sticky OR: 01 computed in high-speed, 02 computed out of it, 04 the ceiling clamped the value, 08 stereo at compute time |
+| 0x4FA | direct-DAC (DSP cmd 0x10) inferred rate >> 8; **0 = that path has not run** |
+
+0x4FA exists because the other three cannot see direct-DAC at all. Cmd 0x10
+does not set `vsb.Started`, so `VSB_Running()` is false, `sndisr.c`'s block
+loop never entered, and `VSB_GetSampleRate()` -- its only route into
+`CalcSampleRate`, where 0x4F2/0x4F3/0x4F6 are written -- never called. Through
+an entire direct-DAC session those three hold whatever the game's SB detection
+left there at startup, which reads exactly like a live measurement. Compare
+0x4FA against 0x4F2 directly: same units, different derivation (0x4FA is
+`IdxSm * freq / samples`, an inference from how many samples arrived per tick,
+not a time constant).
 
 `test/test05.asm` (derived from upstream's TEST01) reproduces the block pattern
 without the game, in 3 KB -- so it runs with comrade resident and the whole
