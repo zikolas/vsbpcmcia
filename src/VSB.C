@@ -601,8 +601,24 @@ static void DSP_DoCommand( uint32_t flags )
         vsb.MixerRegs[SB_MIXERREG_IRQ_STATUS] &= ~0x7;
         vsb.Auto = ( vsb.dsp_cmd == SB_DSP_8BIT_OUT_AUTO || vsb.dsp_cmd == SB_DSP_8BIT_OUT_AUTO_HS );
         vsb.Bits = 8;
-        if ( vsb.DSPVER < 0x400 )
-            vsb.HighSpeed = ( vsb.dsp_cmd == SB_DSP_8BIT_OUT_SNGL_HS || vsb.dsp_cmd == SB_DSP_8BIT_OUT_AUTO_HS );
+        if ( vsb.DSPVER < 0x400 ) {
+            /* CalcSampleRate's time-constant ceiling depends on HighSpeed
+             * (212 -> 22727 Hz at normal speed, 234 -> 45454 in high-speed),
+             * but the cached rate never tracked the flag: a rate computed in
+             * one DSP state stayed in force in the other, and the cache is
+             * only ever recomputed from the sndisr tap loop. A stream that
+             * crosses the transition therefore plays at the wrong rate until
+             * the next cmd 0x40. Measured on a PC110: Epic Pinball writes
+             * time constant 224 (31250 Hz byte rate, 15625/channel in
+             * stereo); computed out of high-speed that clamps to 212 ->
+             * 11363, a 1.4x drag that the passthrough tap's drain pacing
+             * spreads from pitch to the guest's whole timeline. Same
+             * treatment the stereo bit already gets in VSB_Mixer_Write. */
+            uint8_t hs = ( vsb.dsp_cmd == SB_DSP_8BIT_OUT_SNGL_HS || vsb.dsp_cmd == SB_DSP_8BIT_OUT_AUTO_HS );
+            if ( hs != vsb.HighSpeed )
+                vsb.SampleRate = 0;
+            vsb.HighSpeed = hs;
+        }
         vsb.Signed = false;
         vsb.Silent = false;
         vsb.Started = true; //start transfer
@@ -960,6 +976,8 @@ void VSB_Stop()
 ///////////////
 {
     vsb.Started = false;
+    if ( vsb.HighSpeed )
+        vsb.SampleRate = 0;   /* the rate ceiling drops with the flag */
     vsb.HighSpeed = false;
     /* v1.8: no need to reset position */
     //vsb.Position = 0;
