@@ -306,3 +306,51 @@ or the guest's own re-arm latency exceeds a tick. **Measure the live tick rate
 before designing a fix**: read the 16-bit counter (`0x4F7` lo / `0x4F9` hi)
 twice a known interval apart *while a sound plays* -- it wraps every 32 s at
 2048 Hz, and idle throttles to 32 Hz so an idle read tells you nothing.
+
+## The render tail, and the formats that reach it (`test/test06.asm`)
+
+`sndisr.c` gates the passthrough tap on
+
+```c
+pt_block = pt_mode && VSB_GetBits() >= 8;
+```
+
+so **ADPCM** (2/3/4 bits) fails it, and **direct-DAC** (DSP cmd 10h) never sets
+`vsb.Started` at all -- `VSB_Running()` is false, the block loop never runs.
+Both therefore leave `pt_took` at 0, the ISR does not take its `goto isrexit`
+shortcut, and the whole render tail executes: `DecodeADPCM`, `cv_rate`, the
+silence `memset`, the volume pass, `AU_writedata`.
+
+That tail is the least-exercised code in the driver and TEST01..TEST05 cannot
+reach it -- they are all 8-bit or wider, so they all take the tap. TEST06
+drives both formats:
+
+    TEST06 [mode] [rate] [seconds] [blocksize] [irq]
+      mode 0   4-bit ADPCM single-cycle (DSP 75h), DMA + SB IRQ
+      mode 1   direct-DAC (DSP 10h), no DMA, no IRQ, tick-paced
+
+Mode 0 is the better coverage run: it reaches `DecodeADPCM` *and* `cv_rate`,
+i.e. both users of the ISR scratch buffer. Mode 1 is the minimal reproducer
+for the wedge below.
+
+**It doubles as a wedge reproducer.** On a passthrough backend `samples` is
+forced to `PT_MODE_SAMPLES` (1024) whatever the guest supplied, and
+`sc_es1688`, `sc_vew211` and `sc_scp55` all register `NULL` for the ops
+table's `depth` hook -- so sndisr's nesting limiter
+
+```c
+if ( PT_Ops->depth && PT_Ops->depth() > 3 ) goto isrexit;
+```
+
+short-circuits and never runs on those three. Watch while it runs:
+
+| slot | meaning |
+|---|---|
+| 0x4F0 | max SNDISR nesting depth. **Healthy = 1**; climbing = the tail is overrunning its tick |
+| 0x4F1 | render-guard skips. **Healthy = 0**; nonzero confirms re-entry |
+| 0x4FA | RATEDIAG builds, mode 1: direct-DAC inferred rate >> 8, should track the `rate` argument |
+
+On an SB-compatible card this is a driver-only concern -- a direct-DAC guest
+needs no DMA, so it can simply talk to the real chip with the enabler alone
+and no vsbpcm loaded. On the CS4231A, CS4248 and EMU8200 cards there is no SB
+silicon to fall back to, so the render tail is the only path and this matters.
