@@ -141,6 +141,8 @@ static uint8_t  tp_ctl_was_on = 0;           // enable state found at detect
 //   4F2/3 = ISR tick count u16     4F4 = reenter (guard-skip) count
 //   4F5 = last SR seen at claim    4F6 = heal count (start+watchdog)
 //   4F8/9 = last getpos u16        4FA = consecutive futile heals
+// 4F2/3, 4F6 and 4FA are LOANED to RATEDIAG (src/ptops.h) and are not
+// published while it is 1 -- build with RATEDIAG 0 to diagnose this card.
 //   4FB = depth high-water         4FC = IRQ0 polls per tick (last)
 //   4FD = polls-per-tick high-water (the IRQ0-saturation meter)
 #define TP_PH_CLAIM  1   /* irq_routine claimed the interrupt      */
@@ -161,7 +163,7 @@ static uint8_t *tp_iac = NULL;   /* NearPtr(0x4F0), set in adetect */
 static volatile uint8_t tp_tick8;   /* guardian's own tick clock, never loaned */
 static uint8_t tp_tel_heal;         /* heal count; published unless on loan */
 #if RATEDIAG
-#define TP_IAC_R(off, v)  ((void)0)      /* 0x4F2/0x4F3/0x4F6 on loan */
+#define TP_IAC_R(off, v)  ((void)0)      /* 0x4F2/0x4F3/0x4F6/0x4FA on loan */
 #else
 #define TP_IAC_R(off, v)  TP_IAC(off, v)
 #endif
@@ -358,7 +360,7 @@ static void tp_guardian(void)
    if(tp_tick8 == tp_g_healtick) { if(tp_g_futile < 255) tp_g_futile++; }
    else tp_g_futile = 0;
    tp_g_healtick = tp_tick8;
-   TP_IAC(0x0A, (tp_g_t2 << 4) | (tp_g_futile > 15 ? 15 : tp_g_futile));
+   TP_IAC_R(0x0A, (tp_g_t2 << 4) | (tp_g_futile > 15 ? 15 : tp_g_futile));
    // codec begging, nobody serviced: clear any mask on our line (REAL
    // IMRs -- UntrappedIO from PM context reads real hardware, unlike a
    // V86 read), fire safe specific EOIs, re-arm the edge
@@ -410,7 +412,7 @@ static void tp_guardian(void)
     if(tp_g_t2 < 15) tp_g_t2++;
    }
    TP_HEAL();
-   TP_IAC(0x0A, (tp_g_t2 << 4) | (tp_g_futile > 15 ? 15 : tp_g_futile));
+   TP_IAC_R(0x0A, (tp_g_t2 << 4) | (tp_g_futile > 15 ? 15 : tp_g_futile));
    tp_g_begging = 0; tp_g_frozen = 0;
   }else{
    tp_g_begging = 0;

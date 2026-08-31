@@ -103,7 +103,7 @@ int PTOPS_CardIs( const char *id );
  * the first cut of this switch shipped inert in sc_es1688.c. Every backend
  * already includes ptops.h, so putting it here makes the guards real.
  * Set to 0 to ship. */
-#define RATEDIAG 1
+#define RATEDIAG 0
 
 /* PTDIAG: passthrough-tap forensics build (short-SFX stretch, 2026-08-21).
  * Borrows two 0x4F0 slots from sc_vew211's reconfig counters, which are
