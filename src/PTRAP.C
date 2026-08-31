@@ -263,10 +263,42 @@ static void RM_TrapHandler( __dpmi_regs * regs)
         }
     }
 
-    /* this should never be reached. */
+    /* A port we do not own. That IS reachable, despite what this comment used
+     * to say -- it is only unreachable while vsbhda is the sole QPI client.
+     *
+     * QPI has ONE global trap-handler slot (fn 1A07) but traps ports
+     * individually (fn 1A09), so the LAST client to register owns dispatch
+     * for EVERY trapped port -- including ports another client trapped and is
+     * still waiting on. VSBPCM loads last in the MPUSHIM stack, so MPUSHIM's
+     * MPU ports 330/331 arrive here, and returning carry-set dropped every
+     * MIDI byte before it could reach MPUSHIM's real-mode blob. Measured:
+     * real-mode MIDI (DOSMid) dead while protected-mode MIDI (DOOM) worked,
+     * because the PM side goes through HDPMI32i, which registers per client
+     * and has no shared slot.
+     *
+     * Chain to whoever held the slot before us instead. Only genuinely
+     * unowned ports get here -- everything in PortTable returned above -- so
+     * the fast path is untouched.
+     *
+     * TWO LIMITS, both deliberate and both worth knowing before relying on
+     * this as a general chain:
+     *  - It is BYTE-ONLY. A word/dword trap is decomposed at the top of this
+     *    function and its unowned bytes go to UntrappedIO_*, i.e. to real
+     *    hardware, not here. MPU MIDI is byte-wise so it does not care; a
+     *    client trapping a word-accessed port would.
+     *  - Only AL is taken back, so a chained word/dword IN could not return
+     *    its value anyway. Consistent with the first limit.
+     * The discarded alternative was to pass unowned ports straight to real
+     * hardware (UntrappedIO_*), which is wrong here: there is no MPU behind
+     * 330h, only MPUSHIM's emulation.
+     *
+     * COST: one PM->RM simulate per unowned trapped access. At MIDI byte
+     * rates that is ~1 per 320us worst case, affordable on the 486SX floor.
+     * Note this nests a simulate INSIDE a real-mode callback, on the
+     * switched ISR stack -- HDPMI and QPIEMU are expected to tolerate it,
+     * but that is the part of this change only a bench can confirm. */
 
-    dbgprintf(("RM_TrapHandler: unhandled port=%x val=%x out=%x (OldCB=%x:%x)\n", regs->x.dx, regs->h.al, regs->h.cl, QPI_OldCallback.v86.segment, QPI_OldCallback.v86.offset ));
-#if 0
+    dbgprintf(("RM_TrapHandler: unowned port=%x val=%x out=%x -> chain (OldCB=%x:%x)\n", regs->x.dx, regs->h.al, regs->h.cl, QPI_OldCallback.v86.segment, QPI_OldCallback.v86.offset ));
     if ( QPI_OldCallback.v86.segment ) {
         __dpmi_regs r = *regs;
         r.x.ip = QPI_OldCallback.v86.offset;
@@ -274,16 +306,9 @@ static void RM_TrapHandler( __dpmi_regs * regs)
         __dpmi_simulate_real_mode_procedure_retf(&r);
         regs->x.flags |= r.x.flags & CPU_CFLAG;
         regs->h.al = r.h.al;
+    } else {
+        regs->x.flags |= CPU_CFLAG;   /* nobody behind us: "not handled" */
     }
-#elif 0
-    if (regs->h.cl & TRAPF_OUT)
-        UntrappedIO_OUT( regs->x.dx, regs->h.al );
-    else
-        regs->h.al = UntrappedIO_IN( regs->x.dx );
-    regs->x.flags &= ~CPU_CFLAG;
-#else
-    regs->x.flags |= CPU_CFLAG;
-#endif
     return;
 }
 
