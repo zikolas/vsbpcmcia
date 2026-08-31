@@ -16,6 +16,7 @@
 #include "VMPU.H"
 #endif
 #include "AU.H"
+#include "HOSTSVC.H"   /* LOW_PokeB (RATEDIAG) */
 
 /* compatibility switches */
 #define FASTCMD14 1  /* 1=DSP cmd 0x14 for SB detection is handled instantly */
@@ -460,6 +461,7 @@ static int CalcSampleRate( uint16_t value )
 {
     int rc;
     uint8_t limit;
+    uint8_t clamped;
     unsigned int channels = 1;
 
     if( vsb.DSPVER < 0x300 )
@@ -475,9 +477,25 @@ static int CalcSampleRate( uint16_t value )
             limit = ( vsb.Bits == 2 ? 165 : (vsb.Bits == 3 ? 179 : (vsb.Bits == 4 ? 172 : 212)));
     }
 
+    clamped = ( value > limit ) ? 1 : 0;
     value = min(value, limit);
     //rc = 1000000 / (( 256 - value ) * channels );
     rc = 256000000u / (( 65536u - (value << 8) ) * channels );
+#if RATEDIAG
+    /* 0x4F2 = rate>>8 (169=43478, 88=22727, 43=11025); 0x4F3 = the raw time
+     * constant the guest wrote; 0x4F6 = sticky OR: 01 computed in high-speed,
+     * 02 computed out of it, 04 the ceiling actually reduced the value,
+     * 08 stereo (SB Pro divides by channels) at compute time. */
+    {
+        static uint8_t seen;
+        LOW_PokeB( 0x4F2, (uint8_t)( rc >> 8 ) );
+        LOW_PokeB( 0x4F3, (uint8_t)vsb.bTimeConst );
+        seen |= vsb.HighSpeed ? 0x01 : 0x02;
+        if ( clamped ) seen |= 0x04;
+        if ( channels >= 2 ) seen |= 0x08;
+        LOW_PokeB( 0x4F6, seen );
+    }
+#endif
     return rc;
 }
 

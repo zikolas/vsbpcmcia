@@ -49,6 +49,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "config.h"       // build switches (RATEDIAG owns the 4F2/4F3/4F6 slots)
 #include "hostsvc.h"      // toolchain compat: LOW_*, inportb (see the header)
 #include "hostisr.h"      // chained/iret PM interrupt vectors, both builds
 #include "au_cards.h"
@@ -113,6 +114,18 @@ static void DPMI_CallOldISR(DPMI_ISR_HANDLE *h){ (void)h; }   // still unused: I
 static uint16_t es_tel_feed16;
 static unsigned long es_tel_bytes;
 static unsigned char es_tel_irq;
+// Stage/reentry/start markers: stale forensics from the reentrancy #GP hunt.
+// A RATEDIAG build lends their scratch slots to VSB.C's rate measurement.
+#if RATEDIAG
+#define ES_DIAG_STAGE(v)    ((void)0)
+#define ES_DIAG_REENTRY(v)  ((void)0)
+#define ES_DIAG_START(v)    ((void)0)
+#else
+#define ES_DIAG_STAGE(v)    LOW_PokeB(0x4F2,(v))
+#define ES_DIAG_REENTRY(v)  LOW_PokeB(0x4F3,(v))
+#define ES_DIAG_START(v)    LOW_PokeB(0x4F6,(v))
+#endif
+
 #define ES_DEF_BASE   0x220
 #define RING_BYTES    8192U         // MUST keep card_dmasize (=RING*4) within SBEMU's MAIN_PCM
 #define RING_MASK     (RING_BYTES-1)
@@ -432,8 +445,8 @@ static unsigned char es_reentry;   // DIAG: reentrant PT_Feed calls skipped (0x4
 static void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, unsigned bits, unsigned channels)
 {
  unsigned wr;
- LOW_PokeB(0x4F2, 1);                                 // DIAG stage: entry
- if(es_pt_feed_busy){ LOW_PokeB(0x4F3, ++es_reentry); return; }   // re-entered -> skip
+ ES_DIAG_STAGE(1);                                 // DIAG stage: entry
+ if(es_pt_feed_busy){ ES_DIAG_REENTRY(++es_reentry); return; }   // re-entered -> skip
  es_pt_feed_busy = 1;
  ++es_tel_feed16;                                              // telemetry (16-bit, lo/hi)
  LOW_PokeB(0x4FB, (unsigned char)es_tel_feed16);
@@ -446,12 +459,12 @@ static void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, u
  if(!es_pt_active || rate != es_pt_rate || bits != es_pt_bits || channels != es_pt_channels)
  {
   uint8_t f = DPMI_DisableInterrupt();         // IF off: SNDISR can't re-enter during the long reconfig
-  LOW_PokeB(0x4F2, 2);                                // DIAG stage: reconfig
+  ES_DIAG_STAGE(2);                                // DIAG stage: reconfig
   es_pt_reconfig(rate, bits, channels);
   es_pt_active = 1; es_pt_ever = 1;            // passthrough confirmed -> self-pacer runs
   DPMI_RestoreInterrupt(f);
  }
- LOW_PokeB(0x4F2, 3);                                 // DIAG stage: ring fill
+ ES_DIAG_STAGE(3);                                 // DIAG stage: ring fill
  wr = ring_wr;
  // Ring overrun guard: never write past the read pointer. sndisr.c paces the
  // tap by ES1688_PT_Space(), so this should never clamp (0x4FE counts if it
@@ -476,9 +489,9 @@ static void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, u
   wr = (wr + chunk) & RING_MASK;
  }
  ring_wr = wr;
- LOW_PokeB(0x4F2, 4);                                 // DIAG stage: pump
+ ES_DIAG_STAGE(4);                                 // DIAG stage: pump
  es_fifo_pump();   // keep the FIFO fed inline, so it never drains during the fill
- LOW_PokeB(0x4F2, 5);                                 // DIAG stage: done
+ ES_DIAG_STAGE(5);                                 // DIAG stage: done
  es_pt_feed_busy = 0;
 }
 
@@ -674,7 +687,7 @@ static void es_i5_remove(void)
 static void ES1688_start(struct audioout_info_s *aui)
 {
  es1688_card_s *card = aui->card_private_data;
- LOW_PokeB(0x4F6, 0xAA);         // DIAG: start ran + poke mechanism works
+ ES_DIAG_START(0xAA);         // DIAG: start ran + poke mechanism works
  ring_wr = ring_rd = 0;
  es_base = card->base;
  es_irqtone = getenv("IRQTONE") ? 1 : 0;  // diag: feed a tone from the IRQ handler

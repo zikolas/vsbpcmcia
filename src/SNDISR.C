@@ -908,7 +908,9 @@ static int SNDISR_Interrupt( void )
     if ( pt_mode ) {
         if ( pt_blocks > dbg_pt_maxblk ) {
             dbg_pt_maxblk = (unsigned char)pt_blocks;
-            LOW_PokeB(0x4F2, dbg_pt_maxblk);
+#if !RATEDIAG
+            LOW_PokeB(0x4F2, dbg_pt_maxblk);   /* 0x4F2 belongs to VSB.C under RATEDIAG */
+#endif
         }
         if ( pt_blocks >= 2 ) dbg_pt_why( PTD_MULTI );
         /* Attribute an exit reason only when the loop actually CONSUMED
