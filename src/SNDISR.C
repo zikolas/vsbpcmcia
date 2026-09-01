@@ -120,6 +120,20 @@ void SNDISR_dbg_exit(void)
 }
 void SNDISR_dbg_reenter(void){ LOW_PokeB(0x4F1, ++dbg_skips); }
 
+/* BLOCKS-PER-TICK CAP -- NOT a diagnostic, despite having been written
+ * inside the PTDIAG gate. `pt_space` is sized by the ring LATENCY TARGET
+ * (~1.3 KB at SBEPTLAT=60), not by what one tick can drain (~11 bytes at
+ * 2048 Hz), so a guest that re-arms inside its own SB ISR lets one tick
+ * swallow ~100 twelve-byte blocks -- each an `int 8+irq` round trip plus ~10
+ * trapped I/O ops. That is milliseconds inside a 0.49 ms tick, the next ticks
+ * nest, and the private ISR stack marches into .data. Measured: it hard-hung
+ * the T2130CT. 0 = uncapped (the wedge).
+ *
+ * It lives OUTSIDE #if PTDIAG so that turning the forensics off -- which
+ * ptops.h used to recommend for shipping -- cannot silently ship the wedge.
+ * Only the counters and the exit bitmap are diagnostics. */
+int SNDISR_PtBlkCap = 8;
+
 #if PTDIAG
 /* PT-TAP FORENSICS (short-SFX stretch, 2026-08-21). The open question is why
  * the tap loop stops after ~one guest DMA block per tick: Duke Nukem II's
@@ -138,16 +152,6 @@ void SNDISR_dbg_reenter(void){ LOW_PokeB(0x4F1, ++dbg_skips); }
 #define PTD_MULTI    0x10   /* at least one tick consumed 2+ blocks */
 #define PTD_BLKCAP   0x20   /* SNDISR_PtBlkCap stopped the tick */
 static unsigned char dbg_pt_maxblk, dbg_pt_exit;
-
-/* BLOCKS-PER-TICK CAP. Bench knob (SBEPTBLK), and probably the shape of the
- * real fix. `pt_space` is sized by the ring LATENCY TARGET (~1.3 KB at
- * SBEPTLAT=60), not by what one tick can drain (~11 bytes at 2048 Hz), so a
- * guest that re-arms inside its own SB ISR lets one tick swallow ~100 twelve-
- * byte blocks -- each an `int 8+irq` round trip plus ~10 trapped I/O ops.
- * That is milliseconds inside a 0.49 ms tick, the next ticks nest, and the
- * private ISR stack marches into .data. Measured: it hard-hung the T2130CT.
- * 0 = uncapped (the wedge); the PTDIAG default is deliberately conservative. */
-int SNDISR_PtBlkCap = 8;
 static void dbg_pt_why(unsigned char bit)
 {
     if(!(dbg_pt_exit & bit)){ dbg_pt_exit |= bit; LOW_PokeB(0x4FA, dbg_pt_exit); }
@@ -183,10 +187,11 @@ void PTOPS_Register( const struct pt_ops_s *ops )
     PT_Ops = ops;
     SNDISR_PassThru = ( ops->flags & PTF_TAP ) ? 1 : 0;
     SNDISR_HasTsc = dbg_tsc_check();    /* adetect context, never ISR */
-#if PTDIAG
+    /* SBEPTBLK tunes the cap, or disables it at 0. Out of the PTDIAG gate
+     * with the cap itself, so a shipping build can still be run uncapped
+     * deliberately rather than losing the cap by accident. */
     { const char *e = getenv("SBEPTBLK");
       if(e){ int n = atoi(e); if(n >= 0 && n <= 255) SNDISR_PtBlkCap = n; } }
-#endif
 }
 
 bool _SND_InstallISR( uint8_t, int(*ISR)(void) );
@@ -471,8 +476,9 @@ static int SNDISR_Interrupt( void )
      * runaway re-entry that marched the ISR stack into .data (#GP). */
     int pt_mode = 0, pt_took = 0;
     int pt_space = 0;
+    int pt_blocks = 0;      /* the block cap reads this, PTDIAG or not */
 #if PTDIAG
-    int pt_blocks = 0, pt_brk = 0;
+    int pt_brk = 0;
 #endif
 #endif
 
@@ -711,9 +717,7 @@ static int SNDISR_Interrupt( void )
             }
             pt_space -= bytes;
             pt_took = 1;
-#if PTDIAG
             if ( pt_blocks < 255 ) pt_blocks++;
-#endif
         }
 #endif
 
@@ -842,15 +846,15 @@ static int SNDISR_Interrupt( void )
              * the pending status is delivered late (or dropped) by the
              * top-of-tick gate once the squelch window has passed */
             if ( !SNDISR_ReviveSquelch ) VIRQ_Invoke();
-#if PTDIAG
             /* Cap AFTER the completion IRQ: the guest has been told this
              * block finished, so stopping here just defers its successor to
              * the next tick -- the same throttle a real SB applies. */
             if ( pt_mode && SNDISR_PtBlkCap && pt_blocks >= SNDISR_PtBlkCap ) {
+#if PTDIAG
                 pt_brk = 1; dbg_pt_why( PTD_BLKCAP );
+#endif
                 break;
             }
-#endif
         } else {
 #ifdef SNDISRLOG
             dbgprintf(("isr(%u): s/c(o)/b=0x%02X/0x%02X(0x%02X)/0x%03X SB Pos=0x%X DMA Idx/Cnt=%X/%X\n", loop, samples, count, ocnt, bytes, SB_Pos, DMA_Index, DMA_Count ));
