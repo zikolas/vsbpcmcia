@@ -107,7 +107,14 @@ int PTOPS_CardIs( const char *id );
 
 /* PTDIAG: passthrough-tap forensics build (short-SFX stretch, 2026-08-21).
  * Borrows two 0x4F0 slots from sc_vew211's reconfig counters, which are
- * silenced while it is on. Set to 0 (or drop the branch) to ship. */
+ * silenced while it is on.
+ *
+ * Setting it to 0 is safe NOW, and was not before: the blocks-per-tick cap
+ * (SNDISR_PtBlkCap, sndisr.c) had been written inside this gate, so following
+ * the old unqualified "set to 0 to ship" advice would have removed the cap
+ * and shipped the uncapped tick that hard-hung the T2130CT. The cap and its
+ * SBEPTBLK knob are unconditional now; only the counters and the exit bitmap
+ * are gated here. Every release so far shipped with this at 1. */
 #define PTDIAG 1
 
 /* Engine-generic ISR telemetry (the BIOS 0x4F0-0x4FF map -- see
