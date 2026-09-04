@@ -431,8 +431,15 @@ struct rmcode1 {   /* structure must match definitions in rmcode1.asm! */
     uint16_t data; /* LOW byte: current OPL index shadow; HIGH: 0x388 status cache */
     uint16_t wPort; /* used for PIC port trapping; contains either 0x0020 or 0xffff */
     uint32_t qpi;  /* QPI entry */
+    uint16_t wFmSB;  /* emulated SB base whose FM aliases the stub forwards to
+                      * the real OPL3 at 0x388 itself; 0xFFFF = not armed */
+    uint16_t wDspWS; /* emulated DSP write-status port (base+0xC) the stub
+                      * answers itself; 0xFFFF = not armed */
+    uint8_t  bDspWS; /* DSP_Read0C's busy counter, shared with vsb.c */
+    uint8_t  bDspPad;
 #if HANDLE_IN_388H_DIRECTLY
     uint16_t rseg;  /* OPL write ring: real-mode segment (paragraph-aligned) */
+
     uint16_t rhead; /*   producer slot (v86 stub) */
     uint16_t rtail; /*   consumer slot (PTRAP_DrainOplRing) */
     uint8_t rfull;  /*   ring-full events counted by the stub (wraps) */
@@ -440,6 +447,30 @@ struct rmcode1 {   /* structure must match definitions in rmcode1.asm! */
 #endif
     uint8_t codev86[]; /* v86 code */
 };
+
+/* The live stub variable block, once PTRAP_Prepare_RM_PortTrap has copied
+ * the template into DOS memory; NULL without real-mode support. The two
+ * stub-answered SB ports are armed through this (PTRAP_Prepare), and the
+ * DSP write-status counter is shared with vsb.c through it. */
+static int RMStubReady;
+static struct rmcode1 *RMVars( void )
+{
+    if ( !RMStubReady )
+        return NULL;
+#if HANDLE_IN_388H_DIRECTLY
+    return RMStubLinear ? (struct rmcode1 *)NearPtr(RMStubLinear)
+                        : (struct rmcode1 *)NearPtr(_my_psp() + DOSMEMSTART);
+#else
+    return (struct rmcode1 *)NearPtr(_my_psp() + DOSMEMSTART);
+#endif
+}
+
+uint8_t *PTRAP_DspStatusCell( void )
+{
+    struct rmcode1 *dm = RMVars();
+    return dm ? &dm->bDspWS : NULL;
+}
+
 
 #if HANDLE_IN_388H_DIRECTLY
 /* The v86 stub answers byte reads of 0x388 from rmcode1.data's high byte
@@ -601,6 +632,11 @@ bool PTRAP_Prepare_RM_PortTrap()
 
     /* the code starts with a rmcode1 struct, now to be initialized...  */
     dosmem->rmcb = rmcb.segofs;
+    dosmem->wFmSB  = 0xFFFF;    /* armed by PTRAP_Prepare when the config allows */
+    dosmem->wDspWS = 0xFFFF;
+    dosmem->bDspWS = 0;
+    RMStubReady = 1;
+
 #if !RMPICTRAPDYN
     dosmem->qpi = (QPI_regs.x.cs << 16) | QPI_regs.x.ip;
 #endif
@@ -987,6 +1023,18 @@ void PTRAP_Prepare( int opl, int sbaddr, int dma, int hdma, int sndirq )
         for( i = portranges[SB_PDT]; i < portranges[SB_PDT+1]; i++ )
             PortTable[i] += sbaddr - 0x220;
 
+    /* DSP write-status reads (base+0xC) are answered by the V86 stub from a
+     * counter it shares with vsb.c (rmcode1.asm isws, PTRAP_DspStatusCell):
+     * the port stays trapped for its writes, only the reads stay in V86.
+     * SBENOSTUB=1 (bench knob, transient like SBERTC/SBENORS) leaves both
+     * stub-answered paths -- this one and the FM alias forward above --
+     * disarmed, so the C handlers serve everything as before: an A/B on the
+     * box without a rebuild. */
+    { struct rmcode1 *dm = RMVars();
+      if ( dm && !getenv("SBENOSTUB") ) dm->wDspWS = (uint16_t)( sbaddr + SB_PORT_DSP_WRITE_WS ); }
+
+
+
     /* if no OPL3 emulation, skip ports 0x388-0x38b, 0x220-0x223 and 0x228-0x229 */
     if ( !opl ) {
         /* Does this card have FM silicon behind 0x388? The backend says so in
@@ -1033,7 +1081,19 @@ void PTRAP_Prepare( int opl, int sbaddr, int dma, int hdma, int sndirq )
             /* real chip, no attenuator wanted: leave 0x388-0x38B UNtrapped so
              * guest AdLib music rides the hardware directly */
             PDT_DelEntries( portranges[OPL3_PDT], maxports, 4 );
+            /* ...and let the V86 stub forward the SB-base aliases to it
+             * itself (rmcode1.asm isfm): with 0x388 untrapped the stub can do
+             * the I/O in place, so a real-mode guest's alias traffic -- the
+             * register writes AND the 6-35 delay reads era drivers pad each
+             * one with -- costs no RMCB round trip at all. FM_Alias below
+             * still serves the PM world and decomposed word accesses. Only in
+             * THIS branch: the shim and FMVOL keep 0x388 trapped, and a
+             * direct OUT from the stub would re-enter the trap. */
+            { struct rmcode1 *dm = RMVars();
+              if ( dm && !getenv("SBENOSTUB") ) dm->wFmSB = (uint16_t)sbaddr; }
         }
+
+
         /* The SB-base FM aliases are KEPT and forwarded to 0x388-0x38B rather
          * than dropped -- games probe them to decide a Sound Blaster exists.
          * See FM_Alias().  (The CF-VEW211 decodes FM at 0x388 only, which is

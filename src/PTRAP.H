@@ -31,6 +31,12 @@ bool PTRAP_Uninstall_PM_PortTraps( void );
 void    PTRAP_UntrappedIO_OUT(uint16_t port, uint8_t value);
 uint8_t PTRAP_UntrappedIO_IN(uint16_t port);
 
+/* the V86 stub's copy of the DSP write-status busy counter -- vsb.c adopts
+ * it as its own once real-mode traps exist, so the stub can answer the
+ * reads without a mode switch; NULL without real-mode support */
+uint8_t *PTRAP_DspStatusCell( void );
+
+
 #ifdef CARD_TP755
 /* OPL write ring (v86 stub producer, see rmcode1.asm/ptrap.c) */
 void PTRAP_SetOplRing( uint32_t linear );   /* paragraph-aligned DOS memory, 32 bytes */
