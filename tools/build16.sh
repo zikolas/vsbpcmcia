@@ -96,6 +96,13 @@ INC="-I/ow/h"
 AFLAGS="-q -DNOTFLAT -DONEMODULE ${DIAG:+-DSTKDIAG} -Istartup -D?MODEL=small"
 
 cc()  { wcc386 $DBG $COPT -os $CEXTRA $CARDDEF -Isrc $INC -fo=$OUTD/$2 src/$1; }
+# hot engine objects: time over space (the explicit rules in ow16.mak), the
+# same set as HOTOBJS in djgpp.mak. This script, not the makefile, is what
+# the container runs, so the makefile rules never applied here. NO
+# APOSTROPHES in this block: it is one single-quoted bash -c argument.
+
+cch() { wcc386 $DBG $COPT -ot $CEXTRA $CARDDEF -Isrc $INC -fo=$OUTD/$2 src/$1; }
+
 ccx() { wcc386 $DBG $COPT     $CEXTRA $CARDDEF -Impxplay -Isrc $INC -fo=$OUTD/$2 mpxplay/$1; }
 cpp() { wpp386 $DBG $CPPOPT -os $CEXTRA $CARDDEF -Isrc $INC -fo=$OUTD/$2 src/$1; }
 asm() { jwasm $AFLAGS $CARDDEF -Fo=$OUTD/$2 src/$1; }
@@ -120,7 +127,9 @@ try() { local out; if out=$("$@" 2>&1); then :; else fail=1; fi; [ -z "$out" ] |
 # module also keeps the object set the same as the djgpp.mak one, which is
 # what makes the two binaries comparable when the bench comes back.
 echo "=== C objects ==="
-for f in main sndisr ptrap linear pic vsb vdma virq vmpu tsf fmvol fmshim hostsvc; do try cc $f.c $f.obj; done
+for f in sndisr ptrap vdma vsb; do try cch $f.c $f.obj; done
+for f in main linear pic virq vmpu tsf fmvol fmshim hostsvc; do try cc $f.c $f.obj; done
+
 try cpp vopl3.cpp vopl3.obj
 echo "=== card objects ==="
 for f in au_cards dmabuff physmem timer sc_es1688 sc_vew211 sc_scp55 sc_tp755; do try ccx $f.c $f.obj; done

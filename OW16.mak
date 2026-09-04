@@ -122,12 +122,17 @@ LIBS=
 # -os, which optimises for SPACE -- yet src/ is where the hot files live,
 # while mpxplay/ (the card backends) already builds at -oxa for speed. That
 # inversion put the sound ISR and the port-trap dispatch on the size-first
-# setting and the cold PCI-era code on the fast one. Give the three hot
+# setting and the cold PCI-era code on the fast one. Give the four hot
 # src/ objects the same speed setting the backends get; every other src/
-# file keeps -os, so the resident image grows only by these three.
-# vsb.obj is held back for the same reason as in djgpp.mak.
+# file keeps -os, so the resident image grows only by these four.
+# (vsb.obj joined once DSP_Read0A's overlapping memcpy became a memmove.)
+# tools/build16.sh, which is what the container runs, carries the same list.
 $(OUTD)/sndisr.obj : src/sndisr.c
 	@$(CC) $(C_DEBUG_FLAGS) $(C_OPT_FLAGS) $(C_EXTRA_FLAGS) $(CFLAGS) -Isrc $(INCLUDES) -fo=$@ $<
+
+$(OUTD)/vsb.obj : src/vsb.c
+	@$(CC) $(C_DEBUG_FLAGS) $(C_OPT_FLAGS) $(C_EXTRA_FLAGS) $(CFLAGS) -Isrc $(INCLUDES) -fo=$@ $<
+
 
 $(OUTD)/ptrap.obj : src/ptrap.c
 	@$(CC) $(C_DEBUG_FLAGS) $(C_OPT_FLAGS) $(C_EXTRA_FLAGS) $(CFLAGS) -Isrc $(INCLUDES) -fo=$@ $<

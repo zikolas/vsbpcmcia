@@ -863,7 +863,11 @@ static uint8_t DSP_Read0A( void )
         uint8_t rc;
         rc = vsb.DataBuffer[0];
         vsb.DataBytes--;
-        if (vsb.DataBytes) memcpy( vsb.DataBuffer, &vsb.DataBuffer[1], vsb.DataBytes );
+        /* memmove: source and destination overlap by construction, which is
+         * undefined for memcpy (it only ever worked because -Os happened to
+         * emit a forward byte loop). Also what let vsb.o join the -O2 set. */
+        if (vsb.DataBytes) memmove( vsb.DataBuffer, &vsb.DataBuffer[1], vsb.DataBytes );
+
         return( rc );
     }
     dbgprintf(("DSP_Read0A: read buffer empty, returning %X\n", vsb.DataBuffer[0] ));
