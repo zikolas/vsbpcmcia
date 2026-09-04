@@ -989,13 +989,7 @@ static int SNDISR_Interrupt( void )
     } else if ( IdxSm = VSB_ReadDirectSamples( (uint8_t *)isr.pPCM ) ) {
 
         char *pDest = (char *)isr.pPCM;
-#ifndef NOES1688
-        /* PT mode skipped AU_cardbuf_space() at the top of the tick; this
-         * tail hands its output to AU_writedata, which paces by the
-         * card_dmaspace that call maintains, so refresh it here. */
-        if ( pt_mode )
-            AU_cardbuf_space( isr.hAU );
-#endif
+
 
         //uint32_t freq = AU_getfreq( isr.hAU );
 
@@ -1218,7 +1212,20 @@ static int SNDISR_Interrupt( void )
     }
 #endif
 #endif
+#ifndef NOES1688
+    /* PT mode skipped AU_cardbuf_space() at the top of the tick, and
+     * AU_writedata below is paced by the card_dmaspace figure that call
+     * maintains (writedata() hands the card nothing once it reads 0 -- and
+     * it starts at 0). Everything that reaches this tail on a PT tick needs
+     * it: direct-DAC bytes, and ADPCM blocks, which take the render path
+     * even in PT mode because the card cannot play them raw. The first cut
+     * refreshed it on the direct-DAC branch only and silenced Duke Nukem
+     * II's ADPCM sound effects on the PC110 (bench 2026-09-05). */
+    if ( pt_mode )
+        AU_cardbuf_space( isr.hAU );
+#endif
     AU_writedata( isr.hAU, samples * 2, isr.pPCM );
+
 
 #if SLOWDOWN
     if ( gvars.slowdown )
