@@ -100,9 +100,10 @@ static int dbg_tsc_check(void)
 void SNDISR_dbg_tick(void)
 {
     ++dbg_tel_sndisr;
-    LOW_PokeB(0x4F7, (unsigned char)dbg_tel_sndisr);
-    LOW_PokeB(0x4F9, (unsigned char)(dbg_tel_sndisr >> 8));
-    if(++dbg_depth > dbg_maxdepth){ dbg_maxdepth = dbg_depth; LOW_PokeB(0x4F0, dbg_maxdepth); }
+    TEL_PokeB(0x4F7, (unsigned char)dbg_tel_sndisr);
+    TEL_PokeB(0x4F9, (unsigned char)(dbg_tel_sndisr >> 8));
+    if(++dbg_depth > dbg_maxdepth){ dbg_maxdepth = dbg_depth; TEL_PokeB(0x4F0, dbg_maxdepth); }
+
     if(SNDISR_HasTsc && dbg_depth == 1) dbg_t0 = dbg_rdtsc();
 }
 void SNDISR_dbg_exit(void)
@@ -112,8 +113,9 @@ void SNDISR_dbg_exit(void)
         unsigned u = ((dt >> 8) > 0xFFFFULL) ? 0xFFFFu : (unsigned)(dt >> 8);
         if(u > dbg_maxdur){
             dbg_maxdur = u;
-            LOW_PokeB(0x4FC, (unsigned char)u);
-            LOW_PokeB(0x4FD, (unsigned char)(u >> 8));
+            TEL_PokeB(0x4FC, (unsigned char)u);
+            TEL_PokeB(0x4FD, (unsigned char)(u >> 8));
+
         }
     }
     if(dbg_depth) dbg_depth--;
@@ -585,23 +587,34 @@ static int SNDISR_Interrupt( void )
     _enable_ints();
 #endif
 
-    //AU_setoutbytes( isr.hAU ); //v1.9: now obsolete
-    samples = AU_cardbuf_space( isr.hAU ) / ( sizeof(int16_t) * 2 ); //16 bit, 2 channels
 #ifndef NOES1688
-    /* keep one render pass inside one pump tick (see render_cap in ptops.h) */
-    if ( PT_Ops->render_cap && samples > PT_Ops->render_cap )
-        samples = PT_Ops->render_cap;
-    /* PT mode: pace by ring space instead (see decl comment). samples becomes
-     * a plain loop bound; keeping it small also caps the mixer / direct-DAC
-     * tails so a non-PT tick stays cheap. 1024 >> any real per-tick need
-     * (worst sustained stream ~350 guest bytes/tick at the idle pump rate). */
 #define PT_MODE_SAMPLES 1024
     if ( SNDISR_PassThru ) {
+        /* PT mode: pace by ring space instead (see decl comment). samples
+         * becomes a plain loop bound; keeping it small also caps the mixer /
+         * direct-DAC tails so a non-PT tick stays cheap. 1024 >> any real
+         * per-tick need (worst sustained stream ~350 guest bytes/tick at the
+         * idle pump rate).
+         * AU_cardbuf_space() is NOT called on this path: its result was
+         * overwritten right here on every tick -- a getpos call and two
+         * 32-bit divides for nothing -- and the only consumer of its side
+         * effects on a PT tick is the direct-DAC tail, which now calls it
+         * itself. */
         pt_mode = 1;
         pt_space = PT_Ops->space();
         samples = PT_MODE_SAMPLES;
-    }
+    } else
 #endif
+    {
+        //AU_setoutbytes( isr.hAU ); //v1.9: now obsolete
+        samples = AU_cardbuf_space( isr.hAU ) / ( sizeof(int16_t) * 2 ); //16 bit, 2 channels
+#ifndef NOES1688
+        /* keep one render pass inside one pump tick (see render_cap in ptops.h) */
+        if ( PT_Ops->render_cap && samples > PT_Ops->render_cap )
+            samples = PT_Ops->render_cap;
+#endif
+    }
+
     if ( !samples ) { /* no free space in DMA buffer? Shouldn't happen... */
         dbgprintf(("isr: ERROR - AU_cardbuf_space() returned 0 samples\n" ));
         goto isrexit;
@@ -697,7 +710,21 @@ static int SNDISR_Interrupt( void )
             }
         }
         /* don't resample if sample rates are close? */
+#ifndef NOES1688
+        if ( pt_block )
+            /* PT: the card plays the guest's own rate and cv_rate never runs,
+             * so the resampled-count arithmetic below (two or three 32-bit
+             * divides per block, per tick) was dead weight -- count is a loop
+             * bound here that pt_space and the block cap govern. It stays in
+             * guest frames, as the PT comments further down already assume;
+             * the one visible difference is that a tick with lots of ring
+             * room may take up to PT_MODE_SAMPLES guest frames instead of
+             * PT_MODE_SAMPLES * SB_Rate / freq. */
+            resample = false;
+        else
+#endif
         if( SB_Rate != freq ) {
+
             int tmpcnt = count * SB_Rate / freq;
             resample = true;
             //count = max( channels, count / ( ( freq + SB_Rate-1) / SB_Rate ));
@@ -962,6 +989,14 @@ static int SNDISR_Interrupt( void )
     } else if ( IdxSm = VSB_ReadDirectSamples( (uint8_t *)isr.pPCM ) ) {
 
         char *pDest = (char *)isr.pPCM;
+#ifndef NOES1688
+        /* PT mode skipped AU_cardbuf_space() at the top of the tick; this
+         * tail hands its output to AU_writedata, which paces by the
+         * card_dmaspace that call maintains, so refresh it here. */
+        if ( pt_mode )
+            AU_cardbuf_space( isr.hAU );
+#endif
+
         //uint32_t freq = AU_getfreq( isr.hAU );
 
         /* calc the src frequency by formula:

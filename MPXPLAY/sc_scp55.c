@@ -531,8 +531,9 @@ static void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, u
   return; }
  scp_pt_feed_busy = 1;
  ++es_tel_feed16;
- LOW_PokeB(0x4FB, (unsigned char)es_tel_feed16);
- LOW_PokeB(0x4FF, (unsigned char)(es_tel_feed16 >> 8));
+ TEL_PokeB(0x4FB, (unsigned char)es_tel_feed16);
+ TEL_PokeB(0x4FF, (unsigned char)(es_tel_feed16 >> 8));
+
  scp_feed_seq = scp_tick_seq;
  // Waking from the idle throttle: between same-format sounds no reconfig
  // runs, so restore the stream's pump rate HERE (rate-up only).
@@ -635,8 +636,9 @@ static void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, u
  }
  if(!SNDISR_HasTsc){
   unsigned u16 = (unsigned)((es_tel_bytes >> 4) & 0xFFFF);
-  LOW_PokeB(0x4FC, (unsigned char)u16);
-  LOW_PokeB(0x4FD, (unsigned char)(u16 >> 8));
+  TEL_PokeB(0x4FC, (unsigned char)u16);
+  TEL_PokeB(0x4FD, (unsigned char)(u16 >> 8));
+
  }
  ring_wr = wr;
  scp_pio_pump();                                      // keep the FIFO fed inline
@@ -940,19 +942,24 @@ static long SCP55_getbufpos(struct audioout_info_s *aui)
 static int SCP55_irq(struct audioout_info_s *aui)
 {
  (void)aui;
- LOW_PokeB(0x4F8, ++es_tel_irq);
+ TEL_PokeB(0x4F8, ++es_tel_irq);
  ++scp_tick_seq;
  scp_watchdog();
- { uint8_t f = DPMI_DisableInterrupt();               // cli: the IRQ0 heartbeat could
-   outportb(0x70,0x0C); (void)inportb(0x71);          // land between CMOS index+data
-   DPMI_RestoreInterrupt(f); }
+ // ack RTC. No cli pair: irq_routine runs from SwitchStackISR BEFORE
+ // sndisr's _enable_ints, i.e. with interrupts (virtually) off on entry, so
+ // the IRQ0 heartbeat cannot land between the CMOS index and data bytes --
+ // the pair was one int 31h per tick, at up to 2048 Hz, guarding nothing.
+ // rtc_enable/scp_rtc_setrate keep theirs (trap and heartbeat context).
+ outportb(0x70,0x0C); (void)inportb(0x71);
+
 
  { unsigned long hz = SCP_RTC_HZ();                   // one RTC period of feed credit;
    scp_fr_acc += scp_frate;                           // burst-capped so a stall can't
    if(scp_fr_acc > hz * SCP_BURST_FRAMES)             // run the pump ahead into full-
     scp_fr_acc = hz * SCP_BURST_FRAMES; }             // FIFO writes (silently dropped)
  scp_pio_pump();
- LOW_PokeB(0x4F5, (unsigned char)(((ring_wr - ring_rd) & RING_MASK) >> 5));  // ring gauge
+ TEL_PokeB(0x4F5, (unsigned char)(((ring_wr - ring_rd) & RING_MASK) >> 5));  // ring gauge
+
 
  // Self-pacing keyed on FEED RECENCY (our tick units) + RING OCCUPANCY --
  // deliberately NOT on scp_pt_active (which sticks at 1 when a guest exits

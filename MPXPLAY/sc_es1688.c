@@ -121,7 +121,8 @@ static unsigned char es_tel_irq;
 #define ES_DIAG_REENTRY(v)  ((void)0)
 #define ES_DIAG_START(v)    ((void)0)
 #else
-#define ES_DIAG_STAGE(v)    LOW_PokeB(0x4F2,(v))
+#define ES_DIAG_STAGE(v)    TEL_PokeB(0x4F2,(v))   /* per feed: under the telemetry gate */
+
 #define ES_DIAG_REENTRY(v)  LOW_PokeB(0x4F3,(v))
 #define ES_DIAG_START(v)    LOW_PokeB(0x4F6,(v))
 #endif
@@ -453,8 +454,9 @@ static void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, u
  if(es_pt_feed_busy){ ES_DIAG_REENTRY(++es_reentry); return; }   // re-entered -> skip
  es_pt_feed_busy = 1;
  ++es_tel_feed16;                                              // telemetry (16-bit, lo/hi)
- LOW_PokeB(0x4FB, (unsigned char)es_tel_feed16);
- LOW_PokeB(0x4FF, (unsigned char)(es_tel_feed16 >> 8));
+ TEL_PokeB(0x4FB, (unsigned char)es_tel_feed16);
+ TEL_PokeB(0x4FF, (unsigned char)(es_tel_feed16 >> 8));
+
  es_last_feed = LOW_PeekD(0x46C);                     // audio flowing -> keep the pump fast
  // Waking from the idle throttle: between same-format sounds no reconfig runs,
  // so restore the stream's pump rate HERE, on the first feed. Rate-UP only
@@ -482,8 +484,9 @@ static void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, u
  es_tel_bytes += (unsigned long)bytes;         // PT byte-rate telemetry (no-TSC boxes: 0x4FC/D = bytes>>4, 16-bit)
  if(!SNDISR_HasTsc){
   unsigned u16 = (unsigned)((es_tel_bytes >> 4) & 0xFFFF);
-  LOW_PokeB(0x4FC, (unsigned char)u16);
-  LOW_PokeB(0x4FD, (unsigned char)(u16 >> 8));
+  TEL_PokeB(0x4FC, (unsigned char)u16);
+  TEL_PokeB(0x4FD, (unsigned char)(u16 >> 8));
+
  }
  while(bytes > 0){
   int chunk = (int)(RING_BYTES - wr);      // contiguous space to end of ring
@@ -777,12 +780,17 @@ static long ES1688_getbufpos(struct audioout_info_s *aui)
 static int ES1688_irq(struct audioout_info_s *aui)
 {
  int guard; uint16_t base = es_base;
- LOW_PokeB(0x4F8, ++es_tel_irq);                   // DIAG: irq_routine called (SNDISR reached AU_isirq)
+ TEL_PokeB(0x4F8, ++es_tel_irq);                   // DIAG: irq_routine called (SNDISR reached AU_isirq)
  es_watchdog();                                             // re-arm if ticks died
  es_last_tick = LOW_PeekD(0x46C);                  // stamp this run
- { uint8_t f = DPMI_DisableInterrupt();                     // ack RTC. cli: with the IRQ0 heartbeat live,
-   outportb(0x70,0x0C); (void)inportb(0x71);                // a tick landing between index and data would
-   DPMI_RestoreInterrupt(f); }                              // leave the CMOS index clobber-prone
+ // ack RTC. No cli pair around it: irq_routine runs from SwitchStackISR
+ // BEFORE sndisr's _enable_ints, i.e. with interrupts (virtually) off on
+ // entry, so the IRQ0 heartbeat cannot land between the CMOS index and data
+ // bytes here -- the pair was one int 31h per tick (two on a host whose
+ // pushf shows the physical flag) guarding nothing. rtc_enable and
+ // es_rtc_setrate keep theirs: they also run from trap and heartbeat context.
+ outportb(0x70,0x0C); (void)inportb(0x71);
+
 
  if(es_irqtone){                                            // diagnostic tone path
   guard = 0;
@@ -803,7 +811,8 @@ static int ES1688_irq(struct audioout_info_s *aui)
   es_fifo_pump();
  }
  else es_fifo_pump();                                       // normal / passthrough feed
- LOW_PokeB(0x4F5, (unsigned char)(((ring_wr - ring_rd) & RING_MASK) >> 5));  // DIAG: ring fill, 32-byte units
+ TEL_PokeB(0x4F5, (unsigned char)(((ring_wr - ring_rd) & RING_MASK) >> 5));  // DIAG: ring fill, 32-byte units
+
  // SELF-PACING. Idle needs BOTH signals, because each alone is wrong somewhere:
  //  - es_pt_active flickers off every cycle during single-cycle DMA detection
  //    (SBEMU_Stop per cycle) -> using it alone stalls the pump mid-detect (slow launch)

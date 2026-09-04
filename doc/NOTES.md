@@ -50,6 +50,13 @@ ticks exit early). `STACKCHECK=1` in stackisr.asm trips fatal_error(3) at
 
 Cleared before a test with 16 zero bytes. All counters wrap.
 
+The per-tick bytes (0x4F0, 0x4F5, 0x4F7/0x4F9, 0x4F8, 0x4FB/0x4FF, the
+no-TSC 0x4FC/0x4FD, the ES build's 0x4F2 stage) sit behind `SNDISR_TELEMETRY`
+(src/ptops.h, default 1). `RELEASE=1 tools/build.sh` sets it to 0 together
+with `PTDIAG 0`: a dozen far stores per pump tick is real 486 time, and a
+release never reads them. The rare-event bytes stay in every build.
+
+
 | Addr | Meaning |
 |------|---------|
 | 0x4F0 | max SNDISR nesting depth seen (goal: 1) |

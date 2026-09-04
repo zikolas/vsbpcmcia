@@ -107,8 +107,20 @@ if [ -n "$STKDIAG" ] && [ "$STKDIAG" != "0" ]; then
   echo "build.sh: STKDIAG=1 -- survivable stack tripwire, 0x4FE=F3 on trip" >&2
 fi
 
+# RELEASE=1: silence the PER-TICK telemetry (SNDISR_TELEMETRY 0, see
+# src/ptops.h) and the PT-tap forensics (PTDIAG 0). Ten-plus far stores per
+# pump tick are measurable 486 time; a release never reads them. The rare-
+# event bytes (revivals, reconfigs, clamps) and the blocks-per-tick cap stay.
+# No name suffix: this IS the shipping configuration -- a bench build is the
+# default, and its 0x4F0 map is what doc/NOTES.md documents.
+if [ -n "$RELEASE" ] && [ "$RELEASE" != "0" ]; then
+  CARDDEF="$CARDDEF -DSNDISR_TELEMETRY=0 -DPTDIAG=0"
+  echo "build.sh: RELEASE=1 -- per-tick telemetry and PTDIAG off" >&2
+fi
+
 # name so it can sit next to the real binary.
 if [ -n "$PMISR" ] && [ "$PMISR" != "0" ]; then
+
   CARDDEF="$CARDDEF -DPMISR_CHAIN"
   OUTNAME="${OUTNAME}p"
   echo "build.sh: PMISR=1 -- chained PM ISRs via src/pmisr.asm (A/B build, not for release)" >&2
