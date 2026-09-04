@@ -770,7 +770,9 @@ static int SCP55_adetect(struct audioout_info_s *aui)
  if(getenv("SBENORS")) scp_no_step = 1;
  { const char *mh = getenv("SBEMAXHZ");          // cap the CODEC rate (CPU knob)
    if(mh){ long v = atol(mh);
-           if(v >= 4000L && v <= 48000L) scp_rate_ceil = (unsigned long)v; } }               // disable the frame stepper (A/B)
+           if(v >= 4000L && v <= 48000L) scp_rate_ceil = (unsigned long)v; } }
+ if(FOpts.maxhz) scp_rate_ceil = (unsigned long)FOpts.maxhz;   // /MAXHZ: the switch wins over the env knob
+
  // /BASE here is the PCMCIA I/O WINDOW (codec at +4), not an SB DSP base --
  // one switch, but only one backend ever reads it because /CARD is required.
  if(FOpts.base) base = (uint16_t)FOpts.base;

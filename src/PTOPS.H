@@ -84,7 +84,13 @@ struct fork_opts_s {
                          * (VEW211 for now) -- the codec runs at ONE fixed
                          * table rate and SBEMU resamples every guest format
                          * onto it, so the frame stepper never engages. */
+    int maxhz;          /* /MAXHZ: codec rate ceiling, Hz; 0 = card default.
+                         * The CS4231A backends' CPU knob: their cost is the
+                         * pump interrupt count, which scales with the codec
+                         * rate, and the frame stepper folds the guest down
+                         * onto the capped rate. Range-checked in main.c. */
 };
+
 extern struct fork_opts_s FOpts;
 
 /* Does /CARD name this backend? Case-insensitive, exact. There is no

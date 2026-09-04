@@ -108,7 +108,8 @@ static struct MAIN_s gm = { NULL, false, false, false, false };
 
 /* Fork-side options (ptops.h). cvol -1 means "card default", which a
  * deliberate /CVOL0 (full scale) must not be confused with. */
-struct fork_opts_s FOpts = { NULL, 0, 0, -1, 0, 0 };
+struct fork_opts_s FOpts = { NULL, 0, 0, -1, 0, 0, 0 };
+
 
 struct globalvars gvars = { BASE_DEFAULT, IRQ_DEFAULT, DMA_DEFAULT, /* /A /I /D */
 #if SB16
@@ -142,6 +143,8 @@ static const struct {
 #endif
     "BASE", "real card base, hex (enabler)", &FOpts.base,
     "DACRATE", "codec rate, Hz", &FOpts.dacrate,
+    "MAXHZ", "codec rate ceiling, Hz (CS4231A)", &FOpts.maxhz,
+
     "CVOL", "codec attenuation [0-63]", &FOpts.cvol,
     "FMSHIM", "pretend card has no FM", &FOpts.fmshim,
     "RESAMP", "resample, no PT (VEW211)", &FOpts.resamp,
@@ -527,6 +530,11 @@ int main(int argc, char* argv[])
         printf("Error: /CVOL takes 0-63 (codec DAC attenuation, ~1.5 dB per step)\n" );
         return(1);
     }
+    if( FOpts.maxhz && ( FOpts.maxhz < 4000 || FOpts.maxhz > 48000 ) ) {
+        printf("Error: /MAXHZ takes 4000-48000 (codec rate ceiling, Hz)\n" );
+        return(1);
+    }
+
 
     if( gvars.base != 0x220 && gvars.base != 0x240 ) {
         printf("Error: valid IO base addresses: 220 or 240\n" );

@@ -221,12 +221,21 @@ static const struct { unsigned long hz; unsigned char code; } vew_rates[] = {
 // never be fed continuously -- a 44.1k guest maps to 22050 and the frame
 // stepper (below) decimates 2:1: correct pitch and tempo, half bandwidth.
 #define VEW_RATE_CEIL 22050UL
+// /MAXHZ lowers it further. On a slow host this backend's cost is the
+// INTERRUPT count, not the byte count: the 16-frame FIFO fixes bytes per
+// tick at ~11-16 whatever the rate, so 11025 needs a 1024 Hz pump and 22050
+// a 2048 Hz one. Capping the codec rate halves the ticks AND the bus
+// traffic; the frame stepper folds the guest down nearest-neighbour, exactly
+// as it already does for a 44.1k guest at 22050. (Same knob sc_scp55 grew
+// as SBEMAXHZ; here it is the switch only.)
+static unsigned long vew_rate_ceil = VEW_RATE_CEIL;
 static int vew_rate_pick(unsigned rate)
 {
  int i, best = 7; unsigned long bd = 0xFFFFFFFFUL;
  for(i=0;i<VEW_NRATES;i++){
   unsigned long d;
-  if(vew_rates[i].hz > VEW_RATE_CEIL) continue;
+  if(vew_rates[i].hz > vew_rate_ceil) continue;
+
   d = vew_rates[i].hz > rate ? vew_rates[i].hz - rate : rate - vew_rates[i].hz;
   if(d < bd){ bd = d; best = i; }
  }
@@ -667,6 +676,8 @@ static int VEW211_adetect(struct audioout_info_s *aui)
  const char *l = getenv("SBEPTLAT");
  if(!PTOPS_CardIs("vew211")) return 0;
  if(getenv("SBENORS")) vew_no_step = 1;               // disable the frame stepper (A/B)
+ if(FOpts.maxhz) vew_rate_ceil = (unsigned long)FOpts.maxhz;   // /MAXHZ (main.c range-checks it)
+
  // /BASE here is the PCMCIA I/O WINDOW (codec at +4), not an SB DSP base --
  // one switch, but only one backend ever reads it because /CARD is required.
  if(FOpts.base) base = (uint16_t)FOpts.base;
