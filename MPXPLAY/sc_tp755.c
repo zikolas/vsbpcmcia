@@ -141,6 +141,8 @@ static uint8_t  tp_ctl_was_on = 0;           // enable state found at detect
 //   4F2/3 = ISR tick count u16     4F4 = reenter (guard-skip) count
 //   4F5 = last SR seen at claim    4F6 = heal count (start+watchdog)
 //   4F8/9 = last getpos u16        4FA = consecutive futile heals
+// 4F2/3, 4F6 and 4FA are LOANED to RATEDIAG (src/ptops.h) and are not
+// published while it is 1 -- build with RATEDIAG 0 to diagnose this card.
 //   4FB = depth high-water         4FC = IRQ0 polls per tick (last)
 //   4FD = polls-per-tick high-water (the IRQ0-saturation meter)
 #define TP_PH_CLAIM  1   /* irq_routine claimed the interrupt      */
@@ -149,6 +151,23 @@ static uint8_t  tp_ctl_was_on = 0;           // enable state found at detect
 #define TP_PH_EXIT   4   /* ISR completed                          */
 static uint8_t *tp_iac = NULL;   /* NearPtr(0x4F0), set in adetect */
 #define TP_IAC(off, v) do{ if(tp_iac) tp_iac[off] = (uint8_t)(v); }while(0)
+
+/* THE GUARDIAN'S CLOCK MUST NOT BE A BORROWABLE TELEMETRY BYTE. It used to
+ * read tp_iac[2] (= 0x4F2) as its freeze detector -- the same byte RATEDIAG
+ * lends to the rate readout. With anything else writing there the guardian
+ * sees ticks while the clock is dead, or a frozen count while it is alive,
+ * and can suppress a real heal or fire a spurious one -- on a card whose
+ * ONLY clock is this IRQ. It owns a private counter now, in every build.
+ * 0x4F2/0x4F3 (tick count) and 0x4F6 (heal count) are still published for
+ * COMrade, just not when RATEDIAG owns those slots. */
+static volatile uint8_t tp_tick8;   /* guardian's own tick clock, never loaned */
+static uint8_t tp_tel_heal;         /* heal count; published unless on loan */
+#if RATEDIAG
+#define TP_IAC_R(off, v)  ((void)0)      /* 0x4F2/0x4F3/0x4F6/0x4FA on loan */
+#else
+#define TP_IAC_R(off, v)  TP_IAC(off, v)
+#endif
+#define TP_HEAL()  do{ tp_tel_heal++; TP_IAC_R(6, tp_tel_heal); }while(0)
 
 //-------------------------------------------------------------- helpers ---
 /* This backend masks with a RAW cli/sti, not the DPMI host's 0900h/0901h
@@ -308,8 +327,8 @@ static void tp_guardian(void)
  // starves IRQ10 (priority: IRQ0 > cascade) -- the gap tells that story
  // in one number. 4FC = last completed gap (u8 sat), 4FD = high water.
  if(tp_g_gap < 0xFFFF) tp_g_gap++;
- if(tp_iac[2] != tp_g_last){
-  tp_g_last = tp_iac[2]; tp_g_frozen = 0; tp_g_begging = 0;
+ if(tp_tick8 != tp_g_last){
+  tp_g_last = tp_tick8; tp_g_frozen = 0; tp_g_begging = 0;
   tp_g_futile = 0;                            // real progress ends dormancy
   tp_iac[0x0C] = (uint8_t)(tp_g_gap > 255 ? 255 : tp_g_gap);
   if(tp_iac[0x0C] > tp_iac[0x0D]) tp_iac[0x0D] = tp_iac[0x0C];
@@ -338,10 +357,10 @@ static void tp_guardian(void)
    // with the counter frozen is impossible unless delivery is truly
    // dead, at any PIT rate.
    if(++tp_g_begging < 3) return;
-   if(tp_iac[2] == tp_g_healtick) { if(tp_g_futile < 255) tp_g_futile++; }
+   if(tp_tick8 == tp_g_healtick) { if(tp_g_futile < 255) tp_g_futile++; }
    else tp_g_futile = 0;
-   tp_g_healtick = tp_iac[2];
-   TP_IAC(0x0A, (tp_g_t2 << 4) | (tp_g_futile > 15 ? 15 : tp_g_futile));
+   tp_g_healtick = tp_tick8;
+   TP_IAC_R(0x0A, (tp_g_t2 << 4) | (tp_g_futile > 15 ? 15 : tp_g_futile));
    // codec begging, nobody serviced: clear any mask on our line (REAL
    // IMRs -- UntrappedIO from PM context reads real hardware, unlike a
    // V86 read), fire safe specific EOIs, re-arm the edge
@@ -392,8 +411,8 @@ static void tp_guardian(void)
     if(v & 0x04) UntrappedIO_OUT(0x21, (uint8_t)(v & ~0x04));
     if(tp_g_t2 < 15) tp_g_t2++;
    }
-   TP_IAC(6, tp_iac[6] + 1);
-   TP_IAC(0x0A, (tp_g_t2 << 4) | (tp_g_futile > 15 ? 15 : tp_g_futile));
+   TP_HEAL();
+   TP_IAC_R(0x0A, (tp_g_t2 << 4) | (tp_g_futile > 15 ? 15 : tp_g_futile));
    tp_g_begging = 0; tp_g_frozen = 0;
   }else{
    tp_g_begging = 0;
@@ -403,7 +422,7 @@ static void tp_guardian(void)
    // that a high-rate PIT can't thrash it (32 polls, not 8).
    if(tp_g_frozen < 32) return;
    UntrappedIO_OUT(DMA_REG_SINGLEMASK, 0x00);
-   TP_IAC(6, tp_iac[6] + 1);
+   TP_HEAL();
    tp_g_frozen = 0;
   }
  }
@@ -618,7 +637,7 @@ static void TP755_start(struct audioout_info_s *aui)
   TP_MS(20);
   if(!(inportb(tp_cb + TC_SR) & SR_INT)) break;
   outportb(tp_cb + TC_SR, 0);
-  TP_IAC(6, tp_iac[6] + 1);
+  TP_HEAL();
  }
 }
 
@@ -689,10 +708,13 @@ static int TP755_irq(struct audioout_info_s *aui)
 //
 static void tp_dbg_tick(void)
 {
+ tp_tick8++;                                   /* guardian's clock: unconditional */
  if(tp_iac){
   tp_iac[0]++;                                 /* depth */
   if(tp_iac[0] > tp_iac[0x0B]) tp_iac[0x0B] = tp_iac[0]; /* high-water */
+#if !RATEDIAG
   if(!++tp_iac[2]) tp_iac[3]++;                /* tick count u16 */
+#endif
  }
 }
 static void tp_dbg_exit(void)
@@ -730,7 +752,7 @@ static void tp_watchdog(void)
     UntrappedIO_OUT(0x20, 0x62);              // master: specific EOI IRQ2
     DPMI_RestoreInterrupt(f);
     outportb(tp_cb + TC_SR, 0);               // re-arm the edge
-    TP_IAC(6, tp_iac[6] + 1);
+    TP_HEAL();
    }
   }
  }

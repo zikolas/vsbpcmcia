@@ -40,6 +40,10 @@
 #define NOFM      1   /* strip DOSBox OPL3 emulation; leave 0x388 to the hardware */
 #endif
 
+/* RATEDIAG moved to src/ptops.h -- sc_vew211.c and sc_scp55.c do not include
+ * this header, so a guard written against a macro defined here compiles to
+ * the unguarded branch in those two files without a warning. */
+
 #define SB16      1   /* 1=support SB16 */
 #define ADPCM     1   /* 1=support ADPCM */
 #define SETIF     1   /* KEEP 1: VSBHDA's guest IRQ injection needs interrupts on (SETIF=0

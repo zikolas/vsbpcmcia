@@ -84,12 +84,32 @@ struct fork_opts_s {
                          * (VEW211 for now) -- the codec runs at ONE fixed
                          * table rate and SBEMU resamples every guest format
                          * onto it, so the frame stepper never engages. */
+    int maxhz;          /* /MAXHZ: codec rate ceiling, Hz; 0 = card default.
+                         * The CS4231A backends' CPU knob: their cost is the
+                         * pump interrupt count, which scales with the codec
+                         * rate, and the frame stepper folds the guest down
+                         * onto the capped rate. Range-checked in main.c. */
 };
+
 extern struct fork_opts_s FOpts;
 
 /* Does /CARD name this backend? Case-insensitive, exact. There is no
  * probing any more: a backend runs only when it is asked for by name. */
 int PTOPS_CardIs( const char *id );
+
+/* RATEDIAG: measure what the guest actually asks of the DSP rate path (Epic
+ * Pinball "Very High" played ~1.9x slow). Lends 0x4F2/0x4F3/0x4F6 to vsb.c's
+ * rate readout and 0x4FA to sndisr.c's DIRECT-DAC rate, silencing every other
+ * writer of those four slots.
+ *
+ * IT LIVES HERE, NOT IN config.h, ON PURPOSE. sc_vew211.c and sc_scp55.c do
+ * NOT include config.h, so a guard written against a config.h macro compiles
+ * to the UNGUARDED branch in those two files -- silently, because the C
+ * preprocessor evaluates an undefined name in #if as 0. That is exactly how
+ * the first cut of this switch shipped inert in sc_es1688.c. Every backend
+ * already includes ptops.h, so putting it here makes the guards real.
+ * Set to 0 to ship. */
+#define RATEDIAG 0
 
 /* PTDIAG: passthrough-tap forensics build (short-SFX stretch, 2026-08-21).
  * Borrows two 0x4F0 slots from sc_vew211's reconfig counters, which are
@@ -100,8 +120,31 @@ int PTOPS_CardIs( const char *id );
  * the old unqualified "set to 0 to ship" advice would have removed the cap
  * and shipped the uncapped tick that hard-hung the T2130CT. The cap and its
  * SBEPTBLK knob are unconditional now; only the counters and the exit bitmap
- * are gated here. Every release so far shipped with this at 1. */
+ * are gated here. Every release so far shipped with this at 1.
+ * Overridable from the build line (-DPTDIAG=0): tools/build.sh RELEASE=1. */
+#ifndef PTDIAG
 #define PTDIAG 1
+#endif
+
+/* SNDISR_TELEMETRY: the PER-TICK BIOS-scratch pokes -- the SNDISR entry
+ * counter and depth (0x4F7/0x4F9/0x4F0), the backends' irq_routine count and
+ * ring gauge (0x4F8/0x4F5), the PT_Feed counters (0x4FB/0x4FF, and the
+ * no-TSC byte accumulator on 0x4FC/0x4FD), the ES1688 feed stage marker
+ * (0x4F2). Each one is a far store through a freshly loaded fs on DJGPP;
+ * ten to fourteen of them run on every tick, at up to 2048 Hz on the
+ * CS4231A cards -- real 486 time for numbers a release never reads. 1 keeps
+ * every byte the bench notes document (the status quo); 0 leaves only the
+ * rare-event bytes (revivals, reconfigs, clamps, re-entries, SER catch-ups)
+ * and the TP755's own instrument. tools/build.sh RELEASE=1 sets 0. */
+#ifndef SNDISR_TELEMETRY
+#define SNDISR_TELEMETRY 1
+#endif
+#if SNDISR_TELEMETRY
+#define TEL_PokeB(addr,val)   LOW_PokeB((addr),(val))
+#else
+#define TEL_PokeB(addr,val)   ((void)(val))   /* keeps the ++ side effects */
+#endif
+
 
 /* Engine-generic ISR telemetry (the BIOS 0x4F0-0x4FF map -- see
  * doc/NOTES.md), formerly duplicated in sc_es1688.c and sc_vew211.c. */

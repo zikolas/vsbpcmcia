@@ -100,9 +100,10 @@ static int dbg_tsc_check(void)
 void SNDISR_dbg_tick(void)
 {
     ++dbg_tel_sndisr;
-    LOW_PokeB(0x4F7, (unsigned char)dbg_tel_sndisr);
-    LOW_PokeB(0x4F9, (unsigned char)(dbg_tel_sndisr >> 8));
-    if(++dbg_depth > dbg_maxdepth){ dbg_maxdepth = dbg_depth; LOW_PokeB(0x4F0, dbg_maxdepth); }
+    TEL_PokeB(0x4F7, (unsigned char)dbg_tel_sndisr);
+    TEL_PokeB(0x4F9, (unsigned char)(dbg_tel_sndisr >> 8));
+    if(++dbg_depth > dbg_maxdepth){ dbg_maxdepth = dbg_depth; TEL_PokeB(0x4F0, dbg_maxdepth); }
+
     if(SNDISR_HasTsc && dbg_depth == 1) dbg_t0 = dbg_rdtsc();
 }
 void SNDISR_dbg_exit(void)
@@ -112,8 +113,9 @@ void SNDISR_dbg_exit(void)
         unsigned u = ((dt >> 8) > 0xFFFFULL) ? 0xFFFFu : (unsigned)(dt >> 8);
         if(u > dbg_maxdur){
             dbg_maxdur = u;
-            LOW_PokeB(0x4FC, (unsigned char)u);
-            LOW_PokeB(0x4FD, (unsigned char)(u >> 8));
+            TEL_PokeB(0x4FC, (unsigned char)u);
+            TEL_PokeB(0x4FD, (unsigned char)(u >> 8));
+
         }
     }
     if(dbg_depth) dbg_depth--;
@@ -154,7 +156,11 @@ int SNDISR_PtBlkCap = 8;
 static unsigned char dbg_pt_maxblk, dbg_pt_exit;
 static void dbg_pt_why(unsigned char bit)
 {
-    if(!(dbg_pt_exit & bit)){ dbg_pt_exit |= bit; LOW_PokeB(0x4FA, dbg_pt_exit); }
+    if(!(dbg_pt_exit & bit)){ dbg_pt_exit |= bit;
+#if !RATEDIAG
+        LOW_PokeB(0x4FA, dbg_pt_exit);   /* 0x4FA belongs to RATEDIAG's direct-DAC rate */
+#endif
+    }
 }
 #endif
 
@@ -232,12 +238,42 @@ struct SNDISR_s {
 
 static struct SNDISR_s isr = {NULL,-1,0,0};
 
-#ifndef DJGPP
-/* here malloc/free is superfast since it's a very simple "stack" */
-#define MALLOCSTATIC 0
-#else
-#define MALLOCSTATIC 1
-#endif
+/* ---- ISR scratch buffer -------------------------------------------------
+ * DecodeADPCM and cv_rate each need a temporary the size of one conversion
+ * pass, and both used to malloc()/free() it PER CALL in interrupt context.
+ * DJGPP's malloc is not reentrant, so that was a latent hazard as much as a
+ * cost. One linear block is taken at init instead, with the same uncommitted
+ * guard page pPCM gets, so an overrun faults loudly instead of corrupting.
+ *
+ * The busy flag exists because SETIF=1 lets a second SNDISR nest. The two
+ * users are never live at once within a pass -- DecodeADPCM has copied back
+ * and released before cv_rate runs -- but a nested pass could ask while the
+ * outer one holds the buffer. That case falls back to malloc, i.e. exactly
+ * the behaviour being replaced, so the fast path is allocation-free and the
+ * slow path is no worse than today. (This also replaces MALLOCSTATIC, whose
+ * two branches differed only in where the same temporary came from.) */
+static uint8_t *isr_scratch;
+static uint32_t isr_scratch_size;
+static volatile int isr_scratch_busy;
+
+static void *ISR_ScratchGet( uint32_t need, int *owned )
+{
+    if ( !isr_scratch_busy && isr_scratch && need <= isr_scratch_size ) {
+        isr_scratch_busy = 1;
+        *owned = 1;
+        return isr_scratch;
+    }
+    *owned = 0;
+    return malloc( need );
+}
+
+static void ISR_ScratchPut( void *p, int owned )
+{
+    if ( owned )
+        isr_scratch_busy = 0;
+    else
+        free( p );
+}
 
 #if SLOWDOWN
 
@@ -273,6 +309,7 @@ static int DecodeADPCM(uint8_t *adpcm, int bytes)
     int bits = VSB_GetBits();
     int outbytes;
     int outcount = 0;
+    int owned;
     uint8_t* pcm;
 
     if( ISR_adpcm_state.useRef ) {
@@ -284,8 +321,12 @@ static int DecodeADPCM(uint8_t *adpcm, int bytes)
 
     /* bits may be 2,3,4 -> outbytes = bytes * 4,3,2 */
     outbytes = bytes * ( 9 / bits );
-    pcm = (uint8_t*)malloc( outbytes );
-    dbgprintf(("DecodeADPCM( %X, %u ): malloc(%u)=%X, bits=%u\n", adpcm, bytes, outbytes, pcm, bits ));
+    pcm = (uint8_t*)ISR_ScratchGet( (uint32_t)outbytes, &owned );
+    dbgprintf(("DecodeADPCM( %X, %u ): scratch(%u)=%X, bits=%u\n", adpcm, bytes, outbytes, pcm, bits ));
+    /* the old code dereferenced this unchecked; a NULL deref in the sound ISR
+     * is a hard wedge, and 0 samples for one block is merely a dropout */
+    if ( !pcm )
+        return 0;
 
     switch ( bits ) {
     case 2:
@@ -313,7 +354,7 @@ static int DecodeADPCM(uint8_t *adpcm, int bytes)
     //assert(outcount <= outbytes);
     dbgprintf(("DecodeADPCM: outcount=%u\n", outcount ));
     memcpy( adpcm, pcm, outcount );
-    free(pcm);
+    ISR_ScratchPut( pcm, owned );
     return outcount;
 }
 #endif
@@ -351,26 +392,16 @@ static unsigned int cv_rate( PCM_CV_TYPE_S *pcmsrc, const unsigned int nSamples,
 	unsigned int ipi;
 	//unsigned int inpos = (srcrate < dstrate) ? (instep >> 1) : 0;
 	unsigned int inpos = 0;
-#if MALLOCSTATIC
-	static int maxsample = 0;
-	static PCM_CV_TYPE_S* buff = NULL;
-#else
 	PCM_CV_TYPE_S* buff;
-#endif
+	int buffowned;
 
 	if(!nSamples)
 		return 0;
 
-#if MALLOCSTATIC
-	if ( nSamples > maxsample ) {
-		if ( buff )
-			free( buff );
-		buff = (PCM_CV_TYPE_S*)malloc( (nSamples+2) * sizeof(PCM_CV_TYPE_S) );
-		maxsample = nSamples;
-	}
-#else
-	buff = (PCM_CV_TYPE_S*)malloc( (nSamples+2) * sizeof(PCM_CV_TYPE_S));
-#endif
+	buff = (PCM_CV_TYPE_S*)ISR_ScratchGet(
+	           (uint32_t)((nSamples+2) * sizeof(PCM_CV_TYPE_S)), &buffowned );
+	if ( !buff )
+		return 0;   /* was an unchecked deref; 0 leaves the block unconverted */
 	memcpy( buff, pcmsrc, (nSamples+2) * sizeof(PCM_CV_TYPE_S) );
 
 	pcmdst = pcmsrc;
@@ -398,9 +429,7 @@ static unsigned int cv_rate( PCM_CV_TYPE_S *pcmsrc, const unsigned int nSamples,
 
 	//dbgprintf(("cv_rate(src/dst rates=%u/%u chn=%u smpl=%u step=%x end=%x)=%u\n", srcrate, dstrate, channels, nSamples, instep, inend, pcmdst - pcmsrc ));
 
-#if !MALLOCSTATIC
-	free(buff);
-#endif
+	ISR_ScratchPut( buff, buffowned );
     //return ( pcmdst - pcmsrc ); /* v2.0: shift added to return "true" sample count */
 	return ( (pcmdst - pcmsrc) >> ( channels - 1 ) );
 }
@@ -500,9 +529,19 @@ static int SNDISR_Interrupt( void )
      * bailing here keeps the feed at full rate and only thins out the heavy
      * render path. */
     if ( PT_Ops->render_div > 1 ) {
+        /* Countdown, not a modulo. render_div is loaded from the ops table,
+         * so the compiler cannot strength-reduce the % into a mask even
+         * though every value we ship is a power of two -- it emitted a
+         * 32-bit DIV (~40 cycles on a 486) on EVERY ISR entry purely to
+         * decide whether to render. Same 1-in-N rate, different phase
+         * (renders on the first tick rather than the Nth), which nothing
+         * depends on. */
         static unsigned rdiv_cnt;
-        if ( ++rdiv_cnt % (unsigned)PT_Ops->render_div )
+        if ( rdiv_cnt ) {
+            rdiv_cnt--;
             goto isrexit;
+        }
+        rdiv_cnt = (unsigned)PT_Ops->render_div - 1;
     }
 #endif
 
@@ -548,23 +587,34 @@ static int SNDISR_Interrupt( void )
     _enable_ints();
 #endif
 
-    //AU_setoutbytes( isr.hAU ); //v1.9: now obsolete
-    samples = AU_cardbuf_space( isr.hAU ) / ( sizeof(int16_t) * 2 ); //16 bit, 2 channels
 #ifndef NOES1688
-    /* keep one render pass inside one pump tick (see render_cap in ptops.h) */
-    if ( PT_Ops->render_cap && samples > PT_Ops->render_cap )
-        samples = PT_Ops->render_cap;
-    /* PT mode: pace by ring space instead (see decl comment). samples becomes
-     * a plain loop bound; keeping it small also caps the mixer / direct-DAC
-     * tails so a non-PT tick stays cheap. 1024 >> any real per-tick need
-     * (worst sustained stream ~350 guest bytes/tick at the idle pump rate). */
 #define PT_MODE_SAMPLES 1024
     if ( SNDISR_PassThru ) {
+        /* PT mode: pace by ring space instead (see decl comment). samples
+         * becomes a plain loop bound; keeping it small also caps the mixer /
+         * direct-DAC tails so a non-PT tick stays cheap. 1024 >> any real
+         * per-tick need (worst sustained stream ~350 guest bytes/tick at the
+         * idle pump rate).
+         * AU_cardbuf_space() is NOT called on this path: its result was
+         * overwritten right here on every tick -- a getpos call and two
+         * 32-bit divides for nothing -- and the only consumer of its side
+         * effects on a PT tick is the direct-DAC tail, which now calls it
+         * itself. */
         pt_mode = 1;
         pt_space = PT_Ops->space();
         samples = PT_MODE_SAMPLES;
-    }
+    } else
 #endif
+    {
+        //AU_setoutbytes( isr.hAU ); //v1.9: now obsolete
+        samples = AU_cardbuf_space( isr.hAU ) / ( sizeof(int16_t) * 2 ); //16 bit, 2 channels
+#ifndef NOES1688
+        /* keep one render pass inside one pump tick (see render_cap in ptops.h) */
+        if ( PT_Ops->render_cap && samples > PT_Ops->render_cap )
+            samples = PT_Ops->render_cap;
+#endif
+    }
+
     if ( !samples ) { /* no free space in DMA buffer? Shouldn't happen... */
         dbgprintf(("isr: ERROR - AU_cardbuf_space() returned 0 samples\n" ));
         goto isrexit;
@@ -660,7 +710,21 @@ static int SNDISR_Interrupt( void )
             }
         }
         /* don't resample if sample rates are close? */
+#ifndef NOES1688
+        if ( pt_block )
+            /* PT: the card plays the guest's own rate and cv_rate never runs,
+             * so the resampled-count arithmetic below (two or three 32-bit
+             * divides per block, per tick) was dead weight -- count is a loop
+             * bound here that pt_space and the block cap govern. It stays in
+             * guest frames, as the PT comments further down already assume;
+             * the one visible difference is that a tick with lots of ring
+             * room may take up to PT_MODE_SAMPLES guest frames instead of
+             * PT_MODE_SAMPLES * SB_Rate / freq. */
+            resample = false;
+        else
+#endif
         if( SB_Rate != freq ) {
+
             int tmpcnt = count * SB_Rate / freq;
             resample = true;
             //count = max( channels, count / ( ( freq + SB_Rate-1) / SB_Rate ));
@@ -879,7 +943,9 @@ static int SNDISR_Interrupt( void )
     if ( pt_mode ) {
         if ( pt_blocks > dbg_pt_maxblk ) {
             dbg_pt_maxblk = (unsigned char)pt_blocks;
-            LOW_PokeB(0x4F2, dbg_pt_maxblk);
+#if !RATEDIAG
+            LOW_PokeB(0x4F2, dbg_pt_maxblk);   /* 0x4F2 belongs to VSB.C under RATEDIAG */
+#endif
         }
         if ( pt_blocks >= 2 ) dbg_pt_why( PTD_MULTI );
         /* Attribute an exit reason only when the loop actually CONSUMED
@@ -910,14 +976,21 @@ static int SNDISR_Interrupt( void )
         if ( IdxSm < samples )
             dbgprintf(("isr: %u samples to add\n", samples - IdxSm ));
 # endif
-        for( i = IdxSm; i < samples; i++ )
-            *(isr.pPCM + i*2+1) = *(isr.pPCM + i*2) = 0;
+        /* memset, not a per-sample walk: 16-bit silence is byte-zero, so this
+         * is one rep stosd instead of (samples-IdxSm) iterations of an index
+         * multiply and two 16-bit stores. On the render path that bound is
+         * render_cap - up to 512 frames per ISR tick on the VEW211. */
+        if ( IdxSm < samples )
+            memset( isr.pPCM + IdxSm * 2, 0,
+                    (size_t)(samples - IdxSm) * 2 * sizeof(int16_t) );
 #else
         samples = IdxSm;
 #endif
     } else if ( IdxSm = VSB_ReadDirectSamples( (uint8_t *)isr.pPCM ) ) {
 
         char *pDest = (char *)isr.pPCM;
+
+
         //uint32_t freq = AU_getfreq( isr.hAU );
 
         /* calc the src frequency by formula:
@@ -925,6 +998,26 @@ static int SNDISR_Interrupt( void )
          * x = src-smpl * dst-freq / dst-smpls
          */
         uint32_t SB_Rate = IdxSm * freq / samples;
+#if RATEDIAG
+        /* DIRECT-DAC RATE (the RATEDIAG blind spot). DSP cmd 0x10 never sets
+         * vsb.Started, so VSB_Running() is false, the block loop never runs,
+         * and VSB_GetSampleRate() -- sndisr's only route into CalcSampleRate,
+         * where the 0x4F2/0x4F3 readout lives -- is never reached. Throughout
+         * direct-DAC playback that pair therefore holds a STALE time-constant
+         * reading left by the guest's SB detection, which is very easy to
+         * misread as live.
+         * This path derives its own rate above, so publish it: same rate>>8
+         * units as 0x4F2, so the two are directly comparable, and 0 until
+         * direct-DAC has actually run (which is the provenance signal -- no
+         * spare byte exists for a flag).
+         * 0x4FA IS ON LOAN. It normally carries sc_es1688's FULL-reconfig
+         * count and, under PTDIAG, the tap loop's exit bitmap; both are
+         * frozen while this path runs, since neither the tap nor PT_Feed
+         * executes without vsb.Started. Those two already wrote the same byte
+         * as each other, so RATEDIAG taking it removes an existing ambiguity
+         * rather than creating one. Both are silenced under RATEDIAG. */
+        LOW_PokeB( 0x4FA, (uint8_t)( SB_Rate >> 8 ) );
+#endif
 
         /* v2.0: cv_rate() now expects an extra, final sample */
         *(pDest + IdxSm) = *(pDest + IdxSm - 1);
@@ -933,8 +1026,13 @@ static int SNDISR_Interrupt( void )
         cv_bits_8_to_16( isr.pPCM, IdxSm + 1, 0 );
         IdxSm = cv_rate( isr.pPCM, IdxSm, 1, SB_Rate, freq );
         cv_channels_1_to_2( isr.pPCM, IdxSm );
-        for( i = IdxSm; i < samples; i++ )
-            *(isr.pPCM + i*2+1) = *(isr.pPCM + i*2) = 0;
+        /* memset, not a per-sample walk: 16-bit silence is byte-zero, so this
+         * is one rep stosd instead of (samples-IdxSm) iterations of an index
+         * multiply and two 16-bit stores. On the render path that bound is
+         * render_cap - up to 512 frames per ISR tick on the VEW211. */
+        if ( IdxSm < samples )
+            memset( isr.pPCM + IdxSm * 2, 0,
+                    (size_t)(samples - IdxSm) * 2 * sizeof(int16_t) );
     }
 
 #ifndef NOES1688
@@ -978,9 +1076,15 @@ static int SNDISR_Interrupt( void )
     }
 #else
     /* min: 10*10-1=ff ; ff >> 8 = 0, max: 100*100-1=ffff ; ffff >> 8 = ff */
-    voicevol = ( (voicevol | 0xF + 1) * (mastervol | 0xF + 1) - 1) >> 8;
+    /* PRECEDENCE: '+' binds tighter than '|', so "v | 0xF + 1" was "v | 0x10",
+     * never (v | 0xF) + 1. The comment above states the intent exactly -- the
+     * operand range is meant to be 0x10..0x100 -- but 0xF0|0x10 is 0xF0, so
+     * the product topped out at (0xF0*0xF0-1)>>8 = 0xE0. The 0xff test on the
+     * next line was therefore UNREACHABLE, unity never happened, and every
+     * sample paid a multiply for a permanent ~1.2 dB of attenuation. */
+    voicevol = ( ((voicevol | 0xF) + 1) * ((mastervol | 0xF) + 1) - 1) >> 8;
     if ( voicevol == 0xff ) voicevol = 0x100;
-    midivol  = ( (midivol  | 0xF + 1) * (mastervol | 0xF + 1) - 1) >> 8;
+    midivol  = ( ((midivol  | 0xF) + 1) * ((mastervol | 0xF) + 1) - 1) >> 8;
     if ( midivol == 0xff ) midivol = 0x100;
 #endif
 
@@ -1000,20 +1104,39 @@ static int SNDISR_Interrupt( void )
         if( IdxSm ) {
 # if MIXERROUTINE==0
 #  if VOICELR
-            voicevol2 = ( (voicevol2 | 0xF + 1) * (mastervol2 | 0xF + 1) - 1) >> 8;
+            voicevol2 = ( ((voicevol2 | 0xF) + 1) * ((mastervol2 | 0xF) + 1) - 1) >> 8;
             if ( voicevol2 == 0xff ) voicevol2 = 0x100;
 #  endif
+            /* a and b are PROVABLY 0..65535 once the +32768 bias is applied
+             * (the scaled sample spans -32768..32767), so mix in UNSIGNED.
+             * Two reasons, and the first one is a bug:
+             *   - a*b reaches 65535*65535 = 0xFFFE0001, which OVERFLOWS a
+             *     signed 32-bit int. The wrapped product fed the screen-blend
+             *     branch a bogus term: e.g. a=b=50000 should mix to 58171 but
+             *     computed 189240 and hit the full-scale clamp instead. So on
+             *     loud FM-plus-digital material this clipped where it should
+             *     have mixed. Unsigned holds the product exactly.
+             *   - /256 and /32768 on a SIGNED value are not shifts; the
+             *     compiler has to emit the round-toward-zero bias sequence.
+             *     Unsigned makes them >>8 and >>15. Together with the three
+             *     IMULs (13-42 cycles each on a 486) this loop is the whole
+             *     per-sample cost of an FM build, so it is worth the care.
+             * The sample scaling stays SIGNED - the PCM is signed - and >>8
+             * there rounds toward -inf rather than toward zero: one LSB, at
+             * -90 dBFS. The non-FM path below already scales with >>8. */
             for( i = 0; i < samples * 2; i++ ) {
-                int a = (*(isr.pPCM+i) * (int)voicevol / 256) + 32768;    /* convert to 0-65535 */
-                int b = (*(pPCMOPL+i) * (int)midivol / 256 ) + 32768; /* convert to 0-65535 */
-                int mixed = (a < 32768 || b < 32768) ? ((a*b)/32768) : ((a+b)*2 - (a*b)/32768 - 65536);
-                *(isr.pPCM+i) = (mixed > 65535 ) ? 0x7fff : mixed - 32768;
-#  if VOICERL
+                unsigned a = (unsigned)(((*(isr.pPCM+i) * (int)voicevol) >> 8) + 32768);
+                unsigned b = (unsigned)(((*(pPCMOPL+i) * (int)midivol)  >> 8) + 32768);
+                unsigned mixed = (a < 32768 || b < 32768) ? ((a*b) >> 15)
+                                 : ((a+b)*2 - ((a*b) >> 15) - 65536);
+                *(isr.pPCM+i) = (mixed > 65535 ) ? 0x7fff : (int16_t)(mixed - 32768);
+#  if VOICELR
                 i++;
-                a = (*(isr.pPCM+i) * (int)voicevol2 / 256) + 32768;    /* convert to 0-65535 */
-                b = (*(pPCMOPL+i) * (int)midivol / 256 ) + 32768; /* convert to 0-65535 */
-                mixed = (a < 32768 || b < 32768) ? ((a*b)/32768) : ((a+b)*2 - (a*b)/32768 - 65536);
-                *(isr.pPCM+i) = (mixed > 65535 ) ? 0x7fff : mixed - 32768;
+                a = (unsigned)(((*(isr.pPCM+i) * (int)voicevol2) >> 8) + 32768);
+                b = (unsigned)(((*(pPCMOPL+i) * (int)midivol)   >> 8) + 32768);
+                mixed = (a < 32768 || b < 32768) ? ((a*b) >> 15)
+                        : ((a+b)*2 - ((a*b) >> 15) - 65536);
+                *(isr.pPCM+i) = (mixed > 65535 ) ? 0x7fff : (int16_t)(mixed - 32768);
 #  endif
             }
 # elif MIXERROUTINE==1
@@ -1027,15 +1150,26 @@ static int SNDISR_Interrupt( void )
             if ( (( pPCMOPL + samples * 2 ) - isr.pPCM ) * sizeof(int16_t) > isr.dwMaxBytes )
                 isr.dwMaxBytes = (( pPCMOPL + samples * 2 ) - isr.pPCM ) * sizeof(int16_t);
 # endif
-        } else
+        } else if ( midivol != 0x100 )   /* unity: x * 0x100 >> 8 == x, skip */
             for( i = 0; i < samples * 2; i++, pPCMOPL++ ) *pPCMOPL = ( *pPCMOPL * midivol ) >> 8;
     } else {
 #endif
         if( IdxSm ) {
 # if VOICELR
-            voicevol2 = ( (voicevol2 | 0xF + 1) * (mastervol2 | 0xF + 1) - 1) >> 8;
+            voicevol2 = ( ((voicevol2 | 0xF) + 1) * ((mastervol2 | 0xF) + 1) - 1) >> 8;
             if ( voicevol2 == 0xff ) voicevol2 = 0x100;
 # endif
+            /* Unity is the COMMON case -- both mixer sliders at max -- and the
+             * precedence fix above is what finally lets voicevol reach 0x100.
+             * x * 0x100 >> 8 == x, so this whole pass over samples*2 values is
+             * a no-op there; skipping it is free CPU at full volume. */
+            if ( voicevol == 0x100
+# if VOICELR
+                 && voicevol2 == 0x100
+# endif
+               ) {
+                pPCMOPL = isr.pPCM + samples * 2;  /* where the loop would end */
+            } else
             for( i = 0, pPCMOPL = isr.pPCM; i < samples * 2; i++, pPCMOPL++ ) {
                 *pPCMOPL = ( *pPCMOPL * voicevol ) >> 8;
 # if VOICELR
@@ -1078,7 +1212,20 @@ static int SNDISR_Interrupt( void )
     }
 #endif
 #endif
+#ifndef NOES1688
+    /* PT mode skipped AU_cardbuf_space() at the top of the tick, and
+     * AU_writedata below is paced by the card_dmaspace figure that call
+     * maintains (writedata() hands the card nothing once it reads 0 -- and
+     * it starts at 0). Everything that reaches this tail on a PT tick needs
+     * it: direct-DAC bytes, and ADPCM blocks, which take the render path
+     * even in PT mode because the card cannot play them raw. The first cut
+     * refreshed it on the direct-DAC branch only and silenced Duke Nukem
+     * II's ADPCM sound effects on the PC110 (bench 2026-09-05). */
+    if ( pt_mode )
+        AU_cardbuf_space( isr.hAU );
+#endif
     AU_writedata( isr.hAU, samples * 2, isr.pPCM );
+
 
 #if SLOWDOWN
     if ( gvars.slowdown )
@@ -1120,6 +1267,20 @@ bool SNDISR_Init( void *hAU, uint16_t vol )
     __dpmi_set_page_attr( info.handle, gvars.buffsize * 4096, 1, 0);
     isr.pPCM = NearPtr( info.address );
     dbgprintf(("SNDISR_Init: pPCM=%X\n", isr.pPCM ));
+
+    /* ISR scratch (see ISR_ScratchGet): same size and same guard page as the
+     * PCM buffer, which covers both users comfortably -- cv_rate needs
+     * (nSamples+2)*2 bytes for at most 2*samples samples, and DecodeADPCM's
+     * output is about one guest block. Failure is NOT fatal: ScratchGet then
+     * falls back to malloc, i.e. the previous behaviour. */
+    info.address = 0;
+    info.size = ( gvars.buffsize + 1 ) * 4096;
+    if ( __dpmi_allocate_linear_memory( &info, 1 ) != -1 ) {
+        __dpmi_set_page_attr( info.handle, gvars.buffsize * 4096, 1, 0);
+        isr_scratch = (uint8_t *)NearPtr( info.address );
+        isr_scratch_size = gvars.buffsize * 4096;
+        dbgprintf(("SNDISR_Init: scratch=%X size=%X\n", isr_scratch, isr_scratch_size ));
+    }
 
     /* allocate a 128k uncommitted region used for DMA mappings */
     info.address = 0;

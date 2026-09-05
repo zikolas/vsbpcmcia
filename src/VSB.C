@@ -16,6 +16,7 @@
 #include "VMPU.H"
 #endif
 #include "AU.H"
+#include "HOSTSVC.H"   /* LOW_PokeB (RATEDIAG) */
 
 /* compatibility switches */
 #define FASTCMD14 1  /* 1=DSP cmd 0x14 for SB detection is handled instantly */
@@ -179,6 +180,14 @@ struct VSB_Status {
 };
 
 static struct VSB_Status vsb;
+
+/* DSP write-status busy counter (reads of base+0xC). It lives in the V86
+ * stub's variable block once real-mode traps exist, so the stub can answer
+ * those reads without a mode switch (rmcode1.asm isws, PTRAP_DspStatusCell);
+ * vsb.bWS otherwise. Every access below goes through this pointer, so the
+ * PM world and the stub always see one counter. */
+static uint8_t *vsb_pWS = &vsb.bWS;
+
 
 /* search item in table, return index if found, else -1 */
 
@@ -415,7 +424,8 @@ static void DSP_Reset( uint8_t value )
 #if CMD10LASTSMPL
         vsb.DirLastSmpl = 0x80;
 #endif
-        vsb.bWS = 0; /* init port 0c status count */
+        *vsb_pWS = 0; /* init port 0c status count */
+
         vsb.bTimeConst = 0xD2; /* = 22050 */
 #if FASTCMD14
         vsb.Cmd14Cnt = 4;
@@ -460,6 +470,7 @@ static int CalcSampleRate( uint16_t value )
 {
     int rc;
     uint8_t limit;
+    uint8_t clamped;
     unsigned int channels = 1;
 
     if( vsb.DSPVER < 0x300 )
@@ -475,9 +486,25 @@ static int CalcSampleRate( uint16_t value )
             limit = ( vsb.Bits == 2 ? 165 : (vsb.Bits == 3 ? 179 : (vsb.Bits == 4 ? 172 : 212)));
     }
 
+    clamped = ( value > limit ) ? 1 : 0;
     value = min(value, limit);
     //rc = 1000000 / (( 256 - value ) * channels );
     rc = 256000000u / (( 65536u - (value << 8) ) * channels );
+#if RATEDIAG
+    /* 0x4F2 = rate>>8 (169=43478, 88=22727, 43=11025); 0x4F3 = the raw time
+     * constant the guest wrote; 0x4F6 = sticky OR: 01 computed in high-speed,
+     * 02 computed out of it, 04 the ceiling actually reduced the value,
+     * 08 stereo (SB Pro divides by channels) at compute time. */
+    {
+        static uint8_t seen;
+        LOW_PokeB( 0x4F2, (uint8_t)( rc >> 8 ) );
+        LOW_PokeB( 0x4F3, (uint8_t)vsb.bTimeConst );
+        seen |= vsb.HighSpeed ? 0x01 : 0x02;
+        if ( clamped ) seen |= 0x04;
+        if ( channels >= 2 ) seen |= 0x08;
+        LOW_PokeB( 0x4F6, seen );
+    }
+#endif
     return rc;
 }
 
@@ -489,7 +516,8 @@ static void DSP_Write0C( uint8_t value, uint32_t flags )
 ////////////////////////////////////////////////////////
 {
     /* some progs want the cmd port 0x0C to be busy after the port has been written */
-    vsb.bWS = CMDPORTMASK;  /* v1.9: next read of port 0x0C will return status "busy" */
+    *vsb_pWS = CMDPORTMASK;  /* v1.9: next read of port 0x0C will return status "busy" */
+
     if ( vsb.dsp_cmd == SB_DSP_NOCMD ) {
         if( vsb.HighSpeed ) { /* highspeed mode rejects further cmds until reset (flag never set for SB16) */
             dbgprintf(("DSP_Write: cmd %X ignored, HighSpeed active\n", value ));
@@ -507,7 +535,8 @@ static void DSP_Write0C( uint8_t value, uint32_t flags )
          * timer interrupts and if the program detects the busy flag set it may just
          * exit.
          */
-        if ( value == 0x10 ) vsb.bWS = 0;
+        if ( value == 0x10 ) *vsb_pWS = 0;
+
 #endif
 #if SB16
         if (vsb.DSPVER >= 0x400)
@@ -699,8 +728,9 @@ static void DSP_DoCommand( uint32_t flags )
     case SB_DSP_8BIT_DIRECT: /* 10 */
         vsb.DirectBuffer[vsb.DirIdxW++] = vsb.dsp_in_data[0];
 #if CMD10NOWAIT
-        vsb.bWS = 0;
+        *vsb_pWS = 0;
 #endif
+
         dbgprintf(("DSP_DoCommand(%X): 8Bit Direct mode, data=%X\n", vsb.dsp_cmd, vsb.dsp_in_data[0] ));
         break;
     case SB_DSP_SET_SIZE: /* 48 - set DMA block size - used for autoinit cmds (and cmd 91?) */
@@ -845,7 +875,11 @@ static uint8_t DSP_Read0A( void )
         uint8_t rc;
         rc = vsb.DataBuffer[0];
         vsb.DataBytes--;
-        if (vsb.DataBytes) memcpy( vsb.DataBuffer, &vsb.DataBuffer[1], vsb.DataBytes );
+        /* memmove: source and destination overlap by construction, which is
+         * undefined for memcpy (it only ever worked because -Os happened to
+         * emit a forward byte loop). Also what let vsb.o join the -O2 set. */
+        if (vsb.DataBytes) memmove( vsb.DataBuffer, &vsb.DataBuffer[1], vsb.DataBytes );
+
         return( rc );
     }
     dbgprintf(("DSP_Read0A: read buffer empty, returning %X\n", vsb.DataBuffer[0] ));
@@ -860,8 +894,9 @@ static uint8_t DSP_Read0C( void )
 /////////////////////////////////
 {
     /* v1.9: cmd port status will be returned as busy "every now and then" */
-    vsb.bWS++;
-    return ((vsb.bWS & CMDPORTMASK) == 0 ) ? 0xff : 0x7f;
+    (*vsb_pWS)++;
+    return ((*vsb_pWS & CMDPORTMASK) == 0 ) ? 0xff : 0x7f;
+
 }
 
 /* read status register 02xE;
@@ -892,7 +927,12 @@ static uint8_t DSP_Read0F( void )
 void VSB_Init(int irq, int dma, int hdma, int type, void *hAU )
 ///////////////////////////////////////////////////////////////
 {
+    /* adopt the V86 stub's write-status counter when there is one (see
+     * vsb_pWS); PTRAP_Prepare_RM_PortTrap has run by now (main.c order) */
+    { uint8_t *cell = PTRAP_DspStatusCell();
+      if ( cell ) { *cell = vsb.bWS; vsb_pWS = cell; } }
     vsb.Irq = irq;
+
     vsb.Dma8 = dma;
     vsb.Dma16 = hdma;
     vsb.DSPVER = VSB_DSPVersion[type];

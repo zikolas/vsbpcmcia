@@ -49,6 +49,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "config.h"       // NOES1688 build switch (RATEDIAG lives in ptops.h)
 #include "hostsvc.h"      // toolchain compat: LOW_*, inportb (see the header)
 #include "hostisr.h"      // chained/iret PM interrupt vectors, both builds
 #include "au_cards.h"
@@ -113,6 +114,19 @@ static void DPMI_CallOldISR(DPMI_ISR_HANDLE *h){ (void)h; }   // still unused: I
 static uint16_t es_tel_feed16;
 static unsigned long es_tel_bytes;
 static unsigned char es_tel_irq;
+// Stage/reentry/start markers: stale forensics from the reentrancy #GP hunt.
+// A RATEDIAG build lends their scratch slots to VSB.C's rate measurement.
+#if RATEDIAG
+#define ES_DIAG_STAGE(v)    ((void)0)
+#define ES_DIAG_REENTRY(v)  ((void)0)
+#define ES_DIAG_START(v)    ((void)0)
+#else
+#define ES_DIAG_STAGE(v)    TEL_PokeB(0x4F2,(v))   /* per feed: under the telemetry gate */
+
+#define ES_DIAG_REENTRY(v)  LOW_PokeB(0x4F3,(v))
+#define ES_DIAG_START(v)    LOW_PokeB(0x4F6,(v))
+#endif
+
 #define ES_DEF_BASE   0x220
 #define RING_BYTES    8192U         // MUST keep card_dmasize (=RING*4) within SBEMU's MAIN_PCM
 #define RING_MASK     (RING_BYTES-1)
@@ -330,7 +344,11 @@ static void es_pt_reconfig(unsigned rate, unsigned bits, unsigned channels)
  es_pt_rate = rate; es_pt_bits = bits; es_pt_channels = channels;
  es_hw_rate = rate; es_hw_bits = bits; es_hw_channels = channels;  // chip armed with this format
  es_last_drain = LOW_PeekD(0x46C);                        // fresh arm = draining
+#if !RATEDIAG
  LOW_PokeB(0x4FA, ++es_tel_recfg);                    // telemetry (FULL reconfigs only)
+#else
+ ++es_tel_recfg;   // 0x4FA is on loan to RATEDIAG's direct-DAC rate readout
+#endif
  if(es_adaptive){                             // FEED-FORWARD: size the pump to this stream, re-arm.
   unsigned fifob = brate * ((bits >= 16) ? 2U : 1U);  // true FIFO drain bytes/sec (16-bit doubles it)
   es_rs_want = es_rs_for_brate(fifob);        // feedback ratchets faster from here if the game starves it
@@ -400,13 +418,23 @@ static unsigned es_pt_lat_ms = 250;
 static int ES1688_PT_Space(void)
 {
  unsigned used = (ring_wr - ring_rd) & RING_MASK;
- unsigned target = RING_BYTES - 64;
- if(es_pt_rate){
-  unsigned bps = es_pt_rate * es_pt_channels * ((es_pt_bits + 7) / 8);
-  target = (unsigned)((unsigned long)bps * es_pt_lat_ms / 1000UL);
-  if(target > RING_BYTES - 64) target = RING_BYTES - 64;
-  if(target < 512) target = 512;                  // never starve the FIFO pump
+ // The target depends only on the stream format, which changes at reconfig --
+ // but this runs once per ISR tick, so a 32-bit multiply and divide were paid
+ // thousands of times a second for an answer that had not moved. Three
+ // compares instead; sp_rate starts at ~0u so the first call always computes.
+ static unsigned sp_rate = ~0u, sp_chan, sp_bits, sp_target;
+ unsigned target;
+ if(es_pt_rate != sp_rate || es_pt_channels != sp_chan || es_pt_bits != sp_bits){
+  sp_rate = es_pt_rate; sp_chan = es_pt_channels; sp_bits = es_pt_bits;
+  sp_target = RING_BYTES - 64;
+  if(es_pt_rate){
+   unsigned bps = es_pt_rate * es_pt_channels * ((es_pt_bits + 7) / 8);
+   sp_target = (unsigned)((unsigned long)bps * es_pt_lat_ms / 1000UL);
+   if(sp_target > RING_BYTES - 64) sp_target = RING_BYTES - 64;
+   if(sp_target < 512) sp_target = 512;           // never starve the FIFO pump
+  }
  }
+ target = sp_target;
  if(used >= target) return 0;
  return (int)(target - used);
 }
@@ -422,12 +450,13 @@ static unsigned char es_reentry;   // DIAG: reentrant PT_Feed calls skipped (0x4
 static void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, unsigned bits, unsigned channels)
 {
  unsigned wr;
- LOW_PokeB(0x4F2, 1);                                 // DIAG stage: entry
- if(es_pt_feed_busy){ LOW_PokeB(0x4F3, ++es_reentry); return; }   // re-entered -> skip
+ ES_DIAG_STAGE(1);                                 // DIAG stage: entry
+ if(es_pt_feed_busy){ ES_DIAG_REENTRY(++es_reentry); return; }   // re-entered -> skip
  es_pt_feed_busy = 1;
  ++es_tel_feed16;                                              // telemetry (16-bit, lo/hi)
- LOW_PokeB(0x4FB, (unsigned char)es_tel_feed16);
- LOW_PokeB(0x4FF, (unsigned char)(es_tel_feed16 >> 8));
+ TEL_PokeB(0x4FB, (unsigned char)es_tel_feed16);
+ TEL_PokeB(0x4FF, (unsigned char)(es_tel_feed16 >> 8));
+
  es_last_feed = LOW_PeekD(0x46C);                     // audio flowing -> keep the pump fast
  // Waking from the idle throttle: between same-format sounds no reconfig runs,
  // so restore the stream's pump rate HERE, on the first feed. Rate-UP only
@@ -436,12 +465,12 @@ static void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, u
  if(!es_pt_active || rate != es_pt_rate || bits != es_pt_bits || channels != es_pt_channels)
  {
   uint8_t f = DPMI_DisableInterrupt();         // IF off: SNDISR can't re-enter during the long reconfig
-  LOW_PokeB(0x4F2, 2);                                // DIAG stage: reconfig
+  ES_DIAG_STAGE(2);                                // DIAG stage: reconfig
   es_pt_reconfig(rate, bits, channels);
   es_pt_active = 1; es_pt_ever = 1;            // passthrough confirmed -> self-pacer runs
   DPMI_RestoreInterrupt(f);
  }
- LOW_PokeB(0x4F2, 3);                                 // DIAG stage: ring fill
+ ES_DIAG_STAGE(3);                                 // DIAG stage: ring fill
  wr = ring_wr;
  // Ring overrun guard: never write past the read pointer. sndisr.c paces the
  // tap by ES1688_PT_Space(), so this should never clamp (0x4FE counts if it
@@ -455,8 +484,9 @@ static void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, u
  es_tel_bytes += (unsigned long)bytes;         // PT byte-rate telemetry (no-TSC boxes: 0x4FC/D = bytes>>4, 16-bit)
  if(!SNDISR_HasTsc){
   unsigned u16 = (unsigned)((es_tel_bytes >> 4) & 0xFFFF);
-  LOW_PokeB(0x4FC, (unsigned char)u16);
-  LOW_PokeB(0x4FD, (unsigned char)(u16 >> 8));
+  TEL_PokeB(0x4FC, (unsigned char)u16);
+  TEL_PokeB(0x4FD, (unsigned char)(u16 >> 8));
+
  }
  while(bytes > 0){
   int chunk = (int)(RING_BYTES - wr);      // contiguous space to end of ring
@@ -466,9 +496,9 @@ static void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, u
   wr = (wr + chunk) & RING_MASK;
  }
  ring_wr = wr;
- LOW_PokeB(0x4F2, 4);                                 // DIAG stage: pump
+ ES_DIAG_STAGE(4);                                 // DIAG stage: pump
  es_fifo_pump();   // keep the FIFO fed inline, so it never drains during the fill
- LOW_PokeB(0x4F2, 5);                                 // DIAG stage: done
+ ES_DIAG_STAGE(5);                                 // DIAG stage: done
  es_pt_feed_busy = 0;
 }
 
@@ -664,7 +694,7 @@ static void es_i5_remove(void)
 static void ES1688_start(struct audioout_info_s *aui)
 {
  es1688_card_s *card = aui->card_private_data;
- LOW_PokeB(0x4F6, 0xAA);         // DIAG: start ran + poke mechanism works
+ ES_DIAG_START(0xAA);         // DIAG: start ran + poke mechanism works
  ring_wr = ring_rd = 0;
  es_base = card->base;
  es_irqtone = getenv("IRQTONE") ? 1 : 0;  // diag: feed a tone from the IRQ handler
@@ -750,12 +780,17 @@ static long ES1688_getbufpos(struct audioout_info_s *aui)
 static int ES1688_irq(struct audioout_info_s *aui)
 {
  int guard; uint16_t base = es_base;
- LOW_PokeB(0x4F8, ++es_tel_irq);                   // DIAG: irq_routine called (SNDISR reached AU_isirq)
+ TEL_PokeB(0x4F8, ++es_tel_irq);                   // DIAG: irq_routine called (SNDISR reached AU_isirq)
  es_watchdog();                                             // re-arm if ticks died
  es_last_tick = LOW_PeekD(0x46C);                  // stamp this run
- { uint8_t f = DPMI_DisableInterrupt();                     // ack RTC. cli: with the IRQ0 heartbeat live,
-   outportb(0x70,0x0C); (void)inportb(0x71);                // a tick landing between index and data would
-   DPMI_RestoreInterrupt(f); }                              // leave the CMOS index clobber-prone
+ // ack RTC. No cli pair around it: irq_routine runs from SwitchStackISR
+ // BEFORE sndisr's _enable_ints, i.e. with interrupts (virtually) off on
+ // entry, so the IRQ0 heartbeat cannot land between the CMOS index and data
+ // bytes here -- the pair was one int 31h per tick (two on a host whose
+ // pushf shows the physical flag) guarding nothing. rtc_enable and
+ // es_rtc_setrate keep theirs: they also run from trap and heartbeat context.
+ outportb(0x70,0x0C); (void)inportb(0x71);
+
 
  if(es_irqtone){                                            // diagnostic tone path
   guard = 0;
@@ -776,7 +811,8 @@ static int ES1688_irq(struct audioout_info_s *aui)
   es_fifo_pump();
  }
  else es_fifo_pump();                                       // normal / passthrough feed
- LOW_PokeB(0x4F5, (unsigned char)(((ring_wr - ring_rd) & RING_MASK) >> 5));  // DIAG: ring fill, 32-byte units
+ TEL_PokeB(0x4F5, (unsigned char)(((ring_wr - ring_rd) & RING_MASK) >> 5));  // DIAG: ring fill, 32-byte units
+
  // SELF-PACING. Idle needs BOTH signals, because each alone is wrong somewhere:
  //  - es_pt_active flickers off every cycle during single-cycle DMA detection
  //    (SBEMU_Stop per cycle) -> using it alone stalls the pump mid-detect (slow launch)

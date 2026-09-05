@@ -221,12 +221,21 @@ static const struct { unsigned long hz; unsigned char code; } vew_rates[] = {
 // never be fed continuously -- a 44.1k guest maps to 22050 and the frame
 // stepper (below) decimates 2:1: correct pitch and tempo, half bandwidth.
 #define VEW_RATE_CEIL 22050UL
+// /MAXHZ lowers it further. On a slow host this backend's cost is the
+// INTERRUPT count, not the byte count: the 16-frame FIFO fixes bytes per
+// tick at ~11-16 whatever the rate, so 11025 needs a 1024 Hz pump and 22050
+// a 2048 Hz one. Capping the codec rate halves the ticks AND the bus
+// traffic; the frame stepper folds the guest down nearest-neighbour, exactly
+// as it already does for a 44.1k guest at 22050. (Same knob sc_scp55 grew
+// as SBEMAXHZ; here it is the switch only.)
+static unsigned long vew_rate_ceil = VEW_RATE_CEIL;
 static int vew_rate_pick(unsigned rate)
 {
  int i, best = 7; unsigned long bd = 0xFFFFFFFFUL;
  for(i=0;i<VEW_NRATES;i++){
   unsigned long d;
-  if(vew_rates[i].hz > VEW_RATE_CEIL) continue;
+  if(vew_rates[i].hz > vew_rate_ceil) continue;
+
   d = vew_rates[i].hz > rate ? vew_rates[i].hz - rate : rate - vew_rates[i].hz;
   if(d < bd){ bd = d; best = i; }
  }
@@ -298,11 +307,12 @@ static void vew_codec_config(unsigned rate, unsigned bits, unsigned channels)
  vew_step_acc = 0;
  { unsigned long d = vew_frate > rate ? vew_frate - rate : rate - vew_frate;
    vew_step_on = (!vew_no_step && d * 50UL > (unsigned long)rate) ? 1 : 0; }
-#if !PTDIAG
+#if !PTDIAG && !RATEDIAG
  LOW_PokeB(0x4F2, (unsigned char)(rate >> 8));  // guest rate >> 8 (pitch-bug forensics)
  LOW_PokeB(0x4FA, ++vew_tel_recfg);          // FULL reconfigs only
 #else
- (void)vew_tel_recfg;   // 0x4F2/0x4FA are on loan to the PT-tap forensics
+ (void)vew_tel_recfg;   // 0x4F2/0x4FA on loan: to the PT-tap forensics under
+                        // PTDIAG, to the rate readouts under RATEDIAG
 #endif
 }
 static void vew_codec_stop(void)
@@ -356,7 +366,10 @@ static void vew_pio_pump(void)
    if(vew_pt_active && (sr & 0x10)){
     static unsigned char vew_tel_ser;
     vew_fr_acc = hz * VEW_BURST_FRAMES;
-    LOW_PokeB(0x4F6, ++vew_tel_ser);         // SER catch-up count
+    ++vew_tel_ser;
+#if !RATEDIAG
+    LOW_PokeB(0x4F6, vew_tel_ser);           // SER catch-up count
+#endif                                       // (0x4F6 on loan to RATEDIAG)
    }
    outportb(cb+VC_SR, 0); }                           // clear SER/INT for the next interval
  while(vew_fr_acc >= hz && guard < VEW_BURST_FRAMES){
@@ -439,15 +452,27 @@ static unsigned vew_pt_lat_ms = 250;
 static int ES1688_PT_Space(void)
 {
  unsigned used = (ring_wr - ring_rd) & RING_MASK;
- unsigned target = RING_BYTES - 64;
- if(vew_pt_rate){
-  // The ring holds OUTPUT-rate bytes (the stepper may have re-stepped the
-  // guest stream), so the latency target is sized from the codec rate.
-  unsigned bps = (unsigned)vew_frate * vew_pt_channels * ((vew_pt_bits + 7) / 8);
-  target = (unsigned)((unsigned long)bps * vew_pt_lat_ms / 1000UL);
-  if(target > RING_BYTES - 64) target = RING_BYTES - 64;
-  if(target < 512) target = 512;
+ // The target depends only on the stream format, which changes at reconfig --
+ // but this runs once per ISR tick, so a 32-bit multiply and divide were paid
+ // thousands of times a second for an answer that had not moved. Three
+ // compares instead; sp_rate starts at ~0u so the first call always computes.
+ static unsigned sp_rate = ~0u, sp_frate, sp_chan, sp_bits, sp_target;
+ unsigned target;
+ if(vew_pt_rate != sp_rate || (unsigned)vew_frate != sp_frate
+    || vew_pt_channels != sp_chan || vew_pt_bits != sp_bits){
+  sp_rate = vew_pt_rate; sp_frate = (unsigned)vew_frate;
+  sp_chan = vew_pt_channels; sp_bits = vew_pt_bits;
+  sp_target = RING_BYTES - 64;
+  if(vew_pt_rate){
+   // The ring holds OUTPUT-rate bytes (the stepper may have re-stepped the
+   // guest stream), so the latency target is sized from the codec rate.
+   unsigned bps = (unsigned)vew_frate * vew_pt_channels * ((vew_pt_bits + 7) / 8);
+   sp_target = (unsigned)((unsigned long)bps * vew_pt_lat_ms / 1000UL);
+   if(sp_target > RING_BYTES - 64) sp_target = RING_BYTES - 64;
+   if(sp_target < 512) sp_target = 512;
+  }
  }
+ target = sp_target;
  if(used >= target) return 0;
  { unsigned space = target - used;
    // The caller counts GUEST bytes; the stepper shrinks (or grows) them on
@@ -466,11 +491,16 @@ static unsigned char es_tel_drop;                     // 0x4FE: ring-full feed c
 static void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, unsigned bits, unsigned channels)
 {
  unsigned wr;
- if(vew_pt_feed_busy){ LOW_PokeB(0x4F3, ++es_reentry); return; }
+ if(vew_pt_feed_busy){ ++es_reentry;
+#if !RATEDIAG
+  LOW_PokeB(0x4F3, es_reentry);              // 0x4F3 on loan to RATEDIAG
+#endif
+  return; }
  vew_pt_feed_busy = 1;
  ++es_tel_feed16;
- LOW_PokeB(0x4FB, (unsigned char)es_tel_feed16);
- LOW_PokeB(0x4FF, (unsigned char)(es_tel_feed16 >> 8));
+ TEL_PokeB(0x4FB, (unsigned char)es_tel_feed16);
+ TEL_PokeB(0x4FF, (unsigned char)(es_tel_feed16 >> 8));
+
  vew_feed_seq = vew_tick_seq;
  // Waking from the idle throttle: between same-format sounds no reconfig
  // runs, so restore the stream's pump rate HERE (rate-up only).
@@ -542,8 +572,9 @@ static void ES1688_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, u
  }
  if(!SNDISR_HasTsc){
   unsigned u16 = (unsigned)((es_tel_bytes >> 4) & 0xFFFF);
-  LOW_PokeB(0x4FC, (unsigned char)u16);
-  LOW_PokeB(0x4FD, (unsigned char)(u16 >> 8));
+  TEL_PokeB(0x4FC, (unsigned char)u16);
+  TEL_PokeB(0x4FD, (unsigned char)(u16 >> 8));
+
  }
  ring_wr = wr;
  vew_pio_pump();                                      // keep the FIFO fed inline
@@ -647,6 +678,8 @@ static int VEW211_adetect(struct audioout_info_s *aui)
  const char *l = getenv("SBEPTLAT");
  if(!PTOPS_CardIs("vew211")) return 0;
  if(getenv("SBENORS")) vew_no_step = 1;               // disable the frame stepper (A/B)
+ if(FOpts.maxhz) vew_rate_ceil = (unsigned long)FOpts.maxhz;   // /MAXHZ (main.c range-checks it)
+
  // /BASE here is the PCMCIA I/O WINDOW (codec at +4), not an SB DSP base --
  // one switch, but only one backend ever reads it because /CARD is required.
  if(FOpts.base) base = (uint16_t)FOpts.base;
@@ -792,19 +825,24 @@ static long VEW211_getbufpos(struct audioout_info_s *aui)
 static int VEW211_irq(struct audioout_info_s *aui)
 {
  (void)aui;
- LOW_PokeB(0x4F8, ++es_tel_irq);
+ TEL_PokeB(0x4F8, ++es_tel_irq);
  ++vew_tick_seq;
  vew_watchdog();
- { uint8_t f = DPMI_DisableInterrupt();               // cli: the IRQ0 heartbeat could
-   outportb(0x70,0x0C); (void)inportb(0x71);          // land between CMOS index+data
-   DPMI_RestoreInterrupt(f); }
+ // ack RTC. No cli pair: irq_routine runs from SwitchStackISR BEFORE
+ // sndisr's _enable_ints, i.e. with interrupts (virtually) off on entry, so
+ // the IRQ0 heartbeat cannot land between the CMOS index and data bytes --
+ // the pair was one int 31h per tick, at up to 2048 Hz, guarding nothing.
+ // rtc_enable/vew_rtc_setrate keep theirs (trap and heartbeat context).
+ outportb(0x70,0x0C); (void)inportb(0x71);
+
 
  { unsigned long hz = VEW_RTC_HZ();                   // one RTC period of feed credit;
    vew_fr_acc += vew_frate;                           // burst-capped so a stall can't
    if(vew_fr_acc > hz * VEW_BURST_FRAMES)             // run the pump ahead into full-
     vew_fr_acc = hz * VEW_BURST_FRAMES; }             // FIFO writes (silently dropped)
  vew_pio_pump();
- LOW_PokeB(0x4F5, (unsigned char)(((ring_wr - ring_rd) & RING_MASK) >> 5));  // ring gauge
+ TEL_PokeB(0x4F5, (unsigned char)(((ring_wr - ring_rd) & RING_MASK) >> 5));  // ring gauge
+
 
  // Self-pacing keyed on FEED RECENCY (our tick units) + RING OCCUPANCY --
  // deliberately NOT on vew_pt_active (which sticks at 1 when a guest exits
@@ -818,10 +856,22 @@ static int VEW211_irq(struct audioout_info_s *aui)
  if(vew_adaptive && vew_pt_ever){
   unsigned used = (ring_wr - ring_rd) & RING_MASK;
   uint32_t gap = vew_tick_seq - vew_feed_seq;
-  uint32_t lim = (VEW_RTC_HZ() * (220UL + 2UL * vew_pt_lat_ms)) / 1000UL;  // scale-invariant ~720ms
+  // lim is a 32-bit DIVIDE and this runs on every ISR tick, up to 2048 Hz.
+  // Only vew_rtc_rs varies (vew_pt_lat_ms is set once in adetect and never
+  // again), so recompute it when the pump rate actually changes.
+  static unsigned char lim_rs;
+  static uint32_t lim;
+  if(lim_rs != vew_rtc_rs){
+   lim_rs = vew_rtc_rs;
+   lim = (VEW_RTC_HZ() * (220UL + 2UL * vew_pt_lat_ms)) / 1000UL;  // scale-invariant ~720ms
+  }
   if(gap >= lim){
    if(!used && vew_rtc_rs != VEW_RS_IDLE) vew_rtc_setrate(VEW_RS_IDLE);
-  }else if(used < VEW_RING_LOW && vew_rtc_rs > vew_rs_for_frate((unsigned)vew_frate)){
+  // vew_rs_want IS vew_rs_for_frate(vew_frate): PT_Feed recomputes it from
+  // vew_frate on every format change, in the same block that sets
+  // vew_pt_ever, and this branch is gated on vew_pt_ever. Calling it again
+  // per tick just repeats a divide plus a search loop for the same answer.
+  }else if(used < VEW_RING_LOW && vew_rtc_rs > vew_rs_want){
    // FLOOR IS THE STREAM'S NEED, NOT THE GLOBAL RS_MIN (2026-08-24).
    // The ratchet used to run all the way to VEW_RS_MIN = 2048 Hz even when
    // vew_rs_for_frate() says 1024 Hz suffices -- at 11025 that is 689 f/s per

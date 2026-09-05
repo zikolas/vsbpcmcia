@@ -50,6 +50,13 @@ ticks exit early). `STACKCHECK=1` in stackisr.asm trips fatal_error(3) at
 
 Cleared before a test with 16 zero bytes. All counters wrap.
 
+The per-tick bytes (0x4F0, 0x4F5, 0x4F7/0x4F9, 0x4F8, 0x4FB/0x4FF, the
+no-TSC 0x4FC/0x4FD, the ES build's 0x4F2 stage) sit behind `SNDISR_TELEMETRY`
+(src/ptops.h, default 1). `RELEASE=1 tools/build.sh` sets it to 0 together
+with `PTDIAG 0`: a dozen far stores per pump tick is real 486 time, and a
+release never reads them. The rare-event bytes stay in every build.
+
+
 | Addr | Meaning |
 |------|---------|
 | 0x4F0 | max SNDISR nesting depth seen (goal: 1) |
@@ -61,7 +68,7 @@ Cleared before a test with 16 zero bytes. All counters wrap.
 | 0x4F6 | VEW211 build: SER catch-up count (codec-starvation refills -- pump ticks were lost to the guest; sustained growth in-game = tick loss, benign at idle); ES build: 0xAA once ES1688_start ran |
 | 0x4F7/0x4F9 | SNDISR tick counter, 16-bit lo/hi |
 | 0x4F8 | ES1688_irq calls (8-bit; tracks 0x4F7 lo) |
-| 0x4FA | FULL chip reconfigs (fast-resumes not counted) |
+| 0x4FA | FULL chip reconfigs (fast-resumes not counted). Under `RATEDIAG`: the direct-DAC inferred rate, see below |
 | 0x4FB/0x4FF | PT_Feed calls, 16-bit lo/hi |
 | 0x4FC/0x4FD | TSC boxes: longest outermost ISR pass, 256-cycle units; no-TSC boxes: PT bytes >> 4, 16-bit |
 | 0x4FE | PT_Feed ring-overfeed clamps (goal: 0) |
@@ -230,6 +237,28 @@ the two `sc_vew211.c` pokes whose slots it borrows:
 | 0x4F2 | most guest DMA blocks consumed in ONE tick. **1 = never more than one** |
 | 0x4FA | bitmap of loop-exit reasons: 01 guest never re-armed, 02 sample bound, 04 ring full (correct backpressure), 08 partial block, 10 a tick took 2+ blocks |
 
+`RATEDIAG` (`src/ptops.h`) measures what the guest actually asks of the DSP
+rate path, and silences every other writer of the slots it borrows -- the
+`sc_es1688.c` stage markers, `sndisr.c`'s PTDIAG block counter and exit
+bitmap, and `sc_es1688.c`'s reconfig count:
+
+| slot | meaning |
+|---|---|
+| 0x4F2 | rate >> 8 as computed from the guest's time constant (169=43478, 88=22727, 43=11025) |
+| 0x4F3 | the raw time constant the guest wrote |
+| 0x4F6 | sticky OR: 01 computed in high-speed, 02 computed out of it, 04 the ceiling clamped the value, 08 stereo at compute time |
+| 0x4FA | direct-DAC (DSP cmd 0x10) inferred rate >> 8; **0 = that path has not run** |
+
+0x4FA exists because the other three cannot see direct-DAC at all. Cmd 0x10
+does not set `vsb.Started`, so `VSB_Running()` is false, `sndisr.c`'s block
+loop never entered, and `VSB_GetSampleRate()` -- its only route into
+`CalcSampleRate`, where 0x4F2/0x4F3/0x4F6 are written -- never called. Through
+an entire direct-DAC session those three hold whatever the game's SB detection
+left there at startup, which reads exactly like a live measurement. Compare
+0x4FA against 0x4F2 directly: same units, different derivation (0x4FA is
+`IdxSm * freq / samples`, an inference from how many samples arrived per tick,
+not a time constant).
+
 `test/test05.asm` (derived from upstream's TEST01) reproduces the block pattern
 without the game, in 3 KB -- so it runs with comrade resident and the whole
 measurement is scriptable, instead of needing Duke's 560 K and a human at the
@@ -284,3 +313,51 @@ or the guest's own re-arm latency exceeds a tick. **Measure the live tick rate
 before designing a fix**: read the 16-bit counter (`0x4F7` lo / `0x4F9` hi)
 twice a known interval apart *while a sound plays* -- it wraps every 32 s at
 2048 Hz, and idle throttles to 32 Hz so an idle read tells you nothing.
+
+## The render tail, and the formats that reach it (`test/test06.asm`)
+
+`sndisr.c` gates the passthrough tap on
+
+```c
+pt_block = pt_mode && VSB_GetBits() >= 8;
+```
+
+so **ADPCM** (2/3/4 bits) fails it, and **direct-DAC** (DSP cmd 10h) never sets
+`vsb.Started` at all -- `VSB_Running()` is false, the block loop never runs.
+Both therefore leave `pt_took` at 0, the ISR does not take its `goto isrexit`
+shortcut, and the whole render tail executes: `DecodeADPCM`, `cv_rate`, the
+silence `memset`, the volume pass, `AU_writedata`.
+
+That tail is the least-exercised code in the driver and TEST01..TEST05 cannot
+reach it -- they are all 8-bit or wider, so they all take the tap. TEST06
+drives both formats:
+
+    TEST06 [mode] [rate] [seconds] [blocksize] [irq]
+      mode 0   4-bit ADPCM single-cycle (DSP 75h), DMA + SB IRQ
+      mode 1   direct-DAC (DSP 10h), no DMA, no IRQ, tick-paced
+
+Mode 0 is the better coverage run: it reaches `DecodeADPCM` *and* `cv_rate`,
+i.e. both users of the ISR scratch buffer. Mode 1 is the minimal reproducer
+for the wedge below.
+
+**It doubles as a wedge reproducer.** On a passthrough backend `samples` is
+forced to `PT_MODE_SAMPLES` (1024) whatever the guest supplied, and
+`sc_es1688`, `sc_vew211` and `sc_scp55` all register `NULL` for the ops
+table's `depth` hook -- so sndisr's nesting limiter
+
+```c
+if ( PT_Ops->depth && PT_Ops->depth() > 3 ) goto isrexit;
+```
+
+short-circuits and never runs on those three. Watch while it runs:
+
+| slot | meaning |
+|---|---|
+| 0x4F0 | max SNDISR nesting depth. **Healthy = 1**; climbing = the tail is overrunning its tick |
+| 0x4F1 | render-guard skips. **Healthy = 0**; nonzero confirms re-entry |
+| 0x4FA | RATEDIAG builds, mode 1: direct-DAC inferred rate >> 8, should track the `rate` argument |
+
+On an SB-compatible card this is a driver-only concern -- a direct-DAC guest
+needs no DMA, so it can simply talk to the real chip with the enabler alone
+and no vsbpcm loaded. On the CS4231A, CS4248 and EMU8200 cards there is no SB
+silicon to fall back to, so the render tail is the only path and this matters.

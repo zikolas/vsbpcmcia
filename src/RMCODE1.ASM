@@ -28,7 +28,14 @@ _0004 db ?	; current OPL index (stub shadow; routes timer-family writes)
 _0005 db ?	; 0x388 status cache, maintained by ptrap.c (TP755)
 wPICp dw ?	; PIC port to trap ( 0020h or 0ffffh )
 dwQPI dd ?	; QPI entry Jemm/Qemm, for "untrapped io"
+wFmSB dw ?	; emulated SB base whose FM aliases (+0..3, +8/9) are forwarded
+		; in-stub to the real OPL3 at 388h; 0FFFFh = not armed
+wDspWS dw ?	; emulated DSP write-status port (base+0Ch), answered in-stub
+		; from bDspWS; 0FFFFh = not armed
+bDspWS db ?	; DSP_Read0C's 2-bit busy counter (vsb.c owns every write)
+bDspPad db ?	; pad: keeps codev86 at an even offset
 if HANDLE_IN_388H_DIRECTLY
+
 ;--- OPL write ring (SPSC, v86 stub produces / SNDISR drains): each entry is
 ;--- one complete register write, lo=value hi=index. The ring itself lives in
 ;--- sc_tp755's DOS block (patched in at init) -- the PSP has no room.
@@ -57,10 +64,11 @@ _TEXT segment word public 'CODE'
 	assume ds:nothing, ss:nothing
 
 if HANDLE_IN_388H_DIRECTLY
-vars rmcode1 <0,0,0,20h,0,0,0,0,0,0>
+vars rmcode1 <0,0,0,20h,0,0FFFFh,0FFFFh,0,0,0,0,0,0,0>
 else
-vars rmcode1 <0,0,0,20h,0>
+vars rmcode1 <0,0,0,20h,0,0FFFFh,0FFFFh,0,0>
 endif
+
 
 ;--- Multi-byte gate + the 0A0h short-circuit: BOTH builds need these, so
 ;--- they sit outside HANDLE_IN_388H_DIRECTLY. 0A0h is trapped purely so a
@@ -80,6 +88,31 @@ ife RMPICTRAPDYN
 	je is20
 endif
 
+;--- SB-base FM aliases (base+0..3, base+8/9). On a card with real FM behind
+;--- an UNTRAPPED 388h, ptrap.c arms wFmSB and the forward happens HERE, as a
+;--- plain IN/OUT in V86 -- no RMCB round trip. Never armed under FMSHIM or
+;--- FMVOL (388h stays trapped there; a direct OUT would recurse into this
+;--- stub) nor with the software OPL. Era drivers pad every register write
+;--- with 6-35 status reads through the same alias, so for a real-mode guest
+;--- driving music via the Sound Blaster base this is the whole FM trap tax.
+	cmp word ptr [vars.wFmSB], 0FFFFh
+	je nofm
+	push ax
+	mov ax, dx
+	sub ax, [vars.wFmSB]
+	cmp ax, 3			; base+0..3
+	jbe isfm
+	sub ax, 8
+	cmp ax, 1			; base+8/9
+	jbe isfm
+	pop ax
+nofm:
+;--- DSP write-status reads (base+0Ch, "is the DSP busy?"): a driver polls
+;--- this before EVERY command or data byte it writes, so answering it here
+;--- roughly halves the round trips of a DSP command sequence.
+	cmp dx, [vars.wDspWS]
+	je isws
+
 if HANDLE_IN_388H_DIRECTLY
 	cmp dx, 388h
 	je is388
@@ -89,6 +122,42 @@ endif
 
 normal:
 	jmp [vars.rmcb]
+
+;--- FM alias: rewrite the port to 388h + (port and 3) and do the access.
+;--- The base is 16-aligned, so base+8/9 land on 388h/389h.
+isfm:
+	pop ax
+	push dx
+	and dx, 3
+	add dx, 388h
+	test cl, 4			; OUT instr?
+	jz isfmin
+	out dx, al
+	pop dx
+	clc				; handled
+	retf
+isfmin:
+	in al, dx
+	pop dx
+	clc
+	retf
+
+;--- DSP write-status: the same 2-bit counter vsb.c's DSP_Read0C keeps --
+;--- ready (7Fh) three reads out of four, busy (0FFh) on the fourth -- and
+;--- vsb.c resets it on every write to the port. Writes still trap; the
+;--- counter cell is shared (PTRAP_DspStatusCell), so both sides agree.
+isws:
+	test cl, 4			; OUT instr?
+	jnz normal			; the write side is vsb.c's
+	inc byte ptr [vars.bDspWS]
+	mov al, 7Fh
+	test byte ptr [vars.bDspWS], 3
+	jnz @F
+	mov al, 0FFh
+@@:
+	clc
+	retf
+
 
 if HANDLE_IN_388H_DIRECTLY
 

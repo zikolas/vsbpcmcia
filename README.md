@@ -114,7 +114,12 @@ See deploy/ for working batches.
  * `/DACRATE` codec rate in Hz (def per card). On the ES1688 passthrough this
    only sets the idle/bring-up rate — the guest's own format wins on the first
    feed. On the VEW211, SCP55 and TP755 it is the codec's actual rate.
+ * `/MAXHZ`   codec rate ceiling in Hz (VEW211/SCP55; def 22050). The CPU knob
+   for a slow host: the 16-frame FIFO makes the pump interrupt count scale with
+   the codec rate, and the frame stepper folds a faster guest down onto the
+   cap. `/MAXHZ11025` halves the ticks of a 22 kHz stream.
  * `/CVOL`    codec DAC attenuation 0-63, ~1.5 dB per step (VEW211/SCP55/TP755)
+
  * `/FMVOL`   volume trim on a REAL OPL3, 0-63 TL steps
  * `/FMSHIM`  pretend the card has no FM chip (bench diagnostic; see below)
  * `/A /I /D /T /H` the emulated SB's geometry (base, IRQ, DMA, type, high DMA)
@@ -124,8 +129,11 @@ between runs, so a base or card left over from one launcher silently
 redirected the next. Only transient bench knobs remain in the environment —
 `SBERTC` (fixed RTC pump rate-select 3-15), `SBEPTLAT` (passthrough ring
 latency target, ms), `SBENORS` (VEW211/SCP55: disable the frame stepper),
-`SBEMAXHZ` (SCP55: cap the codec rate), `ESNOI8`
+`SBEMAXHZ` (SCP55: cap the codec rate; `/MAXHZ` is the switch form for both
+CS4231A cards), `SBENOSTUB` (leave the V86 stub's two SB fast paths — the FM
+alias forward and the DSP write-status answer — disarmed, for an A/B), `ESNOI8`
 (disable the IRQ0 watchdog heartbeat), `ESIRQ5`, `IRQTONE`, `FIFOTEST`.
+
 
 ### FM and the detection shim
 
