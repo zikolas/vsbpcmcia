@@ -13,12 +13,18 @@ DSP_DMADAC8BIT   		equ 014h
 DSP_SETTIMECONST 		equ 040h
 DSP_SETOUTSAMPLERATE	equ 041h	;send rate with high byte first
 DSP_SETINPSAMPLERATE	equ 042h
+DSP_SETSIZE				equ 048h
+DSP_ADPCM4BIT			equ 074h	;4 bit single-cycle ADPCM
+DSP_ADPCM4BITREF		equ 075h	;4 bit single-cycle ADPCM with Ref
+DSP_ADPCM4BITAUTO		equ 07Dh	;4 bit autoinit ADPCM (with Ref)
+DSP_DMADAC8BITHS		equ 091h	;8 bit single-cycle highspeed
 DSP_SINGLECYCLEOUT16	equ 0B0h	;16 bit single-cycle for output
 DSP_AUTOINITOUT16		equ 0B6h	;16 bit autoinit for output
 DSP_SINGLECYCLEOUT8		equ 0C0h	;8 bit single-cycle for output
 DSP_AUTOINITOUT8 		equ 0C6h	;8 bit autoinit for output
 DSP_PAUSE8BIT           equ 0D0h
 DSP_ENABLESPEAKER		equ 0D1h
+DSP_DISABLESPEAKER		equ 0D3h
 DSP_CONTINUE8BIT        equ 0D4h
 DSP_PAUSE16BIT          equ 0D5h
 DSP_CONTINUE16BIT       equ 0D6h

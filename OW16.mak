@@ -31,7 +31,7 @@
 #    Our backends reach BACK into the engine (PTOPS_Register, PTOPS_CardIs,
 #    seven SNDISR_* entries, PTRAP_SetOplRing, FOpts), and three of those are
 #    DATA, which no call thunk can bridge. Nothing forces the split:
-#    startup/init1632.asm already sets CSGT64K=1 and gives DGROUP a 4GB limit,
+#    src/startup/init1632.asm already sets CSGT64K=1 and gives DGROUP a 4GB limit,
 #    and the linked result is ~48K of code and ~41K of data -- both inside 64K
 #    anyway. One module also keeps the object list the same as djgpp.mak's,
 #    which is what makes the two binaries comparable.
@@ -76,7 +76,7 @@ NAME=vsbpcm16
 
 !if $(DEBUG)
 OUTD=ow16d
-C_DEBUG_FLAGS=-D_DEBUG -DSNDISRLOG
+C_DEBUG_FLAGS=-D_DEBUG
 A_DEBUG_FLAGS=-D_DEBUG -Fl=$*
 !else
 OUTD=ow16
@@ -94,14 +94,14 @@ OW19=-DOW19
 OBJFILES = &
 	$(OUTD)/main.obj		$(OUTD)/sndisr.obj		$(OUTD)/ptrap.obj		$(OUTD)/linear.obj		$(OUTD)/pic.obj &
 	$(OUTD)/vsb.obj			$(OUTD)/vdma.obj		$(OUTD)/virq.obj		$(OUTD)/vopl3.obj		$(OUTD)/vmpu.obj		$(OUTD)/tsf.obj &
-	$(OUTD)/fmvol.obj		$(OUTD)/fmshim.obj		$(OUTD)/hostsvc.obj &
+	$(OUTD)/fmvol.obj		$(OUTD)/fmshim.obj		$(OUTD)/hostsvc.obj		$(OUTD)/adpcm.obj &
 	$(OUTD)/au_cards.obj	$(OUTD)/dmabuff.obj		$(OUTD)/physmem.obj		$(OUTD)/timer.obj &
 	$(OUTD)/sc_es1688.obj	$(OUTD)/sc_vew211.obj	$(OUTD)/sc_scp55.obj &
 	$(OUTD)/sc_mc8k.obj	$(OUTD)/sc_tp755.obj &
 	$(OUTD)/stackio.obj		$(OUTD)/stackisr.obj	$(OUTD)/sbisr.obj		$(OUTD)/int31.obj		$(OUTD)/rmwrap.obj		$(OUTD)/mixer.obj &
 	$(OUTD)/hapi.obj		$(OUTD)/dprintf.obj		$(OUTD)/vioout.obj		$(OUTD)/djdpmi.obj		$(OUTD)/uninst.obj		$(OUTD)/fileacc.obj &
-	$(OUTD)/pmisr.obj		$(OUTD)/rte200.obj		$(OUTD)/logfile.obj		$(OUTD)/cv1to2.obj &
-	$(OUTD)/sbrk.obj		$(OUTD)/malloc.obj
+	$(OUTD)/pmisr.obj		$(OUTD)/rte200.obj		$(OUTD)/logfile.obj &
+	$(OUTD)/sbrk.obj		$(OUTD)/malloc.obj		$(OUTD)/getenv.obj		$(OUTD)/strtol.obj		$(OUTD)/_matherr.obj
 
 C_OPT_FLAGS=-q -oxa -ms -ecc -5s -fp5 -fpi87 -wcd=111 -za99
 # OW's wpp386 doesn't like the -ecc option ("function modifier cannot be used ...")
@@ -109,18 +109,18 @@ C_OPT_FLAGS=-q -oxa -ms -ecc -5s -fp5 -fpi87 -wcd=111 -za99
 CPP_OPT_FLAGS=-q -oxa -ms -bc -5s -fp5 -fpi87
 # ONEMODULE: there is no sndcard.drv boundary in this build, so the AU_*
 # entry points must be NEAR, not the far exports upstream needs. See
-# mpxplay/au_cards.h and doc/16bit.md.
+# src/hw/au_cards.h and doc/16bit.md.
 C_EXTRA_FLAGS=-DNOTFLAT -DONEMODULE
 
 INCLUDES=-I$(WATCOM)\h
 LIBS=
 
 {src}.asm{$(OUTD)}.obj
-	@$(ASM) -q -DNOTFLAT -DONEMODULE -Istartup -D?MODEL=small $(A_DEBUG_FLAGS) -Fo$@ $<
+	@$(ASM) -q -DNOTFLAT -DONEMODULE -Isrc\startup -D?MODEL=small $(A_DEBUG_FLAGS) -Fo$@ $<
 
 # HOT OBJECTS (mirrors djgpp.mak). The generic {src}.c rule below appends
 # -os, which optimises for SPACE -- yet src/ is where the hot files live,
-# while mpxplay/ (the card backends) already builds at -oxa for speed. That
+# while src/hw/ (the card backends) already builds at -oxa for speed. That
 # inversion put the sound ISR and the port-trap dispatch on the size-first
 # setting and the cold PCI-era code on the fast one. Give the four hot
 # src/ objects the same speed setting the backends get; every other src/
@@ -146,10 +146,10 @@ $(OUTD)/vdma.obj : src/vdma.c
 {src}.cpp{$(OUTD)}.obj
 	@$(CPP) $(C_DEBUG_FLAGS) $(CPP_OPT_FLAGS) -os $(C_EXTRA_FLAGS) $(CPPFLAGS) -Isrc $(INCLUDES) -fo=$@ $<
 
-{mpxplay}.c{$(OUTD)}.obj
-	@$(CC) $(C_DEBUG_FLAGS) $(C_OPT_FLAGS) $(C_EXTRA_FLAGS) $(CFLAGS) -Impxplay -Isrc $(INCLUDES) -fo=$@ $<
+{src\hw}.c{$(OUTD)}.obj
+	@$(CC) $(C_DEBUG_FLAGS) $(C_OPT_FLAGS) $(C_EXTRA_FLAGS) $(CFLAGS) -Isrc\hw -Isrc $(INCLUDES) -fo=$@ $<
 
-{startup}.asm{$(OUTD)}.obj
+{src\startup}.asm{$(OUTD)}.obj
 	@$(ASM) -q -zcw -DNOTFLAT -DONEMODULE -D?MODEL=small $(OW19) $(A_DEBUG_FLAGS) -Fo$@ $<
 
 all: $(OUTD) $(OUTD)\$(NAME).exe
@@ -157,10 +157,10 @@ all: $(OUTD) $(OUTD)\$(NAME).exe
 $(OUTD):
 	@mkdir $(OUTD)
 
-$(OUTD)\$(NAME).exe: $(OUTD)\$(NAME).lib $(OUTD)\cstrt16x.obj $(OUTD)\init1632.obj
+$(OUTD)\$(NAME).EXE: $(OUTD)\$(NAME).lib $(OUTD)\cstrt16x.obj $(OUTD)\init1632.obj
 	@$(LINK) @<<
 format dos
-file $(OUTD)\cstrt16x, $(OUTD)\main, $(OUTD)\init1632 name $@
+file $(OUTD)\init1632, $(OUTD)\cstrt16x, $(OUTD)\main name $@
 libpath $(WATCOM)\lib386\dos;$(WATCOM)\lib386
 lib $*.lib
 op q,statics,m=$*.map
@@ -170,17 +170,17 @@ disable 80
 $(OUTD)\$(NAME).lib: $(OBJFILES)
 	@$(LIB) -q -b -n $(OUTD)\$(NAME).lib $(OBJFILES)
 
-$(OUTD)/au_cards.obj:  mpxplay\au_cards.c
-$(OUTD)/dmabuff.obj:   mpxplay\dmabuff.c
-$(OUTD)/physmem.obj:   mpxplay\physmem.c
-$(OUTD)/timer.obj:     mpxplay\timer.c
-$(OUTD)/sc_es1688.obj: mpxplay\sc_es1688.c
-$(OUTD)/sc_vew211.obj: mpxplay\sc_vew211.c
-$(OUTD)/sc_scp55.obj:  mpxplay\sc_scp55.c
-$(OUTD)/sc_mc8k.obj:   mpxplay\sc_mc8k.c
-$(OUTD)/sc_tp755.obj:  mpxplay\sc_tp755.c
+$(OUTD)/au_cards.obj:  src\hw\au_cards.c
+$(OUTD)/dmabuff.obj:   src\hw\dmabuff.c
+$(OUTD)/physmem.obj:   src\hw\physmem.c
+$(OUTD)/timer.obj:     src\hw\timer.c
+$(OUTD)/sc_es1688.obj: src\hw\sc_es1688.c
+$(OUTD)/sc_vew211.obj: src\hw\sc_vew211.c
+$(OUTD)/sc_scp55.obj:  src\hw\sc_scp55.c
+$(OUTD)/sc_mc8k.obj:   src\hw\sc_mc8k.c
+$(OUTD)/sc_tp755.obj:  src\hw\sc_tp755.c
 
-$(OUTD)/cv1to2.obj:    src\cv1to2.asm
+$(OUTD)/adpcm.obj:     src\adpcm.c
 $(OUTD)/djdpmi.obj:    src\djdpmi.asm
 $(OUTD)/dprintf.obj:   src\dprintf.asm
 $(OUTD)/fileacc.obj:   src\fileacc.asm
@@ -210,10 +210,13 @@ $(OUTD)/vmpu.obj:      src\vmpu.c
 $(OUTD)/vopl3.obj:     src\vopl3.cpp
 $(OUTD)/vsb.obj:       src\vsb.c
 
-$(OUTD)/cstrt16x.obj:  startup\cstrt16x.asm
-$(OUTD)/init1632.obj:  startup\init1632.asm
-$(OUTD)/malloc.obj:    startup\malloc.asm
-$(OUTD)/sbrk.obj:      startup\sbrk.asm
+$(OUTD)/cstrt16x.obj:  src\startup\cstrt16x.asm
+$(OUTD)/init1632.obj:  src\startup\init1632.asm
+$(OUTD)/getenv.obj:    src\startup\getenv.asm
+$(OUTD)/malloc.obj:    src\startup\malloc.asm
+$(OUTD)/sbrk.obj:      src\startup\sbrk.asm
+$(OUTD)/strtol.obj:    src\startup\strtol.asm
+$(OUTD)/_matherr.obj:  src\startup\_matherr.asm
 
 # the 16-bit code is included in binary format into rmwrap.asm.
 

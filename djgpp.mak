@@ -26,11 +26,11 @@ C_DEBUG_FLAGS=
 A_DEBUG_FLAGS=
 endif
 
-vpath_src=src mpxplay
+vpath_src=src src/hw
 vpath %.c $(vpath_src)
 vpath %.cpp $(vpath_src)
 vpath %.asm $(vpath_src)
-vpath_header=src mpxplay
+vpath_header=src src/hw
 vpath %.h $(vpath_header)
 vpath_obj=./$(OUTD)/
 vpath %.o $(vpath_obj)
@@ -43,6 +43,7 @@ vpath %.o $(vpath_obj)
 OBJFILES=\
 	$(OUTD)/main.o		$(OUTD)/sndisr.o	$(OUTD)/ptrap.o		$(OUTD)/linear.o	$(OUTD)/pic.o\
 	$(OUTD)/vsb.o		$(OUTD)/vdma.o		$(OUTD)/virq.o		$(OUTD)/vopl3.o		$(OUTD)/vmpu.o		$(OUTD)/tsf.o\
+	$(OUTD)/adpcm.o\
 	$(OUTD)/au_cards.o\
 	$(OUTD)/dmabuff.o	$(OUTD)/physmem.o	$(OUTD)/timer.o\
 	$(OUTD)/sc_es1688.o	$(OUTD)/sc_vew211.o	$(OUTD)/sc_scp55.o	$(OUTD)/sc_mc8k.o	$(OUTD)/sc_tp755.o	$(OUTD)/fmvol.o	$(OUTD)/fmshim.o\
@@ -80,8 +81,8 @@ ifneq (,$(findstring CARD_TP755,$(CFLAGS)))
 OBJFILES+= $(OUTD)/dbopl.o
 endif
 
-INCLUDE_DIRS=src mpxplay
-SRC_DIRS=src mpxplay
+INCLUDE_DIRS=src src/hw
+SRC_DIRS=src src/hw
 
 C_OPT_FLAGS=-Os -fno-asynchronous-unwind-tables
 # ES1688 port: i486, not i586 -- this stack exists FOR the 486 fleet (vdpmi
@@ -113,7 +114,7 @@ LIBS=$(addprefix -l,stdcxx m)
 # can see which card is being built (rmcode1.asm's v86 OPL fast-path is
 # CARD_TP755-gated); with CFLAGS empty the command line is unchanged and the
 # default build stays byte-identical.
-COMPILE.asm.o=jwasm.exe -q -djgpp -Istartup -D?MODEL=small -DDJGPP $(CFLAGS) $(A_DEBUG_FLAGS) -Fo=$@ $<
+COMPILE.asm.o=jwasm.exe -q -djgpp -Isrc/startup -D?MODEL=small -DDJGPP $(CFLAGS) $(A_DEBUG_FLAGS) -Fo=$@ $<
 COMPILE.c.o=gcc $(C_DEBUG_FLAGS) $(C_OPT_FLAGS) $(C_EXTRA_FLAGS) $(CFLAGS) $(INCLUDES) -c $< -o $@
 COMPILE.cpp.o=gcc $(C_DEBUG_FLAGS) $(C_OPT_FLAGS) $(C_EXTRA_FLAGS) $(CPPFLAGS) $(INCLUDES) -c $< -o $@
 
@@ -126,7 +127,7 @@ $(OUTD)/%.o: src/%.cpp
 $(OUTD)/%.o: src/%.asm
 	$(COMPILE.asm.o)
 
-$(OUTD)/%.o: mpxplay/%.c
+$(OUTD)/%.o: src/hw/%.c
 	$(COMPILE.c.o)
 
 all:: $(OUTD) $(OUTD)/$(NAME)d.exe
@@ -151,24 +152,25 @@ $(OUTD)/rmwrap.o:: rmwrap.asm rmcode1.asm rmcode2.asm
 	jwasm.exe -q -bin $(CFLAGS) -Fl$(OUTD)/ -Fo$(OUTD)/rmcode2.bin src/rmcode2.asm
 	jwasm.exe -q -djgpp -D?MODEL=small -DOUTD=$(OUTD) -Fo$@ src/rmwrap.asm
 
-$(OUTD)/ac97mix.o::  ac97mix.c   mpxplay.h au_cards.h ac97mix.h
-$(OUTD)/au_cards.o:: au_cards.c  mpxplay.h au_cards.h dmabuff.h config.h
-$(OUTD)/dmabuff.o::  dmabuff.c   mpxplay.h au_cards.h dmabuff.h
+$(OUTD)/ac97mix.o::  ac97mix.c au_cards.h ac97mix.h
+$(OUTD)/au_cards.o:: au_cards.c au_cards.h dmabuff.h config.h
+$(OUTD)/dmabuff.o::  dmabuff.c au_cards.h dmabuff.h
 $(OUTD)/pcibios.o::  pcibios.c   pcibios.h
 $(OUTD)/physmem.o::  physmem.c
-$(OUTD)/sc_e1371.o:: sc_e1371.c  mpxplay.h au_cards.h dmabuff.h pcibios.h ac97mix.h
-$(OUTD)/sc_ich.o::   sc_ich.c    mpxplay.h au_cards.h dmabuff.h pcibios.h ac97mix.h
-$(OUTD)/sc_inthd.o:: sc_inthd.c  mpxplay.h au_cards.h dmabuff.h pcibios.h sc_inthd.h
-$(OUTD)/sc_sbl24.o:: sc_sbl24.c  mpxplay.h au_cards.h dmabuff.h pcibios.h ac97mix.h sc_sbl24.h emu10k1.h
-$(OUTD)/sc_sbliv.o:: sc_sbliv.c  mpxplay.h au_cards.h dmabuff.h pcibios.h ac97mix.h sc_sbliv.h emu10k1.h
-$(OUTD)/sc_via82.o:: sc_via82.c  mpxplay.h au_cards.h dmabuff.h pcibios.h ac97.h
+$(OUTD)/sc_e1371.o:: sc_e1371.c au_cards.h dmabuff.h pcibios.h ac97mix.h
+$(OUTD)/sc_ich.o::   sc_ich.c au_cards.h dmabuff.h pcibios.h ac97mix.h
+$(OUTD)/sc_inthd.o:: sc_inthd.c au_cards.h dmabuff.h pcibios.h sc_inthd.h
+$(OUTD)/sc_sbl24.o:: sc_sbl24.c au_cards.h dmabuff.h pcibios.h ac97mix.h sc_sbl24.h emu10k1.h
+$(OUTD)/sc_sbliv.o:: sc_sbliv.c au_cards.h dmabuff.h pcibios.h ac97mix.h sc_sbliv.h emu10k1.h
+$(OUTD)/sc_via82.o:: sc_via82.c au_cards.h dmabuff.h pcibios.h ac97.h
 $(OUTD)/sc_es1688.o:: sc_es1688.c au_cards.h config.h ptops.h
 $(OUTD)/sc_vew211.o:: sc_vew211.c au_cards.h config.h ptops.h
 $(OUTD)/sc_scp55.o::  sc_scp55.c  au_cards.h config.h ptops.h
 $(OUTD)/sc_mc8k.o::   sc_mc8k.c   au_cards.h config.h ptops.h emu8kini.h
 $(OUTD)/sc_tp755.o:: sc_tp755.c au_cards.h dmabuff.h config.h ptops.h
-$(OUTD)/timer.o::    timer.c     mpxplay.h au_cards.h timer.h
+$(OUTD)/timer.o::    timer.c au_cards.h timer.h
 
+$(OUTD)/adpcm.o::    adpcm.c     adpcm.h
 $(OUTD)/dbopl.o::    dbopl.cpp   dbopl.h
 $(OUTD)/linear.o::   linear.c    linear.h platform.h
 $(OUTD)/main.o::     main.c      linear.h platform.h ptrap.h vopl3.h pic.h config.h vsb.h vdma.h virq.h au.h version.h ptops.h
@@ -177,8 +179,8 @@ $(OUTD)/ptrap.o::    ptrap.c     linear.h platform.h ptrap.h config.h fmshim.h p
 $(OUTD)/fmvol.o::    fmvol.c     platform.h ptrap.h fmvol.h
 $(OUTD)/fmshim.o::   fmshim.c    platform.h ptrap.h fmshim.h config.h
 $(OUTD)/hostsvc.o::  hostsvc.c   hostsvc.h hostisr.h platform.h
-$(OUTD)/sndisr.o::   sndisr.c    linear.h platform.h vopl3.h pic.h config.h vsb.h vdma.h virq.h ctadpcm.h au.h ptops.h
-$(OUTD)/tsf.o::      tsf.c       tsf/tsf.h
+$(OUTD)/sndisr.o::   sndisr.c    linear.h platform.h vopl3.h pic.h config.h vsb.h vdma.h virq.h adpcm.h au.h ptops.h hostsvc.h
+$(OUTD)/tsf.o::      tsf.c       src/tsf/tsf.h
 $(OUTD)/vdma.o::     vdma.c      linear.h platform.h ptrap.h vdma.h config.h
 $(OUTD)/virq.o::     virq.c      linear.h platform.h pic.h ptrap.h virq.h config.h
 $(OUTD)/vopl3.o::    vopl3.cpp   dbopl.h vopl3.h config.h

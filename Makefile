@@ -1,6 +1,6 @@
 
 # Create vsbhda.exe with Open Watcom and JWasm.
-# To create the binary, enter
+# Enter
 #   wmake
 # Optionally, for a debug version, enter
 #   wmake debug=1
@@ -57,7 +57,7 @@ LINK=$(WATCOM)\binnt\wlink.exe
 FMTHX=
 !endif
 
-NAME=vsbhda
+NAME=VSBHDA
 
 !if $(DEBUG)
 OUTD=owd
@@ -78,6 +78,7 @@ OW19=-DOW19
 OBJFILES = &
 	$(OUTD)/main.obj		$(OUTD)/sndisr.obj		$(OUTD)/ptrap.obj		$(OUTD)/linear.obj		$(OUTD)/pic.obj &
 	$(OUTD)/vsb.obj			$(OUTD)/vdma.obj		$(OUTD)/virq.obj		$(OUTD)/vmpu.obj		$(OUTD)/tsf.obj &
+	$(OUTD)/adpcm.obj &
 !ifndef NOFM
 	$(OUTD)/dbopl.obj		$(OUTD)/vopl3.obj &
 !endif
@@ -85,8 +86,8 @@ OBJFILES = &
 	$(OUTD)/dmabuff.obj		$(OUTD)/pcibios.obj		$(OUTD)/physmem.obj		$(OUTD)/timer.obj &
 	$(OUTD)/sc_e1371.obj	$(OUTD)/sc_ich.obj		$(OUTD)/sc_inthd.obj	$(OUTD)/sc_via82.obj	$(OUTD)/sc_sbliv.obj	$(OUTD)/sc_sbl24.obj &
 	$(OUTD)/stackio.obj		$(OUTD)/stackisr.obj	$(OUTD)/sbisr.obj		$(OUTD)/int31.obj		$(OUTD)/rmwrap.obj		$(OUTD)/mixer.obj &
-	$(OUTD)/hapi.obj		$(OUTD)/dprintf.obj		$(OUTD)/vioout.obj		$(OUTD)/djdpmi.obj		$(OUTD)/uninst.obj &
-	$(OUTD)/malloc.obj		$(OUTD)/sbrk.obj		$(OUTD)/fileacc.obj		$(OUTD)/logfile.obj		$(OUTD)/cv1to2.obj
+	$(OUTD)/hapi.obj		$(OUTD)/dprintf.obj		$(OUTD)/vioout.obj		$(OUTD)/djdpmi.obj		$(OUTD)/uninst.obj		$(OUTD)/getenv.obj &
+	$(OUTD)/malloc.obj		$(OUTD)/sbrk.obj		$(OUTD)/fileacc.obj		$(OUTD)/logfile.obj		$(OUTD)/strtol.obj		$(OUTD)/_matherr.obj
 	
 C_OPT_FLAGS=-q -mf -oxa -ecc -5s -fp5 -fpi87 -wcd=111
 # OW's wpp386 doesn't like the -ecc option
@@ -102,7 +103,7 @@ INCLUDES=-I$(WATCOM)\h
 LIBS=
 
 {src}.asm{$(OUTD)}.obj
-	@$(ASM) -q -D?MODEL=flat -Istartup $(A_DEBUG_FLAGS) -Fo$@ $<
+	@$(ASM) -q -D?MODEL=flat -Isrc\startup $(A_DEBUG_FLAGS) -Fo$@ $<
 
 {src}.c{$(OUTD)}.obj
 	@$(CC) $(C_DEBUG_FLAGS) $(C_OPT_FLAGS) $(C_EXTRA_FLAGS) $(CFLAGS) -Isrc $(INCLUDES) -fo=$@ $<
@@ -110,10 +111,10 @@ LIBS=
 {src}.cpp{$(OUTD)}.obj
 	@$(CPP) $(C_DEBUG_FLAGS) $(CPP_OPT_FLAGS) $(C_EXTRA_FLAGS) $(CPPFLAGS) -Isrc $(INCLUDES) -fo=$@ $<
 
-{mpxplay}.c{$(OUTD)}.obj
-	@$(CC) $(C_DEBUG_FLAGS) $(C_OPT_FLAGS) $(C_EXTRA_FLAGS) $(CFLAGS) -Impxplay -Isrc $(INCLUDES) -fo=$@ $<
+{src\hw}.c{$(OUTD)}.obj
+	@$(CC) $(C_DEBUG_FLAGS) $(C_OPT_FLAGS) $(C_EXTRA_FLAGS) $(CFLAGS) -Isrc\hw -Isrc $(INCLUDES) -fo=$@ $<
 
-{startup}.asm{$(OUTD)}.obj
+{src\startup}.asm{$(OUTD)}.obj
 	@$(ASM) -q -zcw -D?MODEL=flat $(OW19) $(A_DEBUG_FLAGS) -Fo$@ $<
 
 all: $(OUTD) $(OUTD)\$(NAME).exe $(OUTD16)\$(NAME)16.exe
@@ -121,39 +122,38 @@ all: $(OUTD) $(OUTD)\$(NAME).exe $(OUTD16)\$(NAME)16.exe
 $(OUTD):
 	@mkdir $(OUTD)
 
-$(OUTD)\$(NAME).exe: $(OUTD)\$(NAME).lib $(OUTD)\cstrtdhx.obj
+$(OUTD)\$(NAME).EXE: $(OUTD)\$(NAME).lib $(OUTD)\cstrtdhx.obj
 	@$(LINK) @<<
 format win pe $(FMTHX) runtime console
-file $(OUTD)\cstrtdhx, $(OUTD)\main, $(OUTD)\linear
-name $@
+file $(OUTD)\cstrtdhx, $(OUTD)\main, $(OUTD)\linear name $*.EXE
 libpath $(WATCOM)\lib386\dos;$(WATCOM)\lib386
 lib $(OUTD)\$(NAME).lib
 op q,m=$(OUTD)\$(NAME).map,stub=res\loadpero.bin,stack=0x10000,heap=0x1000
 $(CONSTATTR) $(CONST2ATTR)
 <<
 !if !$(USEJWL)
-	@res\patchpe $*.exe
+	@res\patchpe $*.EXE
 !endif
 
-$(OUTD16)\$(NAME)16.exe: .always
+$(OUTD16)\$(NAME)16.EXE: .always
 	@wmake -h -f OW16.mak debug=$(DEBUG) watcom=$(WATCOM) use19=$(USE19) usejwl=$(USEJWL)
 
 $(OUTD)\$(NAME).lib: $(OBJFILES)
 	@$(LIB) -q -b -n $(OUTD)\$(NAME).lib $(OBJFILES)
 
-$(OUTD)/ac97mix.obj:   mpxplay\ac97mix.c
-$(OUTD)/au_cards.obj:  mpxplay\au_cards.c
-$(OUTD)/dmabuff.obj:   mpxplay\dmabuff.c
-$(OUTD)/physmem.obj:   mpxplay\physmem.c
-$(OUTD)/pcibios.obj:   mpxplay\pcibios.c
-$(OUTD)/sc_e1371.obj:  mpxplay\sc_e1371.c
-$(OUTD)/sc_ich.obj:    mpxplay\sc_ich.c
-$(OUTD)/sc_inthd.obj:  mpxplay\sc_inthd.c
-$(OUTD)/sc_sbl24.obj:  mpxplay\sc_sbl24.c
-$(OUTD)/sc_sbliv.obj:  mpxplay\sc_sbliv.c
-$(OUTD)/sc_via82.obj:  mpxplay\sc_via82.c
-$(OUTD)/timer.obj:     mpxplay\timer.c
-$(OUTD)/cv1to2.obj:    src\cv1to2.asm
+$(OUTD)/ac97mix.obj:   src\hw\ac97mix.c
+$(OUTD)/au_cards.obj:  src\hw\au_cards.c
+$(OUTD)/dmabuff.obj:   src\hw\dmabuff.c
+$(OUTD)/physmem.obj:   src\hw\physmem.c
+$(OUTD)/pcibios.obj:   src\hw\pcibios.c
+$(OUTD)/sc_e1371.obj:  src\hw\sc_e1371.c
+$(OUTD)/sc_ich.obj:    src\hw\sc_ich.c
+$(OUTD)/sc_inthd.obj:  src\hw\sc_inthd.c
+$(OUTD)/sc_sbl24.obj:  src\hw\sc_sbl24.c
+$(OUTD)/sc_sbliv.obj:  src\hw\sc_sbliv.c
+$(OUTD)/sc_via82.obj:  src\hw\sc_via82.c
+$(OUTD)/timer.obj:     src\hw\timer.c
+$(OUTD)/adpcm.obj:     src\adpcm.c
 $(OUTD)/djdpmi.obj:    src\djdpmi.asm
 $(OUTD)/dprintf.obj:   src\dprintf.asm
 $(OUTD)/fileacc.obj:   src\fileacc.asm
@@ -181,9 +181,12 @@ $(OUTD)/dbopl.obj:     src\dbopl.cpp
 $(OUTD)/vopl3.obj:     src\vopl3.cpp
 	@$(CPP) $(C_DEBUG_FLAGS) -q -oxa -mf -bc -ecc -5s -fp5 -fpi87 $(C_EXTRA_FLAGS) $(CPPFLAGS) $(INCLUDES) -fo=$@ $<
 !endif
-$(OUTD)/cstrtdhx.obj:  startup\cstrtdhx.asm
-$(OUTD)/malloc.obj:    startup\malloc.asm
-$(OUTD)/sbrk.obj:      startup\sbrk.asm
+$(OUTD)/cstrtdhx.obj:  src\startup\cstrtdhx.asm
+$(OUTD)/getenv.obj:    src\startup\getenv.asm
+$(OUTD)/malloc.obj:    src\startup\malloc.asm
+$(OUTD)/sbrk.obj:      src\startup\sbrk.asm
+$(OUTD)/strtol.obj:    src\startup\strtol.asm
+$(OUTD)/_matherr.obj:  src\startup\_matherr.asm
 
 
 # to avoid any issues with 16-bit relocations in PE binaries,
@@ -196,6 +199,9 @@ $(OUTD)/rmwrap.obj:    src\rmwrap.asm src\rmcode1.asm src\rmcode2.asm
 
 clean: .SYMBOLIC
 	@wmake -h -f OW16.mak debug=$(DEBUG) clean
-	@del $(OUTD)\$(NAME).exe
+	@del $(OUTD)\$(NAME).EXE
 	@del $(OUTD)\$(NAME).lib
 	@del $(OUTD)\*.obj
+	@del $(OUTD)\*.lst
+	@del $(OUTD)\*.map
+	@del $(OUTD)\rmcode?.bin

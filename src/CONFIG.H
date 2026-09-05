@@ -74,12 +74,16 @@
 #endif
 #define PT0V86    1   /* 1=support read access to v86 page table 0 */
 #define HOSTRT    0   /* 0=protect SB irq, so it's not modified by programs; must match setting in SBISR.ASM */
+#define IRQONPORTACC 0 /* v2.0: 1=allow hw sound IRQs when IF==0 */
 
-#define HW_CHANNELS 2
+#define HW_FREQ_DEFAULT 22050 /* default value for /F */
+#define HW_CHANNELS 2         /* must be 2 */
 #define HW_BITS 16
+#define HW_BUFFERS_DEFAULT 8  /* v2.0; default value for /B */
 
 #if SOUNDFONT
 #define VOICES_DEFAULT 64
+#define VOICES_MAX 256
 #endif
 
 #ifdef __cplusplus
@@ -115,8 +119,11 @@ struct globalvars {
 	int pin;
 	int device;
 	int period_size;
+	int buffers; /* v2.0: hardware sound buffers ( of size period_size ) */
+	int buffer_protection; /* v2.0: size in bytes of hardware buffer protection */
 #ifdef _DEBUG
 	char *logfile;
+	int logmode;
 #endif
 	int fmvol; /* /FMVOL: TL steps added to carriers on the REAL OPL3; -1 = off.
 	              Runtime default set in main() (the init above is positional). */

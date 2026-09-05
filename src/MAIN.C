@@ -128,7 +128,7 @@ NULL, /* /SF: */
 VOICES_DEFAULT, /* /MV */
 #endif
 0, /* CF */
-22050,  /* frequency */
+HW_FREQ_DEFAULT,  /* frequency */
 };
 
 static const struct {
@@ -175,6 +175,8 @@ static const struct {
     "F",  "freq [11025|22050|44100]", &gvars.freq,
     "VOL", "master volume [0-9, def 7]", &gvars.vol,
 #endif
+    "B",  "hw buffers (periods) [def 8]", &gvars.buffers,
+    "BP", "hw buffer guard, bytes [64]", &gvars.buffer_protection,
     "BS",  "PCM buffer, 4k pages [16]", &gvars.buffsize,
 #if SLOWDOWN
     "SD",  "slowdown (needs a TSC)", &gvars.slowdown,
@@ -188,11 +190,12 @@ static const struct {
     "PS", "period size [def 512]", &gvars.period_size,
 #if SOUNDFONT
     "SF:", "Set sound font file name", (int *)&gvars.soundfont,
-    "MV", "Set voice limit [0-256, def 64]", &gvars.voices,
+    "MV",  "Set voice limit [0-256, def 64]", &gvars.voices,
 #endif
     "CF", "compat flags [def 0]", &gvars.compatflags,
 #ifdef _DEBUG
     "LF:", "Set log file name", (int *)&gvars.logfile,
+    "LM",  "Set log mode [0-2, def 0]", &gvars.logmode,
 #endif
     NULL, NULL, 0,
 };
@@ -221,18 +224,23 @@ static int IsInstalled( void )
 }
 
 #if 1 //def _DEBUG
+/* "/NAME" or "/NAME:nm" for the help columns. NOT sprintf: on the 16-bit
+ * (Open Watcom) build libc sprintf drags in the whole printf engine, whose
+ * DBCS code-page probing (inirmsel) pulls crwdata+cstart -- a second program
+ * entry point next to init1632, i.e. a broken link. printf itself is ours
+ * (dprintf.asm) and never touches libc. */
+static void OptCell( char *cell, const char *opt )
+{
+    strcpy( cell, "/" );
+    strcat( cell, opt );
+    if ( strchr( opt, ':' ) )
+        strcat( cell, "nm" );
+}
+
 void fatal_error( int nError )
 //////////////////////////////
 {
-#ifdef DJGPP
-	asm( /* set text mode 3 */
-		"mov $3, %ax\n\t"
-		"int $0x10"
-	   );
-#else
-	_asm mov ax,3
-	_asm int 10h
-#endif
+	_settextmode();
 	printf("VSBPCMCIA: fatal error %u\n", nError );
 	for (;;);
 }
@@ -243,7 +251,7 @@ void fatal_error( int nError )
 char *logfile_start;
 uint32_t logfile_ofs;
 
-extern void Int41_Init( char * );
+extern void Int41_Init( int, char * );
 extern void Int41_Exit( void );
 extern void LogfileDump( char * );
 
@@ -261,7 +269,7 @@ int LogfileInit( void )
     if (__dpmi_allocate_linear_memory(&info, 1) == -1)
         return 0;
     logfile_start = NearPtr( info.address );
-    Int41_Init( logfile_start );
+    Int41_Init( gvars.logmode, logfile_start );
     return 1;
 }
 
@@ -365,7 +373,6 @@ void MAIN_ReinitOPL( void )
 int main(int argc, char* argv[])
 ////////////////////////////////
 {
-
     //parse BLASTER env first.
     int i;
     void * p;
@@ -377,20 +384,24 @@ int main(int argc, char* argv[])
     bOMode = IsDebuggerPresent() ? OM_DEBUGGER : OM_DOS;
 
     if(blaster != NULL) {
-        char c;
-        while(( c = toupper(*(blaster++)))) {
-            switch (c) {
-            case 'A': gvars.base = strtol(blaster, &blaster, 16); break;
-            case 'D': gvars.dma  = *(blaster++) - '0'; break;
-            case 'I': gvars.irq  = *(blaster++) - '0'; break;
+        while (*blaster) {
+            int *pi = NULL;
+            int base = 10;
+            switch (*blaster | 0x20) {
+            case 'a': pi = &gvars.base; base = 16; break;
+            case 'd': pi = &gvars.dma;  break;
+            case 'i': pi = &gvars.irq;  break;
+            case 't': pi = &gvars.type; break;
 #if SB16
-            case 'H': gvars.hdma = *(blaster++) - '0'; break;
+            case 'h': pi = &gvars.hdma; break;
 #endif
 #if VMPU
-            case 'P': gvars.mpu  = strtol(blaster, &blaster, 16); break;
+            case 'p': pi = &gvars.mpu;  base = 16; break;
 #endif
-            case 'T': gvars.type = *(blaster++) - '0'; break;
             }
+            blaster++;
+            if ( pi )
+                *pi = strtol(blaster, &blaster, base);
         }
     }
     dbgprintf(("SB values before cmdline: A=%x I=%u D=%u T=%u", gvars.base, gvars.irq, gvars.dma, gvars.type ));
@@ -453,12 +464,10 @@ int main(int argc, char* argv[])
             ;
         half = (n + 1) / 2;
         for( j = 0; j < half; j++ ) {
-            sprintf( cell, "/%s%s", GOptions[j].option,
-                     strchr( GOptions[j].option, ':') ? "nm" : "" );
+            OptCell( cell, GOptions[j].option );
             printf( " %-9s %-29s", cell, GOptions[j].desc );
             if ( j + half < n ) {
-                sprintf( cell, "/%s%s", GOptions[j+half].option,
-                         strchr( GOptions[j+half].option, ':') ? "nm" : "" );
+                OptCell( cell, GOptions[j+half].option );
                 printf( " %-8s %s", cell, GOptions[j+half].desc );
             }
             printf( "\n" );
@@ -579,8 +588,13 @@ int main(int argc, char* argv[])
         printf("Error: Invalid PCM buffer size %d\n", gvars.buffsize );
         return(1);
     }
-    if( gvars.freq != 11025 && gvars.freq != 22050 && gvars.freq != 44100 ) {
-        printf("Error: valid frequencies: 11025, 22050, 44100\n" );
+    /* ensure buffer protection value is a multiple of 4 */
+    gvars.buffer_protection = (gvars.buffer_protection + 3) & ~3;
+
+    /* v2.0: allow multiples of 11025 and 16000 */
+    //if( gvars.freq != 11025 && gvars.freq != 22050 && gvars.freq != 44100 ) {
+    if( (gvars.freq % 11025) * (gvars.freq % 16000) ) {
+        printf("Error: frequency must be a multiple of either 11025 or 16000\n" );
         return(1);
     }
     if( gvars.period_size % 64 ) {
@@ -588,8 +602,8 @@ int main(int argc, char* argv[])
         return(1);
     }
 #if SOUNDFONT
-    if (gvars.voices > 256) {
-        printf("Error: voice limit %d beyond 256\n", gvars.voices );
+    if (gvars.voices > VOICES_MAX) {
+        printf("Error: voice limit %d beyond %d\n", gvars.voices, VOICES_MAX );
         return(1);
     }
 #endif
@@ -732,6 +746,8 @@ int main(int argc, char* argv[])
 #endif
     if (gvars.period_size)
         printf("Period size: %d\n", gvars.period_size);
+    if (gvars.buffers)
+        printf("Buffers: %d\n", gvars.buffers);
     /* temp alloc a 64 kB chunk of memory. This will ensure that mallocs done while sound is playing won't
      * need another DPMI memory allocation. A dpmi memory allocation while another client is active will
      * result in problems, since that memory is released when that client exits.
@@ -772,7 +788,6 @@ int main(int argc, char* argv[])
 
     if( gm.bISR && ( gm.bQemm || (!gvars.rm) ) && ( gm.bHdpmi || (!gvars.pm) ) ) {
         uint32_t psp;
-        //__dpmi_regs r = {0};
         __dpmi_regs r;
         __dpmi_set_coprocessor_emulation( 0 );
         psp = _my_psp();
@@ -783,12 +798,7 @@ int main(int argc, char* argv[])
 #ifdef DJGPP
         __djgpp_exception_toggle();
         _go32_info_block.size_of_transfer_buffer = 0; /* ensure it's not used anymore */
-        asm( /* clear fs/gs before calling DOS "terminate and stay resident" */
-            "push $0\n\t"
-            "pop %gs\n\t"
-            "push $0\n\t"
-            "pop %fs"
-           );
+        _clearFSGS(); /* clear protected-mode regs FS & GS before calling DOS "terminate and stay resident" */
 #else
         __dpmi_free_dos_memory( rmstksel ); /* free _linear_rmstack */
 #endif

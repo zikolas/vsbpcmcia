@@ -227,7 +227,7 @@ guest that wants 21376 B/s. That is why `/DACRATE22050` helped -- it crossed
 from below demand to 15% above it -- and why it did not cure: at 15% margin
 every lost tick is an audible gap.
 
-### Measuring it: PTDIAG + TEST05
+### Measuring it: PTDIAG + PTBLKS (was TEST05)
 
 `PTDIAG` (`src/ptops.h`) builds the tap forensics into `sndisr.c` and silences
 the two `sc_vew211.c` pokes whose slots it borrows:
@@ -259,13 +259,13 @@ left there at startup, which reads exactly like a live measurement. Compare
 `IdxSm * freq / samples`, an inference from how many samples arrived per tick,
 not a time constant).
 
-`test/test05.asm` (derived from upstream's TEST01) reproduces the block pattern
+`Test/PTBLKS.ASM` (derived from upstream's TEST01; it was `test/test05.asm` until the VSBHDA 2.0 merge, whose own TEST05 is an FM test) reproduces the block pattern
 without the game, in 3 KB -- so it runs with comrade resident and the whole
 measurement is scriptable, instead of needing Duke's 560 K and a human at the
 keyboard:
 
 ```
-TEST05 [blocksize] [rate] [mode] [seconds]      ; defaults 12 21376 0 5
+PTBLKS [blocksize] [rate] [mode] [seconds]      ; defaults 12 21376 0 5
   mode 0 = re-arm inside the SB ISR   (the tap loop CAN chase this)
   mode 1 = re-arm from the main loop  (it cannot -- the worst case)
 ```
@@ -280,7 +280,7 @@ the 486.
 
 ### First bench result: an in-ISR re-arm WEDGES the box
 
-`TEST05 12 21376 0 5 7` -- the mode where the guest re-arms inside its own SB
+`PTBLKS 12 21376 0 5 7` -- the mode where the guest re-arms inside its own SB
 ISR -- hard-hung the T2130CT within seconds (comrade stopped answering
 entirely; physical power cycle required). Mode 1 has not been run yet, so this
 is not yet isolated from a bug in the test program -- **run mode 1 first.**
@@ -314,7 +314,7 @@ before designing a fix**: read the 16-bit counter (`0x4F7` lo / `0x4F9` hi)
 twice a known interval apart *while a sound plays* -- it wraps every 32 s at
 2048 Hz, and idle throttles to 32 Hz so an idle read tells you nothing.
 
-## The render tail, and the formats that reach it (`test/test06.asm`)
+## The render tail, and the formats that reach it (`Test/PTBYPASS.ASM`, was `test/test06.asm`)
 
 `sndisr.c` gates the passthrough tap on
 
@@ -329,10 +329,10 @@ shortcut, and the whole render tail executes: `DecodeADPCM`, `cv_rate`, the
 silence `memset`, the volume pass, `AU_writedata`.
 
 That tail is the least-exercised code in the driver and TEST01..TEST05 cannot
-reach it -- they are all 8-bit or wider, so they all take the tap. TEST06
+reach it -- they are all 8-bit or wider, so they all take the tap. PTBYPASS
 drives both formats:
 
-    TEST06 [mode] [rate] [seconds] [blocksize] [irq]
+    PTBYPASS [mode] [rate] [seconds] [blocksize] [irq]
       mode 0   4-bit ADPCM single-cycle (DSP 75h), DMA + SB IRQ
       mode 1   direct-DAC (DSP 10h), no DMA, no IRQ, tick-paced
 

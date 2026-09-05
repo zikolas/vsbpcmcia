@@ -140,7 +140,7 @@ fi
 rm -f "$REPO"/djgpp/*.o "$REPO"/djgpp/*.ar
 
 docker run --rm --platform linux/amd64 \
-  -e CARDDEF="$CARDDEF" -e OPLDEF="$OPLDEF" -e OUTNAME="$OUTNAME" \
+  -e CARDDEF="$CARDDEF" -e OPLDEF="$OPLDEF" -e OUTNAME="$OUTNAME" -e VERBOSE="$VERBOSE" \
   -v "$REPO":/build -v "$DJGPP_DIR":/opt/djgpp -v "$JWASM_BIN":/usr/local/bin/jwasm \
   -w /build debian:stable-slim bash -c '
   set -e
@@ -163,12 +163,20 @@ docker run --rm --platform linux/amd64 \
   done
   find . -type f \( -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.hpp" -o -name "*.asm" -o -name "*.inc" \) -print0 \
     | xargs -0 sed -i -E "s/(#[[:space:]]*include[[:space:]]*\")([^\"]+)(\")/\1\L\2\E\3/"
+    # VSBHDA 2.0 spells its ASM includes in uppercase (include CONFIG.INC), and
+    # JWasm on Linux is case-sensitive: lowercase the include operand too.
+    find . -type f \( -name "*.asm" -o -name "*.inc" \) -print0 \
+      | xargs -0 sed -i -E "s/^([[:space:]]*[Ii][Nn][Cc][Ll][Uu][Dd][Ee][[:space:]]+)([^[:space:];]+)/\1\L\2\E/"
   rm -f djgpp/*.o djgpp/*.ar
 
   echo "=== compiling objects ($OUTNAME, ${CARDDEF:-ES1688 default}) ==="
   # CPPFLAGS too, not just CFLAGS: vopl3.cpp/dbopl.cpp use $(CPPFLAGS), and
   # without the card define they compile away under NOFM -> undefined VOPL3_*.
-  make -f djgpp.mak CFLAGS="$CARDDEF" CPPFLAGS="$CARDDEF $OPLDEF" 2>&1 | grep -viE "warning:|note:| \^|~~~|\| |In file included" | tail -8 || true
+  if [ -n "$VERBOSE" ]; then   # VERBOSE=1: show compiler warnings (they are filtered below by default)
+    make -f djgpp.mak CFLAGS="$CARDDEF" CPPFLAGS="$CARDDEF $OPLDEF" 2>&1 | grep -iE "warning:|error:" || true
+  else
+    make -f djgpp.mak CFLAGS="$CARDDEF" CPPFLAGS="$CARDDEF $OPLDEF" 2>&1 | grep -viE "warning:|note:| \^|~~~|\| |In file included" | tail -8 || true
+  fi
   cd djgpp
   echo "=== manual archive + link (Linux) ==="
   OBJ=$(ls *.o 2>/dev/null | grep -v "^main.o$")

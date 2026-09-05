@@ -33,6 +33,9 @@
 #if VMPU
 #include "VMPU.H"
 #endif
+#if IRQONPORTACC
+extern void SNDISR_IrqOnPortAcc( void );
+#endif
 
 #define DOSMEMSTART 0x60 /* offset in PSP, bits 0-3 must be zero */
 #define HDPMI_MAXRANGE 8 /* hdpmi is restricted to 8 port ranges */
@@ -259,6 +262,15 @@ static void RM_TrapHandler( __dpmi_regs * regs)
 #endif
             regs->h.al = PortHandler[i]( port, regs->h.al, regs->x.cx );
             regs->x.flags &= ~CPU_CFLAG; /* clear carry flag, indicates that access was handled */
+#if IRQONPORTACC
+            /* give the sound HW interrupt a chance to be triggered if:
+             * + interrupts disabled and OUT instr is emulated
+             * + port access isn't ISA DMA or PIC
+             * + no DSP DMA op is running
+             */
+            if ( ((regs->x.cx & TRAPF_IF) == TRAPF_OUT) && port >= 0x100 && !VSB_Running() )
+                SNDISR_IrqOnPortAcc();
+#endif
             return;
         }
     }
@@ -363,15 +375,12 @@ uint32_t PTRAP_PM_TrapHandler( uint16_t port, uint16_t flags, uint32_t value )
 }
 
 
-//https://www.cs.cmu.edu/~ralf/papers/qpi.txt
-//https://fd.lod.bz/rbil/interrup/memory/673f_cx5145.html
-//http://mirror.cs.msu.ru/oldlinux.org/Linux.old/docs/interrupts/int-html/rb-7414.htm
-
 uint16_t PTRAP_GetQEMMVersion(void)
 ///////////////////////////////////
 {
-    //http://mirror.cs.msu.ru/oldlinux.org/Linux.old/docs/interrupts/int-html/rb-2830.htm
-    __dpmi_regs r = {0};
+    __dpmi_regs r;
+    r.x.ss = r.x.sp = 0;
+    r.x.flags = 0x202;
 #if 0 /* OW doesn't know ioctl() */
     uint32_t entryfar = 0;
     int fd = 0;
@@ -389,7 +398,6 @@ uint16_t PTRAP_GetQEMMVersion(void)
     if ( ReadLinearD( 0x67*4 ) ) { /* int 67h initialized? */
         r.x.cx = 0x5145; /* "QE" */
         r.x.dx = 0x4d4d; /* "MM" */
-        r.x.flags = 0x202;
         r.x.ax = 0x3f00;
         __dpmi_simulate_real_mode_interrupt(0x67, &r);
         if ( r.h.ah == 0 && r.x.es ) {
@@ -802,16 +810,18 @@ bool PTRAP_Uninstall_RM_PortTraps( void )
 bool PTRAP_DetectHDPMI()
 ////////////////////////
 {
-    uint8_t result = _get_hdpmi_vendor_api(&HDPMIAPI_Entry);
+    uint8_t result = _hdpmi_get_vendor_api(&HDPMIAPI_Entry);
 
-#if 0 //JHDPMI
-	__dpmi_regs r = {0};
+#if 0 //detect jhdpmi.dll
+	__dpmi_regs r;
 	uint32_t *dosmem = NearPtr(_my_psp() + 0x5C);
 	*dosmem = 0xCB2FCD; /* INT 2Fh & RETF */
 	r.x.ax = 0x1684;
 	r.x.bx = 0x4858;
 	r.x.cs = _my_psp() >> 4;
 	r.x.ip = 0x5C;
+	r.x.flags = 0x202;
+	r.x.ss = r.x.sp = 0;
 	if( __dpmi_simulate_real_mode_procedure_retf(&r) == 0 && r.h.al == 0 )
 		jhdpmi = 1;
 #endif

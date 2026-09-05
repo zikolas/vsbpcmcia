@@ -10,15 +10,6 @@ extern "C"
 {
 #endif
 
-#if ADPCM
-typedef struct 
-{
-    int step;
-    uint8_t ref;
-    uint8_t useRef;
-} ADPCM_STATE;
-#endif
-
 //generic IO functions
 uint8_t VSB_MixerAddr(uint16_t port, uint8_t val, uint16_t flags);
 uint8_t VSB_MixerData(uint16_t port, uint8_t val, uint16_t flags);
@@ -32,7 +23,7 @@ void VSB_Init(int irq, int dma, int hdma, int DSPVer, void *hAU );
 uint8_t VSB_GetIRQ( void );
 int VSB_GetDMA( void );
 //int VSB_GetHDMA( void );
-int VSB_Running( void );
+int VSB_Running( void ); /* DSP op running? ( either DMA cmd or "Emit Silence") */
 void VSB_Stop( void );
 
 //int VSB_GetDACSpeaker( void );
@@ -42,14 +33,13 @@ int VSB_IsAuto( void );
 int VSB_GetChannels( void );
 int VSB_GetSampleRate( void );
 unsigned int VSB_GetBits( void );
-uint32_t VSB_GetSampleBufferSize( void );
-uint32_t VSB_GetPos( void ); //get pos in bytes
-uint32_t VSB_SetPos(uint32_t pos); //set pos in bytes
-void VSB_SetIRQStatus( uint8_t );
+uint32_t VSB_GetBuffSpace( void );
+void VSB_ReduceBuffSpace( uint32_t bytes ); /* reduce space in bytes */
+void VSB_ResetBuffSpace( void ); /* autoinit: reset buffer space */
 void VSB_ClearIRQStatus( void );  /* revival-squelch drop (sndisr.c) */
 int VSB_GetIRQStatus( void );
-uint8_t VSB_GetMixerReg(uint8_t index);
-int VSB_ReadDirectSamples(uint8_t *);
+uint8_t VSB_GetMixerReg( uint8_t index );
+int VSB_ReadDirectSamples( uint8_t * );
 
 #ifdef __cplusplus
 }

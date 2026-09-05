@@ -13,7 +13,7 @@
 #                                      stack-check trip, PMISR depth probes
 #
 # ABOUT THE TARGET. Despite the name, the generated code is 32-bit (.386,
-# USE32 segments -- see startup/cstrt16x.asm, "DOS 32-bit startup code for
+# USE32 segments -- see src/startup/cstrt16x.asm, "DOS 32-bit startup code for
 # 16-bit client"). What is 16-bit is the DPMI *client type*: the host is
 # entered through its 16:16 API entry, so interrupt and callback frames are
 # 16-bit and the host files us in its 16-bit interrupt table. Note that DS
@@ -82,6 +82,10 @@ find . -type f | while read -r f; do
 done
 find . -type f \( -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.hpp" -o -name "*.asm" -o -name "*.inc" \) -print0 \
   | xargs -0 sed -i -E "s/(#[[:space:]]*include[[:space:]]*\")([^\"]+)(\")/\1\L\2\E\3/"
+  # VSBHDA 2.0 spells its ASM includes in uppercase (include CONFIG.INC), and
+  # JWasm on Linux is case-sensitive: lowercase the include operand too.
+  find . -type f \( -name "*.asm" -o -name "*.inc" \) -print0 \
+    | xargs -0 sed -i -E "s/^([[:space:]]*[Ii][Nn][Cc][Ll][Uu][Dd][Ee][[:space:]]+)([^[:space:];]+)/\1\L\2\E/"
 
 OUTD=ow16
 rm -rf $OUTD; mkdir -p $OUTD
@@ -93,7 +97,7 @@ CPPOPT="-q -oxa -ms -bc -5s -fp5 -fpi87"   # no -za99: that is a C-only switch, 
 CEXTRA="-DNOTFLAT -DONEMODULE ${DIAG:+-DSTKDIAG}"   # ONEMODULE: no sndcard.drv boundary, so the
                                 # AU_* entry points are NEAR (see au_cards.h)
 INC="-I/ow/h"
-AFLAGS="-q -DNOTFLAT -DONEMODULE ${DIAG:+-DSTKDIAG} -Istartup -D?MODEL=small"
+AFLAGS="-q -DNOTFLAT -DONEMODULE ${DIAG:+-DSTKDIAG} -Isrc/startup -D?MODEL=small"
 
 cc()  { wcc386 $DBG $COPT -os $CEXTRA $CARDDEF -Isrc $INC -fo=$OUTD/$2 src/$1; }
 # hot engine objects: time over space (the explicit rules in ow16.mak), the
@@ -103,10 +107,10 @@ cc()  { wcc386 $DBG $COPT -os $CEXTRA $CARDDEF -Isrc $INC -fo=$OUTD/$2 src/$1; }
 
 cch() { wcc386 $DBG $COPT -ot $CEXTRA $CARDDEF -Isrc $INC -fo=$OUTD/$2 src/$1; }
 
-ccx() { wcc386 $DBG $COPT     $CEXTRA $CARDDEF -Impxplay -Isrc $INC -fo=$OUTD/$2 mpxplay/$1; }
+ccx() { wcc386 $DBG $COPT     $CEXTRA $CARDDEF -Isrc/hw -Isrc $INC -fo=$OUTD/$2 src/hw/$1; }
 cpp() { wpp386 $DBG $CPPOPT -os $CEXTRA $CARDDEF -Isrc $INC -fo=$OUTD/$2 src/$1; }
 asm() { jwasm $AFLAGS $CARDDEF -Fo=$OUTD/$2 src/$1; }
-sasm(){ jwasm -q -zcw -DNOTFLAT -D?MODEL=small -Fo=$OUTD/$2 startup/$1; }
+sasm(){ jwasm -q -zcw -DNOTFLAT -DONEMODULE -D?MODEL=small -Fo=$OUTD/$2 src/startup/$1; }
 
 fail=0
 try() { local out; if out=$("$@" 2>&1); then :; else fail=1; fi; [ -z "$out" ] || echo "$out"; }
@@ -121,23 +125,24 @@ try() { local out; if out=$("$@" 2>&1); then :; else fail=1; fi; [ -z "$out" ] |
 # option block -- and SNDISR_HasTsc, SNDISR_ReviveSquelch and FOpts are
 # DATA, which no call thunk can bridge. Splitting would mean inventing a
 # reverse import table with pointer translation for engine globals.
-# Nothing forces the split: startup/init1632.asm already sets CSGT64K=1
+# Nothing forces the split: src/startup/init1632.asm already sets CSGT64K=1
 # ("_TEXT may exceed 64k") and gives DGROUP a 4GB limit, so the 64K figure in
 # vsbhda.txt describes the upstream module layout, not a hard ceiling. One
 # module also keeps the object set the same as the djgpp.mak one, which is
 # what makes the two binaries comparable when the bench comes back.
 echo "=== C objects ==="
 for f in sndisr ptrap vdma vsb; do try cch $f.c $f.obj; done
-for f in main linear pic virq vmpu tsf fmvol fmshim hostsvc; do try cc $f.c $f.obj; done
+for f in main linear pic virq vmpu tsf adpcm fmvol fmshim hostsvc; do try cc $f.c $f.obj; done
 
 try cpp vopl3.cpp vopl3.obj
 echo "=== card objects ==="
 for f in au_cards dmabuff physmem timer sc_es1688 sc_vew211 sc_scp55 sc_mc8k sc_tp755; do try ccx $f.c $f.obj; done
 echo "=== asm objects ==="
-for f in stackio stackisr sbisr int31 mixer hapi dprintf vioout djdpmi uninst fileacc pmisr rte200 logfile cv1to2; do
+for f in stackio stackisr sbisr int31 mixer hapi dprintf vioout djdpmi uninst fileacc pmisr rte200 logfile; do
   try asm $f.asm $f.obj
 done
-for f in malloc sbrk; do try sasm $f.asm $f.obj; done
+# getenv/strtol/_matherr: the 2.0 startup replaces the libc versions (smaller)
+for f in malloc sbrk getenv strtol _matherr; do try sasm $f.asm $f.obj; done
 try sasm cstrt16x.asm cstrt16x.obj
 try sasm init1632.asm init1632.obj
 
@@ -150,10 +155,10 @@ try jwasm -q -DNOTFLAT -D?MODEL=small -DOUTD=$OUTD -Fo=$OUTD/rmwrap.obj src/rmwr
 if [ $fail -ne 0 ]; then echo "=== COMPILE FAILED ==="; exit 1; fi
 
 echo "=== link ==="
-OBJ="main sndisr ptrap linear pic vsb vdma virq vmpu tsf fmvol fmshim hostsvc vopl3 \
+OBJ="main sndisr ptrap linear pic vsb vdma virq vmpu tsf adpcm fmvol fmshim hostsvc vopl3 \
   au_cards dmabuff physmem timer sc_es1688 sc_vew211 sc_scp55 sc_mc8k sc_tp755 \
   stackio stackisr sbisr int31 mixer hapi dprintf vioout djdpmi uninst fileacc \
-  pmisr rte200 logfile cv1to2 rmwrap malloc sbrk"
+  pmisr rte200 logfile rmwrap malloc sbrk getenv strtol _matherr"
 
 cd $OUTD
 wlib -q -b -n vsbpcm16.lib $(for o in $OBJ; do printf "%s.obj " $o; done)
@@ -161,7 +166,8 @@ wlib -q -b -n vsbpcm16.lib $(for o in $OBJ; do printf "%s.obj " $o; done)
 # wmake facility, so here they go through a real directive file instead.
 cat > vsbpcm16.lnk <<EOF
 format dos
-file cstrt16x.obj, main.obj, init1632.obj name vsbpcm16.exe   # .obj spelled out: wlink on Linux defaults to .o
+# init1632 FIRST: the 2.0 startup assumes the segment order _TEXT16, _TEXT, DGROUP (CS32FIRST=0)
+file init1632.obj, cstrt16x.obj, main.obj name vsbpcm16.exe   # .obj spelled out: wlink on Linux defaults to .o
 libpath /ow/lib386/dos;/ow/lib386
 lib vsbpcm16.lib
 op q,statics,m=vsbpcm16.map
@@ -172,6 +178,7 @@ wlink @vsbpcm16.lnk
 echo "=== result ==="
 if [ -f vsbpcm16.exe ]; then
   mkdir -p /build/ow16 && cp vsbpcm16.exe vsbpcm16.map /build/ow16/
+  cp *.obj *.lnk /build/ow16/   # objects too: link forensics (OMF EXTDEF scans) happen on the host
   ls -la /build/ow16/vsbpcm16.exe && echo "BUILD OK"
 else
   echo "BUILD FAILED"; exit 1

@@ -155,6 +155,8 @@ SCP-55 has a better option than either — see its section below.
 
 `tools/build.sh` runs the whole build in a Linux container (see doc/NOTES.md);
 DJGPP v2.05 and JWasm v2.17+ are required.
+The engine is VSBHDA 2.0 (upstream merged 2026-09-05: in-place ADPCM decoder,
+central ring write pointer, `/B` `/BP` buffer options, `src/hw` layout).
 
  * plain — **VSBPCM.EXE**, the unified NOFM binary (ES1688 + VEW211 + SCP55
    + TP755)

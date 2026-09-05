@@ -1,10 +1,22 @@
 
-  v2.0,
+  v2.0, 04.09.2026
   - fixed: DSP play cmds unconditionally started sound, ignoring state
     of DMA channel mask.
   - improved handling of the case where DMA buffer size is smaller than
     SB buffer size.
-  - /CF16 added; does resampling with a better "last" sample.
+  - resampling now uses a correct "last" sample for better interpolation.
+  - fixed HDA: check for HDA controller base address 0 wasn't safe.
+  - accept multiples of 16000 for /F option.
+  - Linux.mak & Linux16.mak added.
+  - cmdline option /B added to make hardware buffer size configurable;
+    default size of this buffer reduced from 16/32 kB to 4 kB; this fixes
+    a regression in v1.9 (latency got too long if rate was <= 22050 Hz).
+  - soundfont dynamic memory handling made less wasteful.
+  - period size value (/PS) now used by SB Live/Audigy card driver.
+  - added tool pcisnd.exe.
+  - debug version: support for cmdline option /LM added.
+  - cmdline option /BP added to make buffer protection configurable.
+  - ES1371/ES1373 cards: joystick enabled.
 
   v1.9, 04.06.2026
   - support DSP cmd 0xFD (DSP cmd status).

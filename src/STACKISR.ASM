@@ -6,8 +6,8 @@
 	option casemap:none
 	option proc:private
 
-	include config.inc
-	include debug.inc
+	include CONFIG.INC
+	include DEBUG.INC
 
 	public dwDS
 
@@ -296,16 +296,5 @@ _SND_UninstallISR proc public uses ebx interrupt:byte
 	ret
 
 _SND_UninstallISR endp
-
-ifdef NOTFLAT
-;--- v2.0: dummy DoINTR_
-;--- + avoids OW's DoINTR_, which adds an array of INT XX instructions.
-;--- + ensures that code size remains below 64k.
-DoINTR_ proc public
-	@dprintf CStr("WARNING! DoINTR_ called",10)
-	int 3
-	ret
-DoINTR_ endp
-endif
 
 	END

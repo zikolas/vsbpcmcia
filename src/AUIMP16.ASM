@@ -9,7 +9,7 @@
 	option casemap:none
 	option proc:private
 
-	include debug.inc
+	include DEBUG.INC
 
 externdef c psp:dword
 externdef c DSBase:dword
@@ -277,7 +277,7 @@ AU_setmixer_all proc c public a1:ptr
 AU_setmixer_all endp
 endif
 
-AU_writedata proc c public a1:ptr, a2:dword, pPCM:ptr
+AU_writedata proc c public a1:ptr, pPCM:ptr, a2:dword
 
 	mov eax, pPCM		; vsbhda near ptr
 	add eax, DSBase		; linear address
