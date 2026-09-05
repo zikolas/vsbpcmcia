@@ -467,6 +467,7 @@ int main(int argc, char* argv[])
                " /CARD:ES1688 /BASE240   after ES1688GO /SB=240   (base defaults to 220)\n"
                " /CARD:VEW211 /BASE530   after VEW21XGO /IO=530   (base defaults to 530)\n"
                " /CARD:SCP55  /BASE330   after SCP55GO            (base defaults to 330)\n"
+               " /CARD:MC8K   /BASE240   after MC8KGO             (240=MC-8000, 260=DMC-9000)\n"
                " /CARD:TP755             no enabler, planar       (base defaults to 4E30)\n"
                " /BASE is the REAL card; /A is the EMULATED SB the guest looks for.\n"
                "\nBLASTER env may change defaults;" HELPNOTE );
@@ -501,6 +502,8 @@ int main(int argc, char* argv[])
                "                            first and match its /SB= (default 220)\n"
                "  /CARD:VEW211 [/BASE530]   Panasonic CF-VEW211; run VEW21XGO first\n"
                "                            and match its /IO= (default 530)\n"
+               "  /CARD:MC8K   [/BASE240]   TDK MC-8000/DMC-9000; run MC8KGO first\n"
+               "                            (probes 240h then 260h when /BASE is absent)\n"
                "  /CARD:TP755  [/BASE4E30]  ThinkPad 755C planar codec; no enabler\n"
 #ifndef NOSBLIVE
                "  /CARD:AUDIGY             Audigy 2 ZS Notebook; run AUD2GO first\n"
@@ -509,7 +512,7 @@ int main(int argc, char* argv[])
         return(1);
     }
     if( !PTOPS_CardIs("es1688") && !PTOPS_CardIs("vew211") && !PTOPS_CardIs("tp755")
-        && !PTOPS_CardIs("scp55")
+        && !PTOPS_CardIs("scp55") && !PTOPS_CardIs("mc8k")
 #ifndef NOSBLIVE
         /* CARD_AUDIGY build: the SB Live/Audigy driver is linked and its entry
          * sits after the PCMCIA ones in the card table, so naming it lets
@@ -520,9 +523,9 @@ int main(int argc, char* argv[])
 #endif
       ) {
 #ifndef NOSBLIVE
-        printf("Error: unknown /CARD:%s -- expected ES1688, VEW211, SCP55, TP755 or AUDIGY\n", FOpts.card );
+        printf("Error: unknown /CARD:%s -- expected ES1688, VEW211, SCP55, MC8K, TP755 or AUDIGY\n", FOpts.card );
 #else
-        printf("Error: unknown /CARD:%s -- expected ES1688, VEW211, SCP55 or TP755\n", FOpts.card );
+        printf("Error: unknown /CARD:%s -- expected ES1688, VEW211, SCP55, MC8K or TP755\n", FOpts.card );
 #endif
         return(1);
     }
