@@ -1239,6 +1239,17 @@ isrexit:
 #ifndef NOES1688
     PT_Ops->dbg_exit();   /* DIAG: depth-- + outermost-pass duration (0x4FC/D) */
 #endif
+    /* IRQ8 is the RTC periodic interrupt, which is not ours to own.  Other
+       resident software can legitimately need the same tick - a MIDI synth
+       engine that runs off the RTC, for one - and unlike a device IRQ there is
+       no per-consumer flag to arbitrate with, so whoever hooks INT 70h last
+       would otherwise take every tick.  Report "not handled" so STACKISR falls
+       through to dfOldSndVec, and leave the EOI to the last handler in the
+       chain: sending one here as well can dismiss a pending interrupt early.
+       Our pump work is already done by this point.  Backends on a normal
+       device IRQ are unaffected. */
+    if ( isr.SndIrq == 8 )
+        return(0);
     PIC_SendEOI( isr.SndIrq );
 #if COMPAT4
     if ( gvars.compatflags & CF_MASKPIT )
