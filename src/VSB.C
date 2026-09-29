@@ -482,8 +482,21 @@ static int CalcSampleRate( uint16_t value )
     uint8_t clamped;
     unsigned int channels = 1;
 
-    if( vsb.DSPVER < 0x300 )
-        limit = ( vsb.Bits == 2 ? 189 : (vsb.Bits <= 4 ? 172 : 210));
+    if( vsb.DSPVER < 0x300 ) {
+        /* DSP 2.0x plays high-speed 8-bit up to ~44 kHz (cmds 0x90/0x91, which
+         * only exist from DSP 2.01 on); only the normal-speed ceiling is 210.
+         * Clamping high-speed here too played Epic Pinball's TC 224 at 21739
+         * instead of 31250 under T3.
+         * A game set up for an SB Pro writes the mixer's stereo bit even when
+         * the emulated DSP is 2.0x, and its time constant is then the SB Pro
+         * stereo one. Divide by channels as the SB Pro path does, so the tap
+         * and the rate agree: without it the tap read stereo frames at the
+         * byte rate (1.4x fast under T3), and forcing mono instead fed the
+         * interleaved L,R stream to the backends as mono at twice the rate,
+         * which no rate converter can bring down cleanly (2026-09-29). */
+        channels = VSB_GetChannels();
+        limit = ( vsb.Bits == 2 ? 189 : (vsb.Bits <= 4 ? 172 : (vsb.HighSpeed ? 234 : 210)));
+    }
     else if( vsb.DSPVER >= 0x0400 )
         limit = vsb.Bits == 2 ? 165 : (vsb.Bits == 3 ? 179 : (vsb.Bits == 4 ? 172 : 234));
     else {
