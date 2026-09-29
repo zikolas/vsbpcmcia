@@ -97,7 +97,7 @@ OBJFILES = &
 	$(OUTD)/fmvol.obj		$(OUTD)/fmshim.obj		$(OUTD)/hostsvc.obj		$(OUTD)/adpcm.obj &
 	$(OUTD)/au_cards.obj	$(OUTD)/dmabuff.obj		$(OUTD)/physmem.obj		$(OUTD)/timer.obj &
 	$(OUTD)/sc_es1688.obj	$(OUTD)/sc_vew211.obj	$(OUTD)/sc_scp55.obj &
-	$(OUTD)/sc_mc8k.obj	$(OUTD)/sc_tp755.obj &
+	$(OUTD)/sc_mc8k.obj	$(OUTD)/sc_tp755.obj	$(OUTD)/sc_ibmaud.obj &
 	$(OUTD)/stackio.obj		$(OUTD)/stackisr.obj	$(OUTD)/sbisr.obj		$(OUTD)/int31.obj		$(OUTD)/rmwrap.obj		$(OUTD)/mixer.obj &
 	$(OUTD)/hapi.obj		$(OUTD)/dprintf.obj		$(OUTD)/vioout.obj		$(OUTD)/djdpmi.obj		$(OUTD)/uninst.obj		$(OUTD)/fileacc.obj &
 	$(OUTD)/pmisr.obj		$(OUTD)/rte200.obj		$(OUTD)/logfile.obj &
@@ -178,6 +178,7 @@ $(OUTD)/sc_es1688.obj: src\hw\sc_es1688.c
 $(OUTD)/sc_vew211.obj: src\hw\sc_vew211.c
 $(OUTD)/sc_scp55.obj:  src\hw\sc_scp55.c
 $(OUTD)/sc_mc8k.obj:   src\hw\sc_mc8k.c
+$(OUTD)/sc_ibmaud.obj: src\hw\sc_ibmaud.c
 $(OUTD)/sc_tp755.obj:  src\hw\sc_tp755.c
 
 $(OUTD)/adpcm.obj:     src\adpcm.c

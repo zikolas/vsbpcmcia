@@ -44,6 +44,9 @@ extern struct sndcard_info_s SCP55_sndcard_info;
 #ifndef NOMC8K
 extern struct sndcard_info_s MC8K_sndcard_info;
 #endif
+#ifndef NOIBMAUD
+extern struct sndcard_info_s IBMAUD_sndcard_info;
+#endif
 #ifndef NOES1371
 extern struct sndcard_info_s ES1371_sndcard_info;
 #endif
@@ -76,6 +79,9 @@ static const struct sndcard_info_s *sndcard_info_table[] = {
 #endif
 #ifndef NOMC8K
 	&MC8K_sndcard_info,     /* PCMCIA EMU8200 DRAM-ring (TDK MC-8000/DMC-9000) */
+#endif
+#ifndef NOIBMAUD
+	&IBMAUD_sndcard_info,   /* PCMCIA IBM Audio Adapter, card-side ring */
 #endif
 #ifndef NOTP755
 	&TP755_sndcard_info,    /* TP755C planar CS4248 (/CARD:TP755) */

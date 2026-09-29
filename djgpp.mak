@@ -46,7 +46,7 @@ OBJFILES=\
 	$(OUTD)/adpcm.o\
 	$(OUTD)/au_cards.o\
 	$(OUTD)/dmabuff.o	$(OUTD)/physmem.o	$(OUTD)/timer.o\
-	$(OUTD)/sc_es1688.o	$(OUTD)/sc_vew211.o	$(OUTD)/sc_scp55.o	$(OUTD)/sc_mc8k.o	$(OUTD)/sc_tp755.o	$(OUTD)/fmvol.o	$(OUTD)/fmshim.o\
+	$(OUTD)/sc_es1688.o	$(OUTD)/sc_vew211.o	$(OUTD)/sc_scp55.o	$(OUTD)/sc_mc8k.o	$(OUTD)/sc_tp755.o	$(OUTD)/sc_ibmaud.o	$(OUTD)/fmvol.o	$(OUTD)/fmshim.o\
 	$(OUTD)/stackio.o	$(OUTD)/stackisr.o	$(OUTD)/sbisr.o		$(OUTD)/int31.o		$(OUTD)/rmwrap.o	$(OUTD)/mixer.o\
 	$(OUTD)/hapi.o		$(OUTD)/dprintf.o	$(OUTD)/vioout.o	$(OUTD)/djdpmi.o	$(OUTD)/uninst.o	$(OUTD)/fileacc.o
 
@@ -101,7 +101,8 @@ C_EXTRA_FLAGS=-march=i486
 # This intentionally breaks the object-code-identity invariant tools/cmp32.sh
 # checks (see src/hostsvc.h): moving this code is the point of the change.
 HOTOBJS=$(OUTD)/sndisr.o $(OUTD)/ptrap.o $(OUTD)/vdma.o $(OUTD)/vsb.o \
-	$(OUTD)/sc_es1688.o $(OUTD)/sc_vew211.o $(OUTD)/sc_scp55.o $(OUTD)/sc_tp755.o
+	$(OUTD)/sc_es1688.o $(OUTD)/sc_vew211.o $(OUTD)/sc_scp55.o $(OUTD)/sc_tp755.o \
+	$(OUTD)/sc_ibmaud.o
 
 $(HOTOBJS): C_OPT_FLAGS=-O2 -fno-asynchronous-unwind-tables
 LD_FLAGS=$(addprefix -Xlinker ,$(LD_EXTRA_FLAGS))
@@ -167,6 +168,7 @@ $(OUTD)/sc_es1688.o:: sc_es1688.c au_cards.h config.h ptops.h
 $(OUTD)/sc_vew211.o:: sc_vew211.c au_cards.h config.h ptops.h
 $(OUTD)/sc_scp55.o::  sc_scp55.c  au_cards.h config.h ptops.h
 $(OUTD)/sc_mc8k.o::   sc_mc8k.c   au_cards.h config.h ptops.h emu8kini.h
+$(OUTD)/sc_ibmaud.o:: sc_ibmaud.c au_cards.h config.h ptops.h
 $(OUTD)/sc_tp755.o:: sc_tp755.c au_cards.h dmabuff.h config.h ptops.h
 $(OUTD)/timer.o::    timer.c au_cards.h timer.h
 
