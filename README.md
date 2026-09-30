@@ -11,8 +11,8 @@ real OPL directly at 0x388, untrapped. Validated from a Pentium MMX down to a
 386-bus 486SLC/25 (HP OmniBook 425) — see COMPATIBILITY.md for the measured
 floor and slow-CPU tuning.
 
-VSBPCM.EXE contains the ES1688, CS4231/CS4231A, CS4248 and IBM Audio Adapter
-backends; `/CARD:`
+VSBPCM.EXE contains the ES1688, CS4231/CS4231A, CS4248, EMU8200 (TDK) and IBM
+Audio Adapter backends; `/CARD:`
 picks one at load time. Nothing is probed — you already have to run that card's 
 enabler first, so the launcher always knew which card it was talking to.
 
@@ -29,6 +29,8 @@ Supported sound cards:
    https://github.com/zikolas/scp55-enabler) — `/CARD:SCP55`
  * IBM PCMCIA Audio Adapter (P/N 0933967, CIS "IBM NON-DSP AUDIO"): bring the
    card up with IBMAUDGO first (enabler not yet published) — `/CARD:IBMAUD`
+ * TDK MusicCard MC-8000 and DMC-9000 (EMU8200): bring the card up with MC8KGO
+   first (https://github.com/zikolas/mc8kgo) — `/CARD:MC8K`
  * BONUS: ThinkPad 755C Crystal CS4248: The planar codec is the sound card
    and the driver wakes it up — `/CARD:TP755`
  
@@ -48,7 +50,8 @@ guessing. Two addresses are easy to confuse, so the help says it too:
  * `/BASE` is the **real** card's base — match it to the enabler's setting.
 
 `/BASE` defaults per card to that card's own enabler default (220 / 250 / 330
-/ 530 / 4E30), so it can be omitted when you left the enabler at its default.
+/ 530 / 4E30; MC8K looks at 240 and then 260), so it can be omitted when you
+left the enabler at its default.
 
 **Emulated SB at 220, real chip elsewhere.** Games that scan for a Sound
 Blaster probe 0x220 first and must find the emulation there; if they find the
@@ -104,6 +107,15 @@ IBM PCMCIA Audio Adapter:
     HDPMI32I -r -x -v
     VSBPCM /CARD:IBMAUD /A220
 
+TDK MC-8000 / DMC-9000:
+
+    MC8KGO /W=DC00
+    SET BLASTER=A220 I7 D1 T4
+    SET SBEMAXHZ=11025
+    JLOAD QPIEMU.DLL
+    HDPMI32I -r -x -v
+    VSBPCM /CARD:MC8K /A220
+
 ThinkPad 755C planar codec (no enabler):
 
     SET BLASTER=A220 I7 D1 T4
@@ -142,8 +154,9 @@ between runs, so a base or card left over from one launcher silently
 redirected the next. Only transient bench knobs remain in the environment —
 `SBERTC` (fixed RTC pump rate-select 3-15), `SBEPTLAT` (passthrough ring
 latency target, ms), `SBENORS` (VEW211/SCP55: disable the frame stepper),
-`SBEMAXHZ` (SCP55: cap the codec rate; `/MAXHZ` is the switch form for both
-CS4231A cards), `SBENOSTUB` (leave the V86 stub's two SB fast paths — the FM
+`SBEMAXHZ` (SCP55: cap the codec rate, `/MAXHZ` being the switch form for both
+CS4231A cards; MC8K: cap the guest rate, above which the feed decimates),
+`SBENOSTUB` (leave the V86 stub's two SB fast paths — the FM
 alias forward and the DSP write-status answer — disarmed, for an A/B), `ESNOI8`
 (disable the IRQ0 watchdog heartbeat), `ESIRQ5`, `IRQTONE`, `FIFOTEST`, and
 `SBEIBMST` / `SBEIBM16` (IBMAUD output format, see its section below).
@@ -173,7 +186,7 @@ The engine is VSBHDA 2.0 (upstream merged 2026-09-05: in-place ADPCM decoder,
 central ring write pointer, `/B` `/BP` buffer options, `src/hw` layout).
 
  * plain — **VSBPCM.EXE**, the unified NOFM binary (ES1688 + VEW211 + SCP55
-   + TP755 + IBMAUD)
+   + MC8K + TP755 + IBMAUD)
  * `CARD=TP755` — **VSBPCMT.EXE**: the same backends PLUS the DOSBox
    OPL3 emulation, i.e. real FM MUSIC on the FM-less 755C instead of the
    detection-only shim. A feature flag, not a card selector.
@@ -241,7 +254,7 @@ any small/mid GM SoundFont 2 file named by AUDSF2 works.
 
 Wavetable knobs: AUDSF2 (font path; unset = wavetable off), AUDWTGAIN
 (level trim in centibels), AUDWTDEMO (play a scale at boot as a smoke test).
-Further AUDWT* variables are bisect/diagnostic switches — see mpxplay/emu_wt.c.
+Further AUDWT* variables are bisect/diagnostic switches — see src/hw/emu_wt.c.
 
 Alpha limits: small/mid GM fonts are the stable path — large layered fonts
 (GeneralUser GS) can hard-wedge the machine mid-song, a voice-engine
@@ -305,6 +318,25 @@ Verified on an IBM PC110 (486SX/33) at T4: DOOM (mono) and Epic Pinball
 (stereo). On a Toshiba T2130CT (486DX4) with VSBPCMT `/RESAMP`: Monkey Island's
 AdLib music, slowing a little in its densest passages. The playback interface
 was recovered by I/O trace of IBM's own DOS WAV player.
+
+## The TDK MC-8000 and DMC-9000
+
+`/CARD:MC8K`, after bringing the card up with MC8KGO. `/BASE` can be left off:
+the backend looks for the card at 240h (MC-8000) and then 260h (DMC-9000).
+
+These cards carry an EMU8200 wavetable chip and its sample DRAM, with no Sound
+Blaster logic, no DMA and no FM chip. The backend streams the guest's digital
+audio into a ring in that DRAM and loops a voice over it, so the chip plays
+the guest's own rate at exact pitch. `SBEMAXHZ` caps that rate (22050 by
+default; above it the feed decimates), and 486-class hosts want
+`SBEMAXHZ=11025`.
+
+The detection shim answers 388h, so AdLib music is silent. For music, TDKSYN
+in the MC8KGO repository plays General MIDI on the card's EMU8200.
+
+Verified on a ThinkPad 235, and on a Toshiba T2130CT (486DX4) with DOOM and
+Epic Pinball. Known issue: Epic Pinball has a rare stutter that sounds like
+part of an earlier sample replaying.
 
 ## The TP755 planar backend
 
@@ -393,15 +425,19 @@ parts stays with their authors.
    crazii's shape; the DJGPP implementations behind it were written here
  * Linux ALSA, sound/isa/wss/wss_lib.c (GPL v2) - the ThinkPad
    system-control twiddle that wakes the 755C's planar codec (port 0x15E8,
-   index 0x1C, bit 0x02) in mpxplay/sc_tp755.c. sc_es1688.c separately cites
+   index 0x1C, bit 0x02) in src/hw/sc_tp755.c. sc_es1688.c separately cites
    ALSA for one ES1688 reset behaviour (reset bit 1 clears the FIFO): that is
    a documented register effect we cross-checked, not code taken from it --
    noted here for completeness rather than because it is owed
  * Linux ALSA snd-emu10k1 (GPL v2), (C) Jaroslav Kysela and contributors -
-   the EMU10K2/CA0108 register definitions (mpxplay/emu10k1.h), the Audigy 2
+   the EMU10K2/CA0108 register definitions (src/hw/EMU10K1.H), the Audigy 2
    ZS Notebook initialisation, the BAR+0x38 wake-up and the WM8768 DAC
    sequences. The bench tools in tools/audigy/ take their chip knowledge from
    the same source (see tools/audigy/README.md)
+ * Linux ALSA, sound/isa/sb/emu8000.c (GPL v2 or later), (C) Jaroslav Kysela,
+   Steve Ratcliffe and Takashi Iwai - the EMU8000 initialisation arrays in
+   src/hw/emu8kini.h, carried verbatim (emu8000.c notes they come from
+   Creative's ADIP), which sc_mc8k.c loads into the TDK cards' EMU8200
  * DOSBox's DBOPL (GPL v2) - OPL3 emulation, linked only by the builds that
    need it (CARD=TP755, CARD=AUDIGY)
  * TinySoundFont (MIT, vendored in tsf/) - optional software-synth fallback;
@@ -409,12 +445,12 @@ parts stays with their authors.
 
 Written here and (C) 2026 zikolas, GPL v2 with the rest of the tree: the
 passthrough architecture (ring, RTC pump, tick-credit pacing, frame stepper,
-watchdogs); the four backends mpxplay/sc_es1688.c, sc_vew211.c, sc_scp55.c
-(forked from sc_vew211.c) and sc_tp755.c, built on the interfaces and
-sequences credited above; the codec
+watchdogs); the backends src/hw/sc_es1688.c, sc_vew211.c, sc_scp55.c (forked
+from sc_vew211.c), sc_tp755.c, sc_mc8k.c and sc_ibmaud.c, built on the
+interfaces and sequences credited above; the codec
 bring-up recipes worked out on the bench; the 755C's 8237 DMA ring; the
-telemetry; the SF2 reader mpxplay/emu_sf2.c, written from the published
-SoundFont 2.01 specification; and the Audigy wavetable mpxplay/emu_wt.c,
+telemetry; the SF2 reader src/hw/emu_sf2.c, written from the published
+SoundFont 2.01 specification; and the Audigy wavetable src/hw/emu_wt.c,
 which rests on ALSA's register-level work. Chip register semantics come from
 the ESS and Crystal datasheets, which are facts rather than anyone's code.
 
