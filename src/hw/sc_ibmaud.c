@@ -5,7 +5,7 @@
  * backend needs no card interrupt). This backend drives the card, it does not
  * enable it.
  *
- * INTERFACE (ibmaud-enabler doc/recon.md, 2026-09-29: recovered by I/O trace
+ * INTERFACE (ibmaudgo doc/recon.md, 2026-09-29: recovered by I/O trace
  * of the vendor DOS driver, then confirmed by our own player, IBMPLAY). There
  * is no host-visible codec register file: an IBM ASIC fronts a serial codec,
  * whose control fields match the Crystal CS4215/AD1849 layout, and keeps a

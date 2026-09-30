@@ -28,7 +28,8 @@ Supported sound cards:
    - Roland SCP-55 (bring the card up with SCP55GO first,
    https://github.com/zikolas/scp55-enabler) — `/CARD:SCP55`
  * IBM PCMCIA Audio Adapter (P/N 0933967, CIS "IBM NON-DSP AUDIO"): bring the
-   card up with IBMAUDGO first (enabler not yet published) — `/CARD:IBMAUD`
+   card up with IBMAUDGO first (https://github.com/zikolas/ibmaudgo) —
+   `/CARD:IBMAUD`
  * TDK MusicCard MC-8000 and DMC-9000 (EMU8200): bring the card up with MC8KGO
    first (https://github.com/zikolas/mc8kgo) — `/CARD:MC8K`
  * BONUS: ThinkPad 755C Crystal CS4248: The planar codec is the sound card
