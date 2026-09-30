@@ -36,12 +36,15 @@
  * unsigned stereo at 11025 Hz by default -- SB Pro output. One card word per
  * frame, left in the low byte, so that is 11025 word writes a second (22 kHz
  * 16-bit stereo would be 44100). Epic Pinball plays clean this way on the
- * PC110 (bench, 2026-09-30). /DACRATE picks the table rate (22050 for 22 kHz
- * titles), SBEIBM16=1 keeps 16 bits for faster hosts, and SBEIBMST=0 drops to
- * mono for the slowest: two samples per word, 5512 writes a second, with the
- * stepper averaging L and R. By ear that downmix played only one of Epic
- * Pinball's two channels, at T3 and at T4, and the cause was not found; the
- * IBSTDIAG build below measures what the guest sends.
+ * PC110 (bench, 2026-09-30). /RESAMP, where the engine mixes and software FM
+ * is rendered, defaults to 16-bit stereo instead (22050 writes a second): at
+ * 8 bits the FM's note tails and fades turned grainy. /DACRATE picks the table
+ * rate (22050 for 22 kHz titles), SBEIBM16=0/1 overrides the depth either way,
+ * and SBEIBMST=0 drops to mono for the slowest hosts: two 8-bit samples per
+ * word, 5512 writes a second, with the stepper averaging L and R. By ear that
+ * downmix played only one of Epic Pinball's two channels, at T3 and at T4,
+ * and the cause was not found; the IBSTDIAG build below measures what the
+ * guest sends.
  *
  * TWO HARD RULES (bench, PC110, 2026-09-29):
  *  - never let the ring run dry while armed. An underrun kills the codec
@@ -715,8 +718,12 @@ static int IBMAUD_adetect(struct audioout_info_s *aui)
 #if IBSTDIAG
  { const char *c = getenv("SBEIBMCH"); ib_sd_ch = c ? atoi(c) : 0; }
 #endif
- { const char *e = getenv("SBEIBM16");            // 16-bit only if SBEIBM16=1
-   ib_o16 = e && atoi(e) != 0; }
+ ib_resamp = FOpts.resamp;
+ // 16-bit where the engine mixes (/RESAMP: 16-bit frames, FM rendered at
+ // full depth -- cut to 8 bits, note tails and fades came through grainy,
+ // T2130CT 2026-09-30); 8-bit on the tap, whose SB guests are 8-bit already.
+ { const char *e = getenv("SBEIBM16");            // SBEIBM16=0/1 overrides
+   ib_o16 = e ? atoi(e) != 0 : ib_resamp; }
  ib_bpf = (ib_ost ? 2u : 1u) * (ib_o16 ? 2u : 1u);
  ib_sil = ib_o16 ? 0x0000u : 0x8080u;
  ib_mbits = (unsigned char)((ib_o16 ? 0x20 : 0) | (ib_ost ? 0x10 : 0));
@@ -726,7 +733,6 @@ static int IBMAUD_adetect(struct audioout_info_s *aui)
  if(FOpts.cvol >= 0) ib_att = (unsigned char)(FOpts.cvol & 0x3F);
  if(t){ int rs = atoi(t); if(rs >= 3 && rs <= 15){ ib_rtc_rs = (unsigned char)rs; ib_rtc_fixed = 1; } }
  if(l){ int ms = atoi(l); if(ms >= 20 && ms <= 1000) ib_lat_ms = (unsigned)ms; }
- ib_resamp = FOpts.resamp;
 
  // Queue geometry in card words. The pad floor is half the latency target:
  // the tap keeps the queue near the target, so the pad only fills in for a

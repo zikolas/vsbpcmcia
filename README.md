@@ -285,23 +285,26 @@ with nothing to play.
 
 The codec runs one fixed format and the guest's audio is converted to it:
 8-bit stereo at 11025 Hz by default, one card word per frame, which is 11025
-port writes a second.
+port writes a second. With `/RESAMP` the engine does the mixing, software FM
+included, and the default is 16-bit stereo (22050 writes a second): cut to 8
+bits, FM note tails and fades come through grainy.
  * `/DACRATE` picks another rate from the codec's table (22050 for 22 kHz
    titles, at twice the writes).
  * `SBEIBMST=0` selects mono, two samples per word, for the slowest hosts.
    Open issue: in Epic Pinball the mono downmix was heard as one of the two
    channels.
- * `SBEIBM16=1` selects 16-bit output, for faster hosts.
+ * `SBEIBM16=1` or `SBEIBM16=0` forces 16-bit or 8-bit output either way.
 
-FM music is silent. The detection shim answers 388h, so games still find an
-AdLib and go on to use the digital. Software OPL on this card would take the
-VSBPCMT.EXE build with `/RESAMP`, since the passthrough path never runs the
-FM mixer. That build needs an FPU for its table setup and has not played
-with this card yet.
+FM music takes the software OPL build, VSBPCMT.EXE, with `/RESAMP`: the
+passthrough path never runs the FM mixer (`deploy/goibmf.bat`). That build
+needs an FPU for its table setup. With the plain build the detection shim
+answers 388h instead, so games still find an AdLib and go on to use the
+digital, with FM silent.
 
 Verified on an IBM PC110 (486SX/33) at T4: DOOM (mono) and Epic Pinball
-(stereo). The playback interface was recovered by I/O trace of IBM's own DOS
-WAV player.
+(stereo). On a Toshiba T2130CT (486DX4) with VSBPCMT `/RESAMP`: Monkey Island's
+AdLib music, slowing a little in its densest passages. The playback interface
+was recovered by I/O trace of IBM's own DOS WAV player.
 
 ## The TP755 planar backend
 
