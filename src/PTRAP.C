@@ -696,8 +696,8 @@ bool PTRAP_Prepare_RM_PortTrap()
         if ( OplRingLinear ) {
             if ( stubbytes > OPLRING_OFF ) {
                 dosmem->rseg = 0;
-                printf("CS4248: rmcode1 stub is %lu bytes, OPL ring starts at %u"
-                       " -- ring DISABLED (raise OPLRING_OFF)\n",
+                printf("OPL: v86 stub %lu bytes, ring at %u -- ring off"
+                       " (raise OPLRING_OFF)\n",
                        (unsigned long)stubbytes, OPLRING_OFF );
             } else {
                 dosmem->rhead = dosmem->rtail = 0;
