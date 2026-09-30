@@ -164,6 +164,7 @@ static uint16_t PortState[countof(PortHandler)];
 
 #if HANDLE_IN_388H_DIRECTLY
 static void SyncOplStatusCache( void );
+static uint8_t OplIndexShadow( void );
 static int IsOplHandler( PORT_TRAP_HANDLER h );
 void PTRAP_DrainOplRing( void );
 /* TP755's rmcode1 stub outgrew the 160 bytes of PSP after 0x60 (the write
@@ -173,17 +174,23 @@ void PTRAP_DrainOplRing( void );
 static uint32_t RMStubLinear;
 
 /* Ring size. MUST match OPLRING_ENTRIES in rmcode1.asm, and sc_tp755's
- * TP_RMHOME_PARA must cover 192 + OPLRING_ENTRIES*2 + 32 bytes. */
+ * TP_RMHOME_PARA must equal PTRAP_RMHOME_PARA below. */
 #define OPLRING_ENTRIES 1024
 #define OPLRING_MASK    (OPLRING_ENTRIES - 1)
 /* where the ring starts inside the real-mode home. The stub blob (vars +
- * code) has to fit below this: it is 186 bytes today, so 192 left only 6
- * bytes of slack -- one more instruction in rmcode1.asm and the stub would
- * have silently written over ring entry 0. Prepare_RM_PortTrap now checks
- * the copied length against this and refuses to arm the ring if it ever
- * does overrun (rseg 0 = the stub's pre-ring synchronous path). */
-#define OPLRING_OFF     256
+ * code) has to fit below this. It was 186 bytes when the ring went in and
+ * the offset was 256; the SB-base fast paths took it to 279, and from then
+ * on Prepare_RM_PortTrap left the ring disarmed (rseg 0 = the stub's pre-ring
+ * synchronous path, "ring DISABLED" at load). 512 leaves it room again. */
+#define OPLRING_OFF     512
+/* the whole home: stub + ring + 32 spare = sc_tp755's TP_RMHOME_PARA */
+#define PTRAP_RMHOME_PARA ((OPLRING_OFF + OPLRING_ENTRIES * 2 + 32) / 16)
 #endif
+/* PSP:60h up to the end of the PSP, which is all that stays in conventional
+ * memory once VSBPCM is resident (INT 21h/31h with DX=10h). The rmcode1 stub
+ * and the IRQ7 stub _SB_InstallISR copies after it (rmcode2) share it: 142 +
+ * 17 of the 160 bytes in the plain build, 279 + 17 with the OPL fast path. */
+#define PSP_STUB_ROOM   (0x100 - DOSMEMSTART)
 
 /* One byte of a decomposed multi-byte access: route it through the port's
  * registered handler if the port is trapped, else to real hardware. */
@@ -254,6 +261,14 @@ static void RM_TrapHandler( __dpmi_regs * regs)
 #if HANDLE_IN_388H_DIRECTLY
             if ( IsOplHandler( PortHandler[i] ) ) {
                 PTRAP_DrainOplRing();       /* buffered writes are older */
+                /* The stub keeps non-timer 388h index writes to itself (the
+                 * low byte of data) and buffers their data writes. A 389h
+                 * write that still reaches here -- ring disarmed or full --
+                 * belongs to that index, not to whatever vopl3 saw last:
+                 * without this, every note went to the last timer register
+                 * (Monkey Island silent, T2130CT, 2026-09-30). */
+                if ( port == 0x389 && ( regs->x.cx & TRAPF_OUT ) )
+                    VOPL3_388( 0x388, OplIndexShadow(), TRAPF_OUT );
                 regs->h.al = PortHandler[i]( port, regs->h.al, regs->x.cx );
                 SyncOplStatusCache();
                 regs->x.flags &= ~CPU_CFLAG;
@@ -523,6 +538,12 @@ static void SyncOplStatusCache( void )
     dm->data = (dm->data & 0xFF) | ((uint16_t)VOPL3_388( 0x388, 0, 0 ) << 8);
 }
 
+/* the 388h index the stub last saw (vars._0004, rmcode1.data's low byte) */
+static uint8_t OplIndexShadow( void )
+{
+    return (uint8_t)RMStub()->data;
+}
+
 /* ---- the OPL write ring (see rmcode1.asm for the producer side) ----
  * The v86 stub buffers non-timer OPL register writes as (index,value)
  * entries so the guest's music handler stops paying an RMCB mode switch
@@ -545,9 +566,10 @@ static void Drain_Sti(uint8_t on)
 
 static uint32_t OplRingLinear;   /* kept: copyrmcode() re-zeroes the stub struct */
 
-/* Register the real-mode home: TP_RMHOME_PARA paragraphs of DOS-block slack
- * (sc_tp755 allocates them). Layout owned here:
- *   [0..255 stub][256..2303 ring, OPLRING_ENTRIES entries][2304..2335 spare]
+/* Register the real-mode home: PTRAP_RMHOME_PARA paragraphs of DOS memory
+ * (sc_tp755 allocates them; PTRAP_Prepare_RM_PortTrap does for any other
+ * backend). Layout owned here:
+ *   [0..511 stub][512..2559 ring, OPLRING_ENTRIES entries][2560..2591 spare]
  * Must run BEFORE PTRAP_Prepare_RM_PortTrap (card detect precedes traps). */
 void PTRAP_SetOplRing( uint32_t base )
 {
@@ -630,6 +652,31 @@ bool PTRAP_Prepare_RM_PortTrap()
     /* copy 16-bit code to DOS memory (PSP:60h -- or the registered
      * DOS-block home when the TP755 write-ring build outgrew the PSP) */
 #if HANDLE_IN_388H_DIRECTLY
+    /* This build's stub (with the OPL write-ring code, ~186 bytes) does not
+     * fit PSP_STUB_ROOM, and only sc_tp755 registers a home for it. Under any
+     * other /CARD the stub was copied past the end of the PSP: DOS frees that
+     * memory when VSBPCM goes resident and writes the next MCB over the
+     * stub's tail, so the first trapped port access ran into garbage
+     * (IBMAUD + Monkey Island on the T2130CT wedged at once, 2026-09-30).
+     * So any backend that has not registered a home gets one here. */
+    if ( !RMStubLinear ) {
+# ifdef DJGPP
+        uint32_t eax = 0x0100, edx = 0;
+        uint8_t err;
+        __asm__ __volatile__("int $0x31; setc %0"
+                             : "=q"(err), "+a"(eax), "=d"(edx)
+                             : "b"(PTRAP_RMHOME_PARA)
+                             : "cc", "memory");
+        if ( err ) {
+            printf("Error: no DOS memory for the v86 stub (%u paragraphs)\n",
+                   (unsigned)PTRAP_RMHOME_PARA );
+            return false;
+        }
+        PTRAP_SetOplRing( (eax & 0xFFFFUL) << 4 );
+# else
+#  error "HANDLE_IN_388H_DIRECTLY needs a DOS allocation for the stub home here"
+# endif
+    }
     dosmem = RMStubLinear ? NearPtr(RMStubLinear)
                           : NearPtr(_my_psp() + DOSMEMSTART);
     dosheap = copyrmcode( (void *)dosmem, 0 );
@@ -661,7 +708,20 @@ bool PTRAP_Prepare_RM_PortTrap()
 #else
     dosmem = NearPtr(_my_psp() + DOSMEMSTART);
     dosheap = copyrmcode( (void *)dosmem, 0 );
+    stubbytes = (uint32_t)((uint8_t *)dosheap - (uint8_t *)dosmem);
 #endif
+    /* Nothing past the PSP survives going resident: stubs that do not fit
+     * there must not install. rmcode2 is measured by copying it to dosheap,
+     * where _SB_InstallISR puts the same bytes when the SB IRQ is 7. */
+    if ( (uint8_t *)dosmem == (uint8_t *)NearPtr(_my_psp() + DOSMEMSTART) ) {
+        uint32_t isrbytes = (uint32_t)((uint8_t *)copyrmcode( dosheap, 1 )
+                                       - (uint8_t *)dosheap);
+        if ( stubbytes + isrbytes > PSP_STUB_ROOM ) {
+            printf("Error: v86 stubs (%lu + %lu bytes) do not fit the PSP\n",
+                   (unsigned long)stubbytes, (unsigned long)isrbytes );
+            return false;
+        }
+    }
 
     /* the code starts with a rmcode1 struct, now to be initialized...  */
     dosmem->rmcb = rmcb.segofs;

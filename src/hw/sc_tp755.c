@@ -110,7 +110,7 @@ extern uint32_t DSBase;
 // bench MEASURED that ring full (occupancy high-water pinned 255/255 through
 // MI1 crescendos), which drops those writes back onto the synchronous trap
 // path. Keep in step with OPLRING_ENTRIES in ptrap.c/rmcode1.asm.
-#define TP_RMHOME_PARA 146u
+#define TP_RMHOME_PARA 162u        // = PTRAP_RMHOME_PARA in ptrap.c
 
 #define TP_RING_BYTES 8192u         // must be a power of two and a multiple
 #define TP_PERIOD_DEF 512u          //   of the period; 8K @ 22050 st16 = ~81ms queue
@@ -559,7 +559,8 @@ static int TP755_adetect(struct audioout_info_s *aui)
  par = (int)((2 * TP_RING_BYTES + 15) >> 4) + TP_RMHOME_PARA;
 #else
  // No software OPL in this build, so no write ring and no relocated v86
- // stub: the stub stays in the PSP (53 bytes of the 160 available) and we
+ // stub: the stub stays in the PSP (142 bytes of the 160, 159 with the IRQ7
+ // stub after it) and we
  // keep TP_RMHOME_PARA paragraphs of DOS memory that would go unused.
  par = (int)((2 * TP_RING_BYTES + 15) >> 4);
 #endif
