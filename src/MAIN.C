@@ -477,7 +477,7 @@ int main(int argc, char* argv[])
                " /CARD:VEW211 /BASE530   after VEW21XGO /IO=530   (base defaults to 530)\n"
                " /CARD:SCP55  /BASE330   after SCP55GO            (base defaults to 330)\n"
                " /CARD:MC8K   /BASE240   after MC8KGO             (240=MC-8000, 260=DMC-9000)\n"
-               " /CARD:IBMAUD /BASE250   after IBMAUDGO /I=0      (base defaults to 250)\n"
+               " /CARD:IBMAUD /BASE250   after IBMAUDGO           (base defaults to 250)\n"
                " /CARD:TP755             no enabler, planar       (base defaults to 4E30)\n"
                " /BASE is the REAL card; /A is the EMULATED SB the guest looks for.\n"
                "\nBLASTER env may change defaults;" HELPNOTE );
@@ -514,7 +514,7 @@ int main(int argc, char* argv[])
                "                            and match its /IO= (default 530)\n"
                "  /CARD:MC8K   [/BASE240]   TDK MC-8000/DMC-9000; run MC8KGO first\n"
                "                            (probes 240h then 260h when /BASE is absent)\n"
-               "  /CARD:IBMAUD [/BASE250]   IBM PCMCIA Audio Adapter; run IBMAUDGO /I=0\n"
+               "  /CARD:IBMAUD [/BASE250]   IBM PCMCIA Audio Adapter; run IBMAUDGO\n"
                "                            first and match its /IO1= (default 250)\n"
                "  /CARD:TP755  [/BASE4E30]  ThinkPad 755C planar codec; no enabler\n"
 #ifndef NOSBLIVE

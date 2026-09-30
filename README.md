@@ -11,7 +11,8 @@ real OPL directly at 0x388, untrapped. Validated from a Pentium MMX down to a
 386-bus 486SLC/25 (HP OmniBook 425) — see COMPATIBILITY.md for the measured
 floor and slow-CPU tuning.
 
-VSBPCM.EXE contains the ES1688, CS4231/CS4231A and CS4248 backends; `/CARD:`
+VSBPCM.EXE contains the ES1688, CS4231/CS4231A, CS4248 and IBM Audio Adapter
+backends; `/CARD:`
 picks one at load time. Nothing is probed — you already have to run that card's 
 enabler first, so the launcher always knew which card it was talking to.
 
@@ -26,6 +27,8 @@ Supported sound cards:
    https://github.com/zikolas/vew21xgo) — `/CARD:VEW211` for both. 
    - Roland SCP-55 (bring the card up with SCP55GO first,
    https://github.com/zikolas/scp55-enabler) — `/CARD:SCP55`
+ * IBM PCMCIA Audio Adapter (P/N 0933967, CIS "IBM NON-DSP AUDIO"): bring the
+   card up with IBMAUDGO first (enabler not yet published) — `/CARD:IBMAUD`
  * BONUS: ThinkPad 755C Crystal CS4248: The planar codec is the sound card
    and the driver wakes it up — `/CARD:TP755`
  
@@ -44,8 +47,8 @@ guessing. Two addresses are easy to confuse, so the help says it too:
  * `/A` is the **emulated** SB base — the address the guest looks for.
  * `/BASE` is the **real** card's base — match it to the enabler's setting.
 
-`/BASE` defaults per card to that card's own enabler default (220 / 330 / 530
-/ 4E30), so it can be omitted when you left the enabler at its default.
+`/BASE` defaults per card to that card's own enabler default (220 / 250 / 330
+/ 530 / 4E30), so it can be omitted when you left the enabler at its default.
 
 **Emulated SB at 220, real chip elsewhere.** Games that scan for a Sound
 Blaster probe 0x220 first and must find the emulation there; if they find the
@@ -93,6 +96,14 @@ Roland SCP-55 PCMCIA card:
     HDPMI32I -r -x -v
     VSBPCM /CARD:SCP55 /BASE330 /CVOL0 /A220
 
+IBM PCMCIA Audio Adapter:
+
+    IBMAUDGO /W=DC00
+    SET BLASTER=A220 I7 D1 T4
+    JLOAD QPIEMU.DLL
+    HDPMI32I -r -x -v
+    VSBPCM /CARD:IBMAUD /A220
+
 ThinkPad 755C planar codec (no enabler):
 
     SET BLASTER=A220 I7 D1 T4
@@ -110,10 +121,12 @@ See deploy/ for working batches.
 
 `/CARD:name` selects the backend and is required. The rest are optional:
 
- * `/BASE`    real card's IO base, hex (def per card: 220 / 330 / 530 / 4E30)
+ * `/BASE`    real card's IO base, hex (def per card: 220 / 250 / 330 / 530 /
+   4E30)
  * `/DACRATE` codec rate in Hz (def per card). On the ES1688 passthrough this
    only sets the idle/bring-up rate — the guest's own format wins on the first
-   feed. On the VEW211, SCP55 and TP755 it is the codec's actual rate.
+   feed. On the VEW211, SCP55, TP755 and IBMAUD it is the codec's actual
+   rate.
  * `/MAXHZ`   codec rate ceiling in Hz (VEW211/SCP55; def 22050). The CPU knob
    for a slow host: the 16-frame FIFO makes the pump interrupt count scale with
    the codec rate, and the frame stepper folds a faster guest down onto the
@@ -132,7 +145,8 @@ latency target, ms), `SBENORS` (VEW211/SCP55: disable the frame stepper),
 `SBEMAXHZ` (SCP55: cap the codec rate; `/MAXHZ` is the switch form for both
 CS4231A cards), `SBENOSTUB` (leave the V86 stub's two SB fast paths — the FM
 alias forward and the DSP write-status answer — disarmed, for an A/B), `ESNOI8`
-(disable the IRQ0 watchdog heartbeat), `ESIRQ5`, `IRQTONE`, `FIFOTEST`.
+(disable the IRQ0 watchdog heartbeat), `ESIRQ5`, `IRQTONE`, `FIFOTEST`, and
+`SBEIBMST` / `SBEIBM16` (IBMAUD output format, see its section below).
 
 
 ### FM and the detection shim
@@ -159,8 +173,8 @@ The engine is VSBHDA 2.0 (upstream merged 2026-09-05: in-place ADPCM decoder,
 central ring write pointer, `/B` `/BP` buffer options, `src/hw` layout).
 
  * plain — **VSBPCM.EXE**, the unified NOFM binary (ES1688 + VEW211 + SCP55
-   + TP755)
- * `CARD=TP755` — **VSBPCMT.EXE**: the same four backends PLUS the DOSBox
+   + TP755 + IBMAUD)
+ * `CARD=TP755` — **VSBPCMT.EXE**: the same backends PLUS the DOSBox
    OPL3 emulation, i.e. real FM MUSIC on the FM-less 755C instead of the
    detection-only shim. A feature flag, not a card selector.
  * `CARD=AUDIGY` — **VSBPCMA.EXE**, see below.
@@ -254,6 +268,40 @@ pump directly. Lower is safer, at the cost of bandwidth.
 
 Why the card needs its own backend, and why it cannot pace audio from a card
 interrupt, is written up in the enabler repository.
+
+## The IBM PCMCIA Audio Adapter
+
+`/CARD:IBMAUD`, after bringing the card up with IBMAUDGO. The card needs no
+IRQ. `/BASE` is 250, IBMAUDGO's default, so you can leave it off.
+
+This card is a WAV player. It has no Sound Blaster logic, no DMA and no FM
+chip: an IBM ASIC in front of a serial codec keeps a 16K-word sample ring on
+the card, the host appends samples to it, and the card reports how far it has
+played. The backend tops the ring up from the RTC pump and paces on that
+position, so the card needs no interrupt. The ring must never run dry while
+playing (the codec link dies until the card is set up again), so the pump
+pads silence when the guest falls behind, and closes the card after a second
+with nothing to play.
+
+The codec runs one fixed format and the guest's audio is converted to it:
+8-bit stereo at 11025 Hz by default, one card word per frame, which is 11025
+port writes a second.
+ * `/DACRATE` picks another rate from the codec's table (22050 for 22 kHz
+   titles, at twice the writes).
+ * `SBEIBMST=0` selects mono, two samples per word, for the slowest hosts.
+   Open issue: in Epic Pinball the mono downmix was heard as one of the two
+   channels.
+ * `SBEIBM16=1` selects 16-bit output, for faster hosts.
+
+FM music is silent. The detection shim answers 388h, so games still find an
+AdLib and go on to use the digital. Software OPL on this card would take the
+VSBPCMT.EXE build with `/RESAMP`, since the passthrough path never runs the
+FM mixer. That build needs an FPU for its table setup and has not played
+with this card yet.
+
+Verified on an IBM PC110 (486SX/33) at T4: DOOM (mono) and Epic Pinball
+(stereo). The playback interface was recovered by I/O trace of IBM's own DOS
+WAV player.
 
 ## The TP755 planar backend
 

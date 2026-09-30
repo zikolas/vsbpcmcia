@@ -1,7 +1,7 @@
 /* sc_ibmaud.c -- IBM PCMCIA Audio Adapter backend for VSBPCMCIA.
  *
  * The card: IBM "PCMCIA Audio Adapter", CIS "IBM | NON-DSP AUDIO | 0933967",
- * MANFID 00A4/0022. No DMA, no FM. Bring-up: run IBMAUDGO first (/I=0 -- this
+ * MANFID 00A4/0022. No DMA, no FM. Bring-up: run IBMAUDGO first (no IRQ: this
  * backend needs no card interrupt). This backend drives the card, it does not
  * enable it.
  *
