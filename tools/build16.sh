@@ -11,6 +11,9 @@
 #   ./tools/build16.sh              -> ow16/vsbpcm16.exe   (ONE module)
 #   DIAG=1 ./tools/build16.sh       -> the same + STKDIAG: survivable
 #                                      stack-check trip, PMISR depth probes
+#   RELEASE=1 ./tools/build16.sh    -> the shipping configuration, as in
+#                                      build.sh: per-tick telemetry and
+#                                      PTDIAG off
 #
 # ABOUT THE TARGET. Despite the name, the generated code is 32-bit (.386,
 # USE32 segments -- see src/startup/cstrt16x.asm, "DOS 32-bit startup code for
@@ -61,7 +64,7 @@ done
 [ -f "$JWASM_BIN" ] || { echo "build16.sh: missing $JWASM_BIN -- set JWASM_BIN" >&2; exit 1; }
 
 docker run --rm --platform linux/amd64 \
-  -e DIAG="$DIAG" \
+  -e DIAG="$DIAG" -e RELEASE="$RELEASE" \
   -v "$REPO":/build -v "$OW_DIR":/ow -v "$JWASM_BIN":/usr/local/bin/jwasm \
   -w /build debian:stable-slim bash -c '
 set -e
@@ -96,6 +99,10 @@ COPT="-q -oxa -ms -ecc -5s -fp5 -fpi87 -wcd=111 -za99"
 CPPOPT="-q -oxa -ms -bc -5s -fp5 -fpi87"   # no -za99: that is a C-only switch, wpp386 reads the 99 as a filename
 CEXTRA="-DNOTFLAT -DONEMODULE ${DIAG:+-DSTKDIAG}"   # ONEMODULE: no sndcard.drv boundary, so the
                                 # AU_* entry points are NEAR (see au_cards.h)
+if [ -n "$RELEASE" ] && [ "$RELEASE" != "0" ]; then
+  CEXTRA="$CEXTRA -DSNDISR_TELEMETRY=0 -DPTDIAG=0"
+  echo "build16.sh: RELEASE=1 -- per-tick telemetry and PTDIAG off" >&2
+fi
 INC="-I/ow/h"
 AFLAGS="-q -DNOTFLAT -DONEMODULE ${DIAG:+-DSTKDIAG} -Isrc/startup -D?MODEL=small"
 
