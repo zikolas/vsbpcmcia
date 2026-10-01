@@ -697,7 +697,7 @@ static int VEW211_adetect(struct audioout_info_s *aui)
  // nothing decoding the port. This is now a VALIDATOR, not a detector --
  // the user named this card, so an absent codec is a mistake worth stating.
  if((unsigned char)inportb(vew_codec + VC_IAR) == 0xFF){
-  printf("CS4231A: nothing at %4.4Xh -- run VEW21XGO first, and check /BASE\n", vew_codec);
+  printf("CS4231A: nothing at %04Xh -- run VEW21XGO first, and check /BASE\n", vew_codec);
   return 0;
  }
  vew_ci_wait(vew_codec);

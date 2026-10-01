@@ -611,7 +611,7 @@ static int ES1688_adetect(struct audioout_info_s *aui)
  // Named, not probed: say why rather than declining into a bare
  // "no soundcard found".
  if(!es_dsp_reset(base)){
-  printf("ES1688: no DSP at %4.4Xh -- run ES1688GO first, and check /BASE\n", base);
+  printf("ES1688: no DSP at %04Xh -- run ES1688GO first, and check /BASE\n", base);
   return 0;
  }
  card = (es1688_card_s *)aui->card_private_data;   // v2.0: engine-allocated (private_data_size)

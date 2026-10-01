@@ -758,7 +758,7 @@ static int IBMAUD_adetect(struct audioout_info_s *aui)
  // FFFFh, and the status word has nothing above bit 8.
  st = ib_inw(IB_CMD);
  if(st == 0xFFFFu || (st & 0xFE00u)){
-  printf("IBMAUD: no card at %3.3Xh/%3.3Xh -- run IBMAUDGO first, and check /BASE\n",
+  printf("IBMAUD: no card at %03Xh/%03Xh -- run IBMAUDGO first, and check /BASE\n",
          (unsigned)ib_b0, (unsigned)ib_b1);
   return 0;
  }
@@ -772,8 +772,8 @@ static int IBMAUD_adetect(struct audioout_info_s *aui)
  { unsigned long wps = ib_frate * ib_bpf / 2UL;           // card words per second
    unsigned ms = (unsigned)(ib_resamp ? (unsigned long)ib_virt_frames * 1000UL / ib_frate
                                       : (unsigned long)ib_qtarget * 1000UL / wps);
-   printf("IBMAUD %3.3Xh/%3.3Xh: %lu Hz %s %s, queue %u ms, pump %u Hz%s\n",
-          (unsigned)ib_b0, (unsigned)ib_b1, ib_frate, ib_o16 ? "16-bit" : "8-bit",
+   printf("IBMAUD %03Xh/%03Xh: %u Hz %s %s, queue %u ms, pump %u Hz%s\n",
+          (unsigned)ib_b0, (unsigned)ib_b1, (unsigned)ib_frate, ib_o16 ? "16-bit" : "8-bit",
           ib_ost ? "stereo" : "mono", ms,
           (unsigned)(32768UL >> ((ib_rtc_fixed ? ib_rtc_rs : ib_rs_run) - 1)),
           ib_resamp ? ", RESAMP" : ""); }

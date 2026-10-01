@@ -534,7 +534,7 @@ static int TP755_adetect(struct audioout_info_s *aui)
  // AH=C0h belongs on top of this, but its values have to be measured on the
  // bench first -- no machine identification exists in this tree yet.)
  if((unsigned char)inportb(tp_cb + TC_IAR) == 0xFF){
-  printf("CS4248: nothing at %4.4Xh -- is this really a 755C? (check /BASE)\n", tp_cb);
+  printf("CS4248: nothing at %04Xh -- is this really a 755C? (check /BASE)\n", tp_cb);
   return 0;
  }
 
@@ -587,7 +587,7 @@ static int TP755_adetect(struct audioout_info_s *aui)
  tp_i8_install();                             // the clock guardian
  PTOPS_Register(&tp755_pt_ops);               // dbg instrument + reset hook; no tap
 
- printf("CS4248 found @ %4.4Xh (I12=%02Xh, TP ctl was %02Xh)\n",
+ printf("CS4248 found @ %04Xh (I12=%02Xh, TP ctl was %02Xh)\n",
         tp_cb, id, tp_ctl_was_on);
  return 1;
 
@@ -613,7 +613,7 @@ static void TP755_setrate(struct audioout_info_s *aui)
  aui->bits_card = 16;                         // codec native == engine native
  MDma_initbuf(aui, TP_RING_BYTES);            // v2.0: sets card_dmasize only
 
- printf("CS4248 (TP755 planar WSS) 8237-ch0 autoinit ring @ %4.4Xh, %u Hz, "
+ printf("CS4248 (TP755 planar WSS) 8237-ch0 autoinit ring @ %04Xh, %u Hz, "
         "%u-byte periods on IRQ10\n", tp_cb, got, tp_period);
 }
 

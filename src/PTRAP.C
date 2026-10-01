@@ -805,8 +805,8 @@ bool PTRAP_Prepare_RM_PortTrap()
         uint32_t isrbytes = (uint32_t)((uint8_t *)copyrmcode( dosheap, 1 )
                                        - (uint8_t *)dosheap);
         if ( stubbytes + isrbytes > PSP_STUB_ROOM ) {
-            printf("Error: v86 stubs (%lu + %lu bytes) do not fit the PSP\n",
-                   (unsigned long)stubbytes, (unsigned long)isrbytes );
+            printf("Error: v86 stubs (%u + %u bytes) do not fit the PSP\n",
+                   (unsigned)stubbytes, (unsigned)isrbytes );
             return false;
         }
     }

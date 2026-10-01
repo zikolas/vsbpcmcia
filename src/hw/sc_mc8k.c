@@ -1104,7 +1104,7 @@ static int MC8K_adetect(struct audioout_info_s *aui)
  if(FOpts.base) base = (uint16_t)FOpts.base;
  if(base){
   if(!m8_emu_here(base)){
-   printf("EMU8200: nothing at %4.4Xh -- run MC8KGO first, and check /BASE\n", (unsigned)base);
+   printf("EMU8200: nothing at %04Xh -- run MC8KGO first, and check /BASE\n", (unsigned)base);
    return 0;
   }
  }else if(m8_emu_here(0x240)) base = 0x240;           // MC-8000
@@ -1142,11 +1142,11 @@ static int MC8K_adetect(struct audioout_info_s *aui)
  card->base = base;
  aui->card_irq = 8;                                   // RTC drives the pump
  PTOPS_Register(&mc8k_pt_ops);
- printf("EMU8200: window %3.3Xh, DRAM ring %u frames at %6.6lXh, voice %d, write ch %d\n",
-        (unsigned)base, (unsigned)M8_RING_W, (unsigned long)M8_DRAM_BASE, M8_VCH, M8_WCH);
+ printf("EMU8200: window %03Xh, DRAM ring %u frames at %06Xh, voice %d, write ch %d\n",
+        (unsigned)base, (unsigned)M8_RING_W, (unsigned)M8_DRAM_BASE, M8_VCH, M8_WCH);
  // Bench breadcrumb: the vendor-init readback is 0038/0053/0007-family
  // (low bits never match verbatim -- known red herring, do not chase).
- printf("EMU8200: HWCF %4.4X/%4.4X/%4.4X\n",
+ printf("EMU8200: HWCF %04X/%04X/%04X\n",
         m8_rd(M8_D1, M8_CMD(1,29)), m8_rd(M8_D1, M8_CMD(1,30)), m8_rd(M8_D1, M8_CMD(1,31)));
  return 1;
 }

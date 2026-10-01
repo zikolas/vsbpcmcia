@@ -792,7 +792,7 @@ static int SCP55_adetect(struct audioout_info_s *aui)
  // nothing decoding the port. This is now a VALIDATOR, not a detector --
  // the user named this card, so an absent codec is a mistake worth stating.
  if((unsigned char)inportb(scp_codec + VC_IAR) == 0xFF){
-  printf("CS4231A: nothing at %4.4Xh -- run SCP55GO (or SCPENA) first, and check /BASE\n",
+  printf("CS4231A: nothing at %04Xh -- run SCP55GO (or SCPENA) first, and check /BASE\n",
          (unsigned)(scp_codec + VC_IAR));
   return 0;
  }
