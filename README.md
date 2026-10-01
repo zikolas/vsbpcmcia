@@ -148,6 +148,8 @@ See deploy/ for working batches.
 
  * `/FMVOL`   volume trim on a REAL OPL3, 0-63 TL steps
  * `/FMSHIM`  pretend the card has no FM chip (bench diagnostic; see below)
+ * `/LPT`     FM from an OPL3LPT on the parallel port: `/LPT` (378),
+   `/LPT278` or `/LPT3BC` (see below)
  * `/A /I /D /T /H` the emulated SB's geometry (base, IRQ, DMA, type, high DMA)
 
 Configuration by environment variable was removed in v1.0: values persisted
@@ -157,8 +159,10 @@ redirected the next. Only transient bench knobs remain in the environment —
 latency target, ms), `SBENORS` (VEW211/SCP55: disable the frame stepper),
 `SBEMAXHZ` (SCP55: cap the codec rate, `/MAXHZ` being the switch form for both
 CS4231A cards; MC8K: cap the guest rate, above which the feed decimates),
-`SBENOSTUB` (leave the V86 stub's two SB fast paths — the FM
-alias forward and the DSP write-status answer — disarmed, for an A/B), `ESNOI8`
+`SBENOSTUB` (leave the V86 stub's fast paths — the FM alias forward, the DSP
+write-status answer and the `/LPT` forward — disarmed, for an A/B),
+`SBELPTDLY` and `SBELPTCLI` (`/LPT` timing: control-port reads after each
+strobe, default 6; `SBELPTCLI=0` leaves interrupts on in the stub), `ESNOI8`
 (disable the IRQ0 watchdog heartbeat), `ESIRQ5`, `IRQTONE`, `FIFOTEST`, and
 `SBEIBMST` / `SBEIBM16` (IBMAUD output format, see its section below).
 
@@ -178,6 +182,23 @@ pass detection, with no synthesis behind it. FM music is silent on such a
 card unless the software OPL is compiled in (see the TP755 build below). The
 SCP-55 has a better option than either — see its section below.
 `/FMSHIM` forces that path on a card that does have a chip, to exercise it.
+
+`/LPT` takes the same path and also sends every FM register write, from the
+0x388-0x38B ports and the SB-base aliases alike, to an OPL3LPT (a YMF262 on
+the printer port). The OPL3LPT is write-only, so detection is answered by the
+shim, and the card's own FM chip, if it has one, goes unused. The chip is
+silenced at load and at unload. It works in both trap worlds on any `/CARD`.
+
+Each FM access is a port trap, and era drivers pad every register write with
+40 or so status reads. For real-mode games VSBPCM.EXE installs a V86 stub
+that answers those reads and drives the LPT itself, with no switch to
+protected mode (it lives in a small DOS block of its own; `SBENOSTUB=1`
+disarms it). Protected-mode games still pay a full trap per access. Before
+the stub, Monkey Island played cleanly on a DX4 and slowed on a 486SLC; on a
+DX4/75 DOOM itself ran normally but its music (protected mode, DMX) lost
+tempo after the opening. FastDoom has its own OPL3LPT driver, which needs no
+trapping. `/LPT` is not available in VSBPCMT (its V86 stub keeps 388h writes
+for dbopl), has no V86 stub in VSBPCM16, and does not combine with `/FMVOL`.
 
 ## Builds
 

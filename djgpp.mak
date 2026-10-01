@@ -151,7 +151,8 @@ $(OUTD)/$(NAME).ar:: $(OBJFILES)
 $(OUTD)/rmwrap.o:: rmwrap.asm rmcode1.asm rmcode2.asm
 	jwasm.exe -q -bin $(CFLAGS) -Fl$(OUTD)/ -Fo$(OUTD)/rmcode1.bin src/rmcode1.asm
 	jwasm.exe -q -bin $(CFLAGS) -Fl$(OUTD)/ -Fo$(OUTD)/rmcode2.bin src/rmcode2.asm
-	jwasm.exe -q -djgpp -D?MODEL=small -DOUTD=$(OUTD) -Fo$@ src/rmwrap.asm
+	jwasm.exe -q -bin -DLPTSTUB -Fl$(OUTD)/rmcode3.lst -Fo$(OUTD)/rmcode3.bin src/rmcode1.asm
+	jwasm.exe -q -djgpp -D?MODEL=small -DOUTD=$(OUTD) -DLPTBLOB -Fo$@ src/rmwrap.asm
 
 $(OUTD)/ac97mix.o::  ac97mix.c au_cards.h ac97mix.h
 $(OUTD)/au_cards.o:: au_cards.c au_cards.h dmabuff.h config.h

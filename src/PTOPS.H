@@ -89,6 +89,9 @@ struct fork_opts_s {
                          * pump interrupt count, which scales with the codec
                          * rate, and the frame stepper folds the guest down
                          * onto the capped rate. Range-checked in main.c. */
+    int lpt;            /* /LPT: OPL3LPT on this parallel port (hex); 0 = off.
+                         * Takes 388h for the timer shim, which forwards every
+                         * write to the LPT chip. main.c allows 378/278/3BC. */
 };
 
 extern struct fork_opts_s FOpts;

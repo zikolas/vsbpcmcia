@@ -24,6 +24,7 @@
 #include "VIRQ.H"
 #include "VOPL3.H"
 #include "FMVOL.H"
+#include "FMSHIM.H"
 #include "VSB.H"
 #include "SNDISR.H"
 #include "VMPU.H"
@@ -108,7 +109,7 @@ static struct MAIN_s gm = { NULL, false, false, false, false };
 
 /* Fork-side options (ptops.h). cvol -1 means "card default", which a
  * deliberate /CVOL0 (full scale) must not be confused with. */
-struct fork_opts_s FOpts = { NULL, 0, 0, -1, 0, 0, 0 };
+struct fork_opts_s FOpts = { NULL, 0, 0, -1, 0, 0, 0, 0 };
 
 
 struct globalvars gvars = { BASE_DEFAULT, IRQ_DEFAULT, DMA_DEFAULT, /* /A /I /D */
@@ -149,6 +150,7 @@ static const struct {
     "FMSHIM", "pretend card has no FM", &FOpts.fmshim,
     "RESAMP", "resample, no PT (VEW211)", &FOpts.resamp,
     "FMVOL", "real-OPL3 volume [0-63]", &gvars.fmvol,
+    "LPT", "OPL3LPT on LPT, hex [378]", &FOpts.lpt,
     "?", "this help", &gm.bHelp,
     "A", "EMULATED SB base [220|240]", &gvars.base,
     "I", "IRQ [2|5|7, def 7]", &gvars.irq,
@@ -306,6 +308,7 @@ static void ReleaseRes( void )
 	if( gvars.pm ) {
 		PTRAP_Uninstall_PM_PortTraps();
 	}
+	FMSHIM_LptSilence(); /* no-op unless /LPT armed it */
 #ifdef _DEBUG
 	if ( gvars.logfile ) LogfileExit();
 #endif
@@ -365,9 +368,10 @@ void MAIN_ReinitOPL( void )
                      || ((c) >= 'a' && (c) <= 'f') )
 #if VMPU
 #define IsHexOption(x) (GOptions[x].pValue == &gvars.base || GOptions[x].pValue == &gvars.mpu \
-                        || GOptions[x].pValue == &FOpts.base )
+                        || GOptions[x].pValue == &FOpts.base || GOptions[x].pValue == &FOpts.lpt )
 #else
-#define IsHexOption(x) (GOptions[x].pValue == &gvars.base || GOptions[x].pValue == &FOpts.base )
+#define IsHexOption(x) (GOptions[x].pValue == &gvars.base || GOptions[x].pValue == &FOpts.base \
+                        || GOptions[x].pValue == &FOpts.lpt )
 #endif
 
 int main(int argc, char* argv[])
@@ -549,6 +553,27 @@ int main(int argc, char* argv[])
         printf("Error: /MAXHZ takes 4000-48000 (codec rate ceiling, Hz)\n" );
         return(1);
     }
+    /* A bare /LPT arrives as 1 (the parser's boolean form). Only the three
+     * standard LPT bases are accepted: the shim writes base..base+2 on every
+     * FM access, and a typo must never land that on the COM1 link at 3F8. */
+    if( FOpts.lpt == 1 )
+        FOpts.lpt = 0x378;
+    if( FOpts.lpt && FOpts.lpt != 0x378 && FOpts.lpt != 0x278 && FOpts.lpt != 0x3BC ) {
+        printf("Error: /LPT takes 378, 278 or 3BC (the OPL3LPT's parallel port)\n" );
+        return(1);
+    }
+    if( FOpts.lpt && gvars.fmvol >= 0 ) {
+        printf("Error: /FMVOL trims a card's own OPL3 and cannot drive /LPT\n" );
+        return(1);
+    }
+#ifdef CARD_TP755
+    /* this build's real-mode stub keeps most 388h writes for dbopl's ring,
+     * so they would never reach the shim or the LPT */
+    if( FOpts.lpt ) {
+        printf("Error: /LPT is not supported by VSBPCMT; use VSBPCM /LPT\n" );
+        return(1);
+    }
+#endif
 
 
     if( gvars.base != 0x220 && gvars.base != 0x240 ) {
@@ -696,6 +721,8 @@ int main(int argc, char* argv[])
 #ifdef NOFM
     gvars.opl3 = 0;
 #endif
+    if ( FOpts.lpt )
+        gvars.opl3 = 0;                 /* the LPT chip owns 388h: no OPL emulation */
     if ( gvars.fmvol >= 0 ) {
         if ( gvars.fmvol > 63 ) gvars.fmvol = 63;
         gvars.opl3 = 0;                 /* FMVOL owns 388h: no OPL emulation */

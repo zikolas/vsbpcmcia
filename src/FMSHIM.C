@@ -24,6 +24,16 @@
  * compiled in -- CARD_TP755/CARD_AUDIGY builds, where gvars.opl3 is set --
  * VOPL3 owns these ports instead and this shim is never installed.)
  *
+ * /LPT: AN OPL3 ON THE PARALLEL PORT
+ * An OPL3LPT is a real YMF262 behind the printer port. It is write-only --
+ * the status register never reaches the port -- so a stock game cannot
+ * detect it, which is the half this shim already provides. With /LPT every
+ * index and data write is also sent out the parallel port as it arrives, so
+ * the guest drives the chip exactly as it would at 0x388. Status reads still
+ * come from the timer model below. For real-mode guests the 32-bit build
+ * installs a stub variant that does the same from V86 without an RMCB
+ * (rmcode1.asm, LPTSTUB) and sends only timer writes here.
+ *
  * The timer model is lifted from vopl3.cpp's VOPL3_PrimaryRead /
  * VOPL3_PrimaryWriteData (timers read back as expired the moment they are
  * started unmasked) so that a probe sees byte-for-byte what today's TP755
@@ -32,6 +42,8 @@
 
 #include <stdint.h>
 #include <stdbool.h>   /* ptrap.h uses bool */
+#include <dos.h>       /* includes pc.h; for outp() */
+#include <conio.h>     /* contains outp()/inp() in OW */
 
 #include "CONFIG.H"
 #include "PLATFORM.H"
@@ -48,12 +60,94 @@
 
 static uint8_t fms_index[2];   /* index latch: [0] = 388/389, [1] = 38A/38B */
 static uint8_t fms_timer[2];   /* last timer-control write, per timer */
+static uint16_t fms_lpt;       /* /LPT: OPL3LPT data port; 0 = no chip */
+static int fms_lpt_dly = 6;    /* control-port reads after each strobe */
+
+/* The /LPT v86 stub (rmcode1.asm, LPTSTUB) sends most index and data writes
+ * to the LPT itself, so its index shadow -- not fms_index -- knows which
+ * register a data write reaches, and it answers status reads from a cache
+ * this file keeps current. Both cells live in the stub; NULL without it. */
+static uint8_t *fms_stub_index;
+static uint8_t *fms_stub_status;
+
+/* OPL3LPT wire protocol: the byte goes out on the data lines, then the
+ * control port pulses it into the chip -- 13/9/13 latches an index for the
+ * first register array, 5/1/5 for the second, 12/8/12 latches a value. The
+ * OPL3 needs 3.3 us after either write; six control-port reads cover it on
+ * ISA (SBELPTDLY changes the count). Sequence and timing as in FastDoom's
+ * OPL3LPT support (ns_sbmus.c).
+ * The LPT ports are never trapped, so plain outp()/inp() is safe here. */
+static void LptPulse( uint8_t on, uint8_t off )
+{
+    uint16_t ctrl = fms_lpt + 2;
+    int i;
+    outp( ctrl, on );
+    outp( ctrl, off );
+    outp( ctrl, on );
+    for ( i = 0; i < fms_lpt_dly; i++ )
+        inp( ctrl );
+}
+
+static void LptIndex( int bank, uint8_t idx )
+{
+    outp( fms_lpt, idx );
+    if ( bank )
+        LptPulse( 5, 1 );
+    else
+        LptPulse( 13, 9 );
+}
+
+static void LptData( uint8_t val )
+{
+    outp( fms_lpt, val );
+    LptPulse( 12, 8 );
+}
+
+static void LptReg( int bank, uint8_t idx, uint8_t val )
+{
+    LptIndex( bank, idx );
+    LptData( val );
+}
+
+/* Key every voice off with full attenuation and the fastest release, in both
+ * arrays, then drop back to OPL2 mode as at power-up. Zeroing the registers
+ * instead would leave release rate 0 on any note still decaying, and that
+ * note would then hang at its current level. */
+void FMSHIM_LptSilence( void )
+//////////////////////////////
+{
+    int b, r;
+    if ( !fms_lpt )
+        return;
+    LptReg( 1, 0x05, 0x01 );           /* NEW: open the second array */
+    for ( b = 0; b < 2; b++ ) {
+        for ( r = 0x40; r <= 0x55; r++ )
+            LptReg( b, r, 0x3F );      /* total level: full attenuation */
+        for ( r = 0x80; r <= 0x95; r++ )
+            LptReg( b, r, 0x0F );      /* release rate 15 */
+        for ( r = 0xB0; r <= 0xB8; r++ )
+            LptReg( b, r, 0x00 );      /* key off */
+    }
+    LptReg( 0, 0xBD, 0x00 );           /* rhythm mode off, drums keyed off */
+    LptReg( 1, 0x04, 0x00 );           /* no 4-op pairs */
+    LptReg( 1, 0x05, 0x00 );           /* OPL2 mode */
+}
+
+void FMSHIM_SetLpt( uint16_t base, int delay )
+//////////////////////////////////////////////
+{
+    fms_lpt = base;
+    fms_lpt_dly = delay;
+    FMSHIM_LptSilence();
+}
 
 void FMSHIM_Reset( void )
 /////////////////////////
 {
     fms_index[0] = fms_index[1] = 0;
     fms_timer[0] = fms_timer[1] = 0;
+    if ( fms_stub_status )
+        *fms_stub_status = 0;
 }
 
 /* The OPL3 status register is shared by both port pairs, so a read of 0x38A
@@ -71,6 +165,17 @@ static uint8_t FMSHIM_Status( void )
     return val;
 }
 
+void FMSHIM_SetStubCells( uint8_t *index, uint8_t *status )
+///////////////////////////////////////////////////////////
+{
+    fms_stub_index  = index;
+    fms_stub_status = status;
+    if ( index )
+        *index = fms_index[0];
+    if ( status )
+        *status = FMSHIM_Status();
+}
+
 uint8_t FMSHIM_Acc( uint16_t port, uint8_t val, uint16_t flags )
 ////////////////////////////////////////////////////////////////
 {
@@ -80,7 +185,8 @@ uint8_t FMSHIM_Acc( uint16_t port, uint8_t val, uint16_t flags )
         return FMSHIM_Status();
 
     if ( port & 1 ) {                  /* data port */
-        if ( bank == 0 && fms_index[0] == FMS_TIMER_REG_INDEX ) {
+        uint8_t idx = fms_stub_index ? *fms_stub_index : fms_index[0];
+        if ( bank == 0 && idx == FMS_TIMER_REG_INDEX ) {
             /* Both halves are latched from the same byte, exactly as
              * VOPL3_PrimaryWriteData does -- starting one timer must not
              * discard the other's control state. */
@@ -88,10 +194,18 @@ uint8_t FMSHIM_Acc( uint16_t port, uint8_t val, uint16_t flags )
                 fms_timer[0] = val;
             if ( val & ( FMS_TIMER2_START | FMS_TIMER2_MASK ) )
                 fms_timer[1] = val;
+            if ( fms_stub_status )
+                *fms_stub_status = FMSHIM_Status();
         }
-        /* any other register: accepted and dropped (no synthesis) */
+        /* without /LPT any other register is accepted and dropped */
+        if ( fms_lpt )
+            LptData( val );
     } else {                           /* index port */
         fms_index[bank] = val;
+        if ( fms_stub_index )
+            *fms_stub_index = val;
+        if ( fms_lpt )
+            LptIndex( bank, val );
     }
     return val;
 }

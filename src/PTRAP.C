@@ -70,6 +70,7 @@ static int PICIndex;
 #endif
 #if HANDLE_IN_388H_DIRECTLY || !RMPICTRAPDYN
 extern void * copyrmcode( void *, int );
+extern uint32_t rmcodesize( int );
 void * dosheap;
 #endif
 
@@ -185,6 +186,21 @@ static uint32_t RMStubLinear;
 #define OPLRING_OFF     512
 /* the whole home: stub + ring + 32 spare = sc_tp755's TP_RMHOME_PARA */
 #define PTRAP_RMHOME_PARA ((OPLRING_OFF + OPLRING_ENTRIES * 2 + 32) / 16)
+#else
+/* /LPT: the stub variant that drives the OPL3LPT from V86 (rmcode1.asm
+ * assembled with LPTSTUB, blob RMCODE_LPT) does not fit the PSP either, so
+ * it gets a DOS block of its own and RMStubLinear points there; RMLptStub
+ * says that variant is the one installed. Without /LPT both stay 0 and the
+ * ordinary stub sits at PSP:60h as before. DJGPP build only. */
+static uint32_t RMStubLinear;
+static int RMLptStub;
+#define RMCODE_LPT 2
+/* LPTSTUB's variables, appended to struct rmcode1 ahead of the code */
+struct rmlpt {
+    uint16_t wLpt;      /* OPL3LPT data port; 0 = not armed */
+    uint8_t  bDly;      /* control-port reads after each strobe */
+    uint8_t  bCli;      /* 1 = interrupts off around each LPT write */
+};
 #endif
 /* PSP:60h up to the end of the PSP, which is all that stays in conventional
  * memory once VSBPCM is resident (INT 21h/31h with DX=10h). The rmcode1 stub
@@ -505,12 +521,8 @@ static struct rmcode1 *RMVars( void )
 {
     if ( !RMStubReady )
         return NULL;
-#if HANDLE_IN_388H_DIRECTLY
     return RMStubLinear ? (struct rmcode1 *)NearPtr(RMStubLinear)
                         : (struct rmcode1 *)NearPtr(_my_psp() + DOSMEMSTART);
-#else
-    return (struct rmcode1 *)NearPtr(_my_psp() + DOSMEMSTART);
-#endif
 }
 
 uint8_t *PTRAP_DspStatusCell( void )
@@ -707,8 +719,37 @@ bool PTRAP_Prepare_RM_PortTrap()
     }
 #else
     dosmem = NearPtr(_my_psp() + DOSMEMSTART);
-    dosheap = copyrmcode( (void *)dosmem, 0 );
-    stubbytes = (uint32_t)((uint8_t *)dosheap - (uint8_t *)dosmem);
+# ifdef DJGPP
+    /* /LPT: install the LPTSTUB variant in a DOS block of its own (see
+     * RMLptStub). Running out of DOS memory is not fatal: the ordinary stub
+     * then serves /LPT through the RMCB, as before the fast path existed. */
+    if ( FOpts.lpt ) {
+        uint32_t eax = 0x0100, edx = 0;
+        uint8_t err;
+        __asm__ __volatile__("int $0x31; setc %0"
+                             : "=q"(err), "+a"(eax), "=d"(edx)
+                             : "b"(( rmcodesize( RMCODE_LPT ) + 15 ) / 16)
+                             : "cc", "memory");
+        if ( err )
+            printf("FM: no DOS memory for the /LPT v86 stub, FM takes the slow path\n");
+        else {
+            RMStubLinear = (eax & 0xFFFFUL) << 4;
+            RMLptStub = 1;
+            dosmem = NearPtr( RMStubLinear );
+        }
+    }
+    if ( RMLptStub ) {
+        dosheap = copyrmcode( (void *)dosmem, RMCODE_LPT );
+        stubbytes = (uint32_t)((uint8_t *)dosheap - (uint8_t *)dosmem);
+        ((struct rmlpt *)dosmem->codev86)->wLpt = 0;  /* armed by PTRAP_Prepare */
+        /* the SB-ISR stub stays inside the PSP (see the TP755 note above) */
+        dosheap = NearPtr(_my_psp() + DOSMEMSTART);
+    } else
+# endif
+    {
+        dosheap = copyrmcode( (void *)dosmem, 0 );
+        stubbytes = (uint32_t)((uint8_t *)dosheap - (uint8_t *)dosmem);
+    }
 #endif
     /* Nothing past the PSP survives going resident: stubs that do not fit
      * there must not install. rmcode2 is measured by copying it to dosheap,
@@ -736,12 +777,12 @@ bool PTRAP_Prepare_RM_PortTrap()
     /* set new trap handler ES:DI */
     //r.x.di = 4+2+2+4;
     QPI_regs.x.di = offsetof(struct rmcode1, codev86);
-#if HANDLE_IN_388H_DIRECTLY
+#if !HANDLE_IN_388H_DIRECTLY
+    if ( RMLptStub )
+        QPI_regs.x.di += sizeof(struct rmlpt);  /* LPTSTUB's code starts later */
+#endif
     QPI_regs.x.es = RMStubLinear ? (uint16_t)(RMStubLinear >> 4)
                                  : ((_my_psp() + DOSMEMSTART) >> 4);
-#else
-    QPI_regs.x.es = (_my_psp() + DOSMEMSTART) >> 4;
-#endif
 #else
     QPI_regs.x.di = rmcb.v86.offset;
     QPI_regs.x.es = rmcb.v86.segment;
@@ -827,12 +868,8 @@ void PTRAP_SetPICPortTrap( int bSet )
         /* patch the 16-bit real-mode code stored in the PSP;
          * see rmcode1.asm, wPICp.
          */
-#if HANDLE_IN_388H_DIRECTLY
         struct rmcode1 *dosmem = RMStubLinear ? NearPtr(RMStubLinear)
                                               : NearPtr(_my_psp() + DOSMEMSTART);
-#else
-        struct rmcode1 *dosmem = NearPtr(_my_psp() + DOSMEMSTART);
-#endif
         //WriteLinearW( dosmem, bSet ? 0xffff : 0x0020 );
         dosmem->wPort = (bSet ? 0xffff : 0x0020);
 #endif
@@ -1070,7 +1107,8 @@ static uint8_t FM_Alias( uint16_t port, uint8_t val, uint16_t flags )
      * DO NOT hoist this above the two early returns. FMVOL keeps
      * 0x388-0x38B TRAPPED on purpose and must forward through the host
      * (fmvol.c FV_OUTB); a direct outp there would re-enter its own trap.
-     * FMSHIM keeps them trapped too and does no hardware I/O at all. */
+     * FMSHIM keeps them trapped too and never touches 388h (with /LPT it
+     * writes only the untrapped LPT ports). */
     if ( flags & TRAPF_OUT ) {
         outp( fm, val );
         return val;
@@ -1138,12 +1176,15 @@ void PTRAP_Prepare( int opl, int sbaddr, int dma, int hdma, int sndirq )
          * (expect FM music to go silent while SB detection keeps working). */
         /* Ask the hardware rather than trusting the paperwork: a backend can
          * serve two boards with different silicon (CF-VEW211 vs J04). */
+        /* /LPT forces the same path: the OPL3LPT is write-only, so its
+         * status has to come from the shim, and the card's own chip (if
+         * any) is left untouched behind the trapped 388h. */
         FmShimOn = 1;
-        if ( FOpts.fmshim )
-            ;                                  /* forced: bench knob */
+        if ( FOpts.fmshim || FOpts.lpt )
+            ;                                  /* forced: bench knob or /LPT */
         else if ( PT_Ops->flags & PTF_REAL_FM )
             FmShimOn = !FM_Answers();
-        if ( FmShimOn && !FOpts.fmshim && ( PT_Ops->flags & PTF_REAL_FM ) )
+        if ( FmShimOn && !FOpts.fmshim && !FOpts.lpt && ( PT_Ops->flags & PTF_REAL_FM ) )
             printf("FM: card claims a chip at 388h, none answered\n");
 
         if ( FmShimOn ) {
@@ -1152,16 +1193,54 @@ void PTRAP_Prepare( int opl, int sbaddr, int dma, int hdma, int sndirq )
              * probing AdLib directly detects an OPL and a guest probing the
              * SB base aliases gets past its FM gate to the DSP. No synthesis
              * is compiled in on this path, so music stays silent -- what this
-             * recovers is the card's digital audio. */
+             * recovers is the card's digital audio. With /LPT the shim also
+             * forwards every write to the OPL3LPT, and music plays there. */
             int f = portranges[OPL3_PDT];
             FMSHIM_Reset();
             PortHandler[f+0] = FMSHIM_Acc; PortHandler[f+1] = FMSHIM_Acc;
             PortHandler[f+2] = FMSHIM_Acc; PortHandler[f+3] = FMSHIM_Acc;
-            /* 80 columns: the old wording ran to 82 and wrapped. Keep the
-             * "no music" half -- it is what stops the silence being
-             * reported as a bug -- and drop "on this card" instead. */
-            printf("FM: no chip - timer-only OPL3 shim at 388h"
-                   " (detection only, no music)\n");
+            if ( FOpts.lpt ) {
+                /* transient bench knobs for the LPT timing: SBELPTDLY sets
+                 * the control-port reads after each strobe (1-255, def 6),
+                 * SBELPTCLI=0 leaves interrupts on in the stub's writes */
+                const char *fast = "";
+                const char *e = getenv("SBELPTDLY");
+                int lptdly = e ? (int)strtol( e, NULL, 10 ) : 6;
+                int lptcli = !( ( e = getenv("SBELPTCLI") ) && *e == '0' );
+                if ( lptdly < 1 || lptdly > 255 )
+                    lptdly = 6;
+                FMSHIM_SetLpt( (uint16_t)FOpts.lpt, lptdly );
+#if !HANDLE_IN_388H_DIRECTLY
+                /* Arm the LPTSTUB variant: it serves real-mode FM itself --
+                 * 388h-38Bh, and through wFmSB the SB-base aliases, which
+                 * its isfm hands to islpt instead of 388h -- sharing the
+                 * shim's index shadow and status cache. SBENOSTUB=1 leaves
+                 * it disarmed, so everything takes the RMCB as before. */
+                { struct rmcode1 *dm = RMVars();
+                  if ( dm && RMLptStub && !getenv("SBENOSTUB") ) {
+                      struct rmlpt *lp = (struct rmlpt *)dm->codev86;
+                      FMSHIM_SetStubCells( (uint8_t *)&dm->data,
+                                           (uint8_t *)&dm->data + 1 );
+                      lp->bDly = (uint8_t)lptdly;
+                      lp->bCli = (uint8_t)lptcli;
+                      lp->wLpt = (uint16_t)FOpts.lpt;
+                      dm->wFmSB = (uint16_t)sbaddr;
+                      fast = ", v86 fast path";
+                  }
+                }
+#endif
+                printf("FM: OPL3LPT at %Xh%s, 388h status from the timer shim\n",
+                       FOpts.lpt, fast );
+                if ( lptdly != 6 || !lptcli )
+                    printf("FM: LPT bench knobs: %d delay reads, stub cli %s\n",
+                           lptdly, lptcli ? "on" : "off" );
+            } else {
+                /* 80 columns: the old wording ran to 82 and wrapped. Keep the
+                 * "no music" half -- it is what stops the silence being
+                 * reported as a bug -- and drop "on this card" instead. */
+                printf("FM: no chip - timer-only OPL3 shim at 388h"
+                       " (detection only, no music)\n");
+            }
         } else if ( FMVOL_Active() ) {
             /* FMVOL: keep 0x388-0x38B trapped, but filtered+forwarded to the
              * REAL OPL3 with carrier-level scaling.  Because these are the

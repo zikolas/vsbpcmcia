@@ -13,6 +13,16 @@ HANDLE_IN_388H_DIRECTLY equ 0 ; std=0, must match #define in ptrap.c
 endif
 RMPICTRAPDYN            equ 0 ; std=0, must match #define in ptrap.c
 
+;--- LPTSTUB: the /LPT variant of this stub (rmcode3.bin, installed only with
+;--- /LPT, in its own DOS block -- it does not fit the PSP). It drives an
+;--- OPL3LPT from V86 itself; see islpt. Never built for CARD_TP755, whose
+;--- 388h fast path belongs to dbopl and whose C side refuses /LPT.
+ifdef LPTSTUB
+if HANDLE_IN_388H_DIRECTLY
+	.err <LPTSTUB and CARD_TP755 exclude each other>
+endif
+endif
+
 OPLRING_ENTRIES         equ 1024 ; must match OPLRING_ENTRIES in ptrap.c
 OPLRING_MASK            equ OPLRING_ENTRIES-1
 
@@ -46,6 +56,11 @@ rfull db ?	; ring-full events seen by the stub (wraps at 256; ptrap.c
 			; mirrors it to IAC 4F7 -- "did we fall back to sync at all")
 dum3  db ?	; pad: keeps codev86 at an even offset
 endif
+ifdef LPTSTUB
+wLpt  dw ?	; /LPT: OPL3LPT data port; 0 = not armed (ptrap.c: struct rmlpt)
+bLptDly db ?	; control-port reads after each strobe (SBELPTDLY, def 6)
+bLptCli db ?	; 1 = interrupts off around each write (SBELPTCLI=0 clears)
+endif
 rmcode1 ends
 
 ;--- ring: OPLRING_ENTRIES x 2 bytes. Was 256 with byte-wide slot indices
@@ -65,6 +80,8 @@ _TEXT segment word public 'CODE'
 
 if HANDLE_IN_388H_DIRECTLY
 vars rmcode1 <0,0,0,20h,0,0FFFFh,0FFFFh,0,0,0,0,0,0,0>
+elseifdef LPTSTUB
+vars rmcode1 <0,0,0,20h,0,0FFFFh,0FFFFh,0,0,0,6,1>
 else
 vars rmcode1 <0,0,0,20h,0,0FFFFh,0FFFFh,0,0>
 endif
@@ -92,7 +109,9 @@ endif
 ;--- an UNTRAPPED 388h, ptrap.c arms wFmSB and the forward happens HERE, as a
 ;--- plain IN/OUT in V86 -- no RMCB round trip. Never armed under FMSHIM or
 ;--- FMVOL (388h stays trapped there; a direct OUT would recurse into this
-;--- stub) nor with the software OPL. Era drivers pad every register write
+;--- stub) nor with the software OPL -- except in the LPTSTUB variant with
+;--- wLpt armed, where isfm hands the alias to islpt and never touches 388h.
+;--- Era drivers pad every register write
 ;--- with 6-35 status reads through the same alias, so for a real-mode guest
 ;--- driving music via the Sound Blaster base this is the whole FM trap tax.
 	cmp word ptr [vars.wFmSB], 0FFFFh
@@ -107,6 +126,18 @@ endif
 	jbe isfm
 	pop ax
 nofm:
+ifdef LPTSTUB
+;--- /LPT armed: 388h-38Bh are the OPL3LPT's, served in islpt
+	cmp word ptr [vars.wLpt], 0
+	je nolpt
+	push ax
+	mov ax, dx
+	sub ax, 388h
+	cmp ax, 3
+	pop ax				; POP leaves the flags alone
+	jbe islpt
+nolpt:
+endif
 ;--- DSP write-status reads (base+0Ch, "is the DSP busy?"): a driver polls
 ;--- this before EVERY command or data byte it writes, so answering it here
 ;--- roughly halves the round trips of a DSP command sequence.
@@ -127,6 +158,10 @@ normal:
 ;--- The base is 16-aligned, so base+8/9 land on 388h/389h.
 isfm:
 	pop ax
+ifdef LPTSTUB
+	cmp word ptr [vars.wLpt], 0
+	jne islpt			; /LPT: the alias goes to the OPL3LPT
+endif
 	push dx
 	and dx, 3
 	add dx, 388h
@@ -141,6 +176,87 @@ isfmin:
 	pop dx
 	clc
 	retf
+
+ifdef LPTSTUB
+;--- /LPT: the OPL3LPT driven from V86, no RMCB. Entered for 388h-38Bh and
+;--- for the SB-base FM aliases alike, with the guest's own port in DX: only
+;--- bits 0-1 matter (1 = data port, 2 = second register array), and the
+;--- aliases carry the same bits because the SB base is 16-aligned.
+;--- Reads answer from the status cache (_0005) that fmshim.c keeps current.
+;--- Index 4 (timer control in the first array, 4-op select in the second)
+;--- and the data write after it go to fmshim.c, so its timer model sees
+;--- every timer command; it forwards those to the LPT itself. The index
+;--- shadow (_0004) is shared with fmshim.c, which updates it too.
+islpt:
+	test cl, 4			; OUT instr?
+	jz islptin
+	test dl, 1
+	jnz islptdat
+	mov [vars._0004], al	; index write: shadow it first, on both paths
+	cmp al, 4
+	je normal
+	push bx
+	mov bx, 0D09h		; first array: control 13/9/13
+	test dl, 2
+	jz @F
+	mov bx, 0501h		; second array: control 5/1/5
+@@:
+	call lptout
+	pop bx
+	clc
+	retf
+islptdat:
+	cmp [vars._0004], 4
+	je normal
+	push bx
+	mov bx, 0C08h		; value: control 12/8/12
+	call lptout
+	pop bx
+	clc
+	retf
+islptin:
+	mov al, [vars._0005]
+	clc
+	retf
+
+;--- AL onto the LPT data lines, then BH, BL, BH to the control port, then
+;--- bLptDly control-port reads (the OPL3 needs 3.3 us after each write; 6
+;--- by default). The same sequence as fmshim.c's LptPulse, after FastDoom's
+;--- OPL3LPT driver. With bLptCli set, interrupts are off throughout, as on
+;--- the RMCB path: a guest ISR writing FM in the middle would change the
+;--- data lines under the pulse. All registers preserved.
+lptout:
+	pushf
+	cmp byte ptr [vars.bLptCli], 0
+	je @F
+	cli
+@@:
+	push ax
+	push cx
+	push dx
+	mov dx, [vars.wLpt]
+	out dx, al
+	inc dx
+	inc dx
+	mov al, bh
+	out dx, al
+	mov al, bl
+	out dx, al
+	mov al, bh
+	out dx, al
+	mov cl, [vars.bLptDly]
+	xor ch, ch
+	jcxz lptdone
+@@:
+	in al, dx
+	loop @B
+lptdone:
+	pop dx
+	pop cx
+	pop ax
+	popf
+	ret
+endif
 
 ;--- DSP write-status: the same 2-bit counter vsb.c's DSP_Read0C keeps --
 ;--- ready (7Fh) three reads out of four, busy (0FFh) on the fourth -- and
