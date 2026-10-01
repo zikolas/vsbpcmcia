@@ -26,7 +26,11 @@ if IRETFIX
 externdef gvars:GLOBALVARS
 endif
 
+ifdef NOTFLAT
+PTRAP_PM_TrapHandler proto :word, :dword, :dword
+else
 PTRAP_PM_TrapHandler proto :word, :dword, :dword, :dword, :dword
+endif
 
 ifdef NOTFLAT
 
@@ -72,7 +76,7 @@ SwitchStackIOOut proc public
 SwitchStackIOOut endp
 
 ;--- switch stack, then call protected-mode port trap handler;
-;--- PTRAP_PM_TrapHandler(port, flags, value, cs, eip)
+;--- PTRAP_PM_TrapHandler(port, flags, value[, cs, eip]) -- cs/eip 32-bit only
 
 SwitchStackIO proc
 
@@ -126,17 +130,13 @@ endif
 
 	mov ch, byte ptr [ebp].IOEXCFR._fl+1   ;v1.7: CH[1] holds IF
 
-;--- the client's CS and the address of the trapped instruction (_ip was
-;--- stepped past it above), for fmshim's delay-read patcher. ESI/EDI are
-;--- free until the call (popad restores them) and are reloaded after it
-;--- for the string path, which writes them back to the frame.
-ifdef NOTFLAT
-	movzx esi, [ebp].IOEXCFR._errcode
-	and esi, 7
-	movzx edi, [ebp].IOEXCFR._ip
-	sub edi, esi
-	movzx esi, [ebp].IOEXCFR._cs
-else
+;--- 32-bit build: the client's CS and the address of the trapped
+;--- instruction (_ip was stepped past it above), for fmshim's delay-read
+;--- patcher. ESI/EDI are free until the call (popad restores them) and are
+;--- reloaded after it for the string path, which writes them back. The
+;--- 16-bit build keeps the three-argument call: the same addition there
+;--- hung VSBPCM16 at load (T2130CT, 2026-10-01), cause not yet found.
+ifndef NOTFLAT
 	mov esi, [ebp].IOEXCFR._errcode
 	and esi, 7
 	mov edi, [ebp].IOEXCFR._ip
@@ -150,16 +150,20 @@ endif
 	mov esp, [__djgpp_stack_top]
 	push ds
 	pop es
+ifndef NOTFLAT
 	push edi
 	push esi
+endif
 	push eax
 	push ecx
 	push edx
 	call PTRAP_PM_TrapHandler
 	mov ss, ebx
 	mov esp, ebp
+ifndef NOTFLAT
 	mov esi, [ebp].IOEXCFR._esi
 	mov edi, [ebp].IOEXCFR._edi
+endif
 	add [__djgpp_stack_top], STACKCORR
 	test byte ptr [ebp].IOEXCFR._errcode, 8h	; string?
 	jnz isstring

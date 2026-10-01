@@ -358,11 +358,14 @@ static void RM_TrapHandler( __dpmi_regs * regs)
 static int FmShimOn;   /* set in PTRAP_Prepare: this card has no real FM */
 static uint8_t FM_Alias( uint16_t port, uint8_t val, uint16_t flags );
 
+#ifndef NOTFLAT
 /* SBEFMPATCH: rewrite a guest's delay-read IN AL,DX (EC) to NOP (90) in
  * place, so it stops trapping (see FMSHIM.C for the rule). cs:eip is the
  * trapped instruction; the byte is checked before it is written, and the
  * count of patched instructions goes to IAC 0x4F1 -- the render-guard skip
- * counter, which should stay 0 and is lent while the knob is set. */
+ * counter, which should stay 0 and is lent while the knob is set.
+ * 32-bit build only: stackio.asm passes cs:eip there and not in VSBPCM16,
+ * where the same addition hung the load (see stackio.asm). */
 static unsigned FmPatchCount;
 
 static void PatchDelayIn( uint32_t cs, uint32_t eip )
@@ -379,6 +382,7 @@ static void PatchDelayIn( uint32_t cs, uint32_t eip )
         *(uint8_t *)NearPtr( 0x4F1 ) = (uint8_t)FmPatchCount;
     }
 }
+#endif
 
 /* protected-mode port trap handler;
  * called by SwitchStackIO();
@@ -388,9 +392,13 @@ static void PatchDelayIn( uint32_t cs, uint32_t eip )
  * stackio.asm, which already stores AX/EAX back for them). Return widened to
  * uint32_t so a decomposed word/dword IN reaches the client; the asm side
  * reads AL for byte accesses either way, so the ABI is unchanged.
- * cs:eip is the guest's trapped instruction, for PatchDelayIn. */
+ * cs:eip (32-bit build) is the guest's trapped instruction, for PatchDelayIn. */
+#ifdef NOTFLAT
+uint32_t PTRAP_PM_TrapHandler( uint16_t port, uint16_t flags, uint32_t value )
+#else
 uint32_t PTRAP_PM_TrapHandler( uint16_t port, uint16_t flags, uint32_t value,
                                uint32_t cs, uint32_t eip )
+#endif
 //////////////////////////////////////////////////////////////////////////////
 {
     int i;
@@ -419,6 +427,9 @@ uint32_t PTRAP_PM_TrapHandler( uint16_t port, uint16_t flags, uint32_t value,
                 return value;
             }
 #endif
+#ifdef NOTFLAT
+            return PortHandler[i](port, (uint8_t)value, flags );
+#else
             value = PortHandler[i](port, (uint8_t)value, flags );
             /* a plain byte IN the FM shim answered (388h-38Bh, or an SB
              * alias while the shim owns them) that it calls padding */
@@ -428,6 +439,7 @@ uint32_t PTRAP_PM_TrapHandler( uint16_t port, uint16_t flags, uint32_t value,
                  && FMSHIM_IsDelayRead() )
                 PatchDelayIn( cs, eip );
             return value;
+#endif
         }
 
     /* ports that are trapped, but not handled; this may happen, since
@@ -1274,6 +1286,7 @@ void PTRAP_Prepare( int opl, int sbaddr, int dma, int hdma, int sndirq )
                 printf("FM: no chip - timer-only OPL3 shim at 388h"
                        " (detection only, no music)\n");
             }
+#ifndef NOTFLAT
             /* transient bench knob: patch protected-mode guests' FM delay
              * reads out of their code (PatchDelayIn, FMSHIM.C) */
             { const char *e = getenv("SBEFMPATCH");
@@ -1282,6 +1295,7 @@ void PTRAP_Prepare( int opl, int sbaddr, int dma, int hdma, int sndirq )
                   printf("FM: SBEFMPATCH - PM delay reads patched to NOP\n");
               }
             }
+#endif
         } else if ( FMVOL_Active() ) {
             /* FMVOL: keep 0x388-0x38B trapped, but filtered+forwarded to the
              * REAL OPL3 with carrier-level scaling.  Because these are the
