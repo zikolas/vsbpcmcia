@@ -26,7 +26,7 @@ if IRETFIX
 externdef gvars:GLOBALVARS
 endif
 
-PTRAP_PM_TrapHandler proto :word, :dword, :dword
+PTRAP_PM_TrapHandler proto :word, :dword, :dword, :dword, :dword
 
 ifdef NOTFLAT
 
@@ -72,7 +72,7 @@ SwitchStackIOOut proc public
 SwitchStackIOOut endp
 
 ;--- switch stack, then call protected-mode port trap handler;
-;--- PTRAP_PM_TrapHandler(port, flags, value)
+;--- PTRAP_PM_TrapHandler(port, flags, value, cs, eip)
 
 SwitchStackIO proc
 
@@ -126,18 +126,40 @@ endif
 
 	mov ch, byte ptr [ebp].IOEXCFR._fl+1   ;v1.7: CH[1] holds IF
 
+;--- the client's CS and the address of the trapped instruction (_ip was
+;--- stepped past it above), for fmshim's delay-read patcher. ESI/EDI are
+;--- free until the call (popad restores them) and are reloaded after it
+;--- for the string path, which writes them back to the frame.
+ifdef NOTFLAT
+	movzx esi, [ebp].IOEXCFR._errcode
+	and esi, 7
+	movzx edi, [ebp].IOEXCFR._ip
+	sub edi, esi
+	movzx esi, [ebp].IOEXCFR._cs
+else
+	mov esi, [ebp].IOEXCFR._errcode
+	and esi, 7
+	mov edi, [ebp].IOEXCFR._ip
+	sub edi, esi
+	movzx esi, word ptr [ebp].IOEXCFR._cs
+endif
+
 	mov ebx, ss
 	sub [__djgpp_stack_top], STACKCORR
 	mov ss, PRFXDS[dwDS]
 	mov esp, [__djgpp_stack_top]
 	push ds
 	pop es
+	push edi
+	push esi
 	push eax
 	push ecx
 	push edx
 	call PTRAP_PM_TrapHandler
 	mov ss, ebx
 	mov esp, ebp
+	mov esi, [ebp].IOEXCFR._esi
+	mov edi, [ebp].IOEXCFR._edi
 	add [__djgpp_stack_top], STACKCORR
 	test byte ptr [ebp].IOEXCFR._errcode, 8h	; string?
 	jnz isstring

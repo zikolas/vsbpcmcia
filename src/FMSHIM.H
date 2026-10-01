@@ -19,6 +19,10 @@ void    FMSHIM_LptSilence( void );
 /* the /LPT v86 stub's index shadow and status cache, kept in step from here
  * (NULL, NULL = no such stub) */
 void    FMSHIM_SetStubCells( uint8_t *index, uint8_t *status );
+/* SBEFMPATCH: may the status read just answered be patched out of the
+ * guest as delay padding? (see FMSHIM.C; ptrap.c does the patching) */
+void    FMSHIM_SetPatch( int on );
+int     FMSHIM_IsDelayRead( void );
 
 #ifdef __cplusplus
 }

@@ -70,6 +70,16 @@ static int fms_lpt_dly = 6;    /* control-port reads after each strobe */
 static uint8_t *fms_stub_index;
 static uint8_t *fms_stub_status;
 
+/* SBEFMPATCH: era drivers pad each register write with dummy status reads
+ * (DMX: 6 after the index, 24 after the value), and in protected mode each
+ * one is a full HDPMI trap -- DOOM's music lost tempo on a DX4/75. ptrap.c
+ * can rewrite such a read's IN AL,DX to NOP in the guest's code, as ADLiPT
+ * does in V86. A read only counts as padding while the last index written
+ * is 20h or above: AdLib detection runs on registers 1-4 and reads status
+ * for real there. The chip's own spacing comes from the LPT write delays. */
+static uint8_t fms_last_index; /* last index written, either array */
+static int fms_patch;          /* SBEFMPATCH set */
+
 /* OPL3LPT wire protocol: the byte goes out on the data lines, then the
  * control port pulses it into the chip -- 13/9/13 latches an index for the
  * first register array, 5/1/5 for the second, 12/8/12 latches a value. The
@@ -165,6 +175,18 @@ static uint8_t FMSHIM_Status( void )
     return val;
 }
 
+void FMSHIM_SetPatch( int on )
+//////////////////////////////
+{
+    fms_patch = on;
+}
+
+int FMSHIM_IsDelayRead( void )
+//////////////////////////////
+{
+    return fms_patch && fms_last_index >= 0x20;
+}
+
 void FMSHIM_SetStubCells( uint8_t *index, uint8_t *status )
 ///////////////////////////////////////////////////////////
 {
@@ -202,6 +224,7 @@ uint8_t FMSHIM_Acc( uint16_t port, uint8_t val, uint16_t flags )
             LptData( val );
     } else {                           /* index port */
         fms_index[bank] = val;
+        fms_last_index = val;
         if ( fms_stub_index )
             *fms_stub_index = val;
         if ( fms_lpt )

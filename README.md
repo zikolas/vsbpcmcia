@@ -162,7 +162,10 @@ CS4231A cards; MC8K: cap the guest rate, above which the feed decimates),
 `SBENOSTUB` (leave the V86 stub's fast paths — the FM alias forward, the DSP
 write-status answer and the `/LPT` forward — disarmed, for an A/B),
 `SBELPTDLY` and `SBELPTCLI` (`/LPT` timing: control-port reads after each
-strobe, default 6; `SBELPTCLI=0` leaves interrupts on in the stub), `ESNOI8`
+strobe, default 6; `SBELPTCLI=0` leaves interrupts on in the stub),
+`SBEFMPATCH=1` (with the FM shim: rewrite a protected-mode game's FM delay
+reads, the dummy `IN AL,DX` after each register write, to `NOP` in its code so
+they stop trapping; count in IAC 0x4F1), `ESNOI8`
 (disable the IRQ0 watchdog heartbeat), `ESIRQ5`, `IRQTONE`, `FIFOTEST`, and
 `SBEIBMST` / `SBEIBM16` (IBMAUD output format, see its section below).
 
