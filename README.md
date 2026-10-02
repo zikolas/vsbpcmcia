@@ -1,67 +1,58 @@
 # VSBPCMCIA
-Sound Blaster emulation for PCMCIA sound cards on DMA-less laptops; a fork of Baron-von-Riedesel's VSBHDA: https://github.com/Baron-von-Riedesel/VSBHDA (itself a fork of crazii's SBEMU: https://github.com/crazii/SBEMU)
 
-Works with unmodified HDPMI binaries (v3.21+), making it compatible with HX.
+Sound Blaster emulation for DOS laptops whose sound card has no ISA DMA: 486
+and Pentium-era PCMCIA cards, the ThinkPad 755C's planar codec, and a CardBus
+Audigy. Games see a Sound Blaster at 220h; VSBPCM traps it and sends the audio
+to the real card by programmed I/O.
 
-The target machines are 486-class PCMCIA laptops whose card bridges have no ISA
-DMA to the socket. The guest's Sound Blaster audio is intercepted and pushed to
-the real card's FIFO by programmed I/O — a passthrough: the chip plays the 
-guest's native rate/format, nothing is resampled. FM (AdLib) rides the card's
-real OPL directly at 0x388, untrapped. Validated from a Pentium MMX down to a 
-386-bus 486SLC/25 (HP OmniBook 425) — see COMPATIBILITY.md for the measured
-floor and slow-CPU tuning.
+It is a fork of Baron-von-Riedesel's VSBHDA
+(https://github.com/Baron-von-Riedesel/VSBHDA), itself a fork of crazii's SBEMU
+(https://github.com/crazii/SBEMU). It runs on unmodified HDPMI (v3.21+), so it
+is compatible with HX. Tested from a Pentium MMX down to a 486SLC/25 on a
+386 bus (HP OmniBook 425); COMPATIBILITY.md lists games and the slow-CPU floor.
 
-VSBPCM.EXE contains the ES1688, CS4231/CS4231A, CS4248, EMU8200 (TDK) and IBM
-Audio Adapter backends; `/CARD:`
-picks one at load time. Nothing is probed — you already have to run that card's 
-enabler first, so the launcher always knew which card it was talking to.
+Emulated: Sound Blaster 1.0, 2.0, Pro, Pro 2 and 16; 8 and 16-bit, mono and
+stereo, high-speed DMA.
 
-Supported sound cards:
- * ES1688-based PCMCIA cards:
-   - Ratoc REX-5571/5572, Panasonic KXL-C101
-   (bring the card up with ES1688GO first,
-   https://github.com/zikolas/es1688go) — `/CARD:ES1688`
- * CS4231A based PCMCIA cards:
-   - Panasonic CF-VEW211 and CF-VEW212 "Sound Card PRO"
-   (bring the card up with VEW21XGO first — 2.5+ for the 212,
-   https://github.com/zikolas/vew21xgo) — `/CARD:VEW211` for both. 
-   - Roland SCP-55 (bring the card up with SCP55GO first,
-   https://github.com/zikolas/scp55-enabler) — `/CARD:SCP55`
- * IBM PCMCIA Audio Adapter (P/N 0933967, CIS "IBM NON-DSP AUDIO"): bring the
-   card up with IBMAUDGO first (https://github.com/zikolas/ibmaudgo) —
-   `/CARD:IBMAUD`
- * TDK MusicCard MC-8000 and DMC-9000 (EMU8200): bring the card up with MC8KGO
-   first (https://github.com/zikolas/mc8kgo) — `/CARD:MC8K`
- * BONUS: ThinkPad 755C Crystal CS4248: The planar codec is the sound card
-   and the driver wakes it up — `/CARD:TP755`
- 
- * Sound Blaster Audigy 2 ZS Notebook (CardBus, SB0530): bring the socket up
-   with AUD2GO first (https://github.com/zikolas/aud2go) — VSBPCMA.EXE, a
-   separate build (`CARD=AUDIGY`); see "CardBus backend" below
+## Supported hardware
 
-Game compatibility: see COMPATIBILITY.md.
+| Card | Enabler, run first | VSBPCM switches | FM music |
+|------|--------------------|-----------------|----------|
+| Ratoc REX-5571/5572, Panasonic KXL-C101 (ES1688) | [ES1688GO](https://github.com/zikolas/es1688go) `/SB=240 /FM /W=DC00` | `/CARD:ES1688 /BASE240` | the card's ESFM |
+| Panasonic CF-VEW211 and CF-VEW212 (CS4231A) | [VEW21XGO](https://github.com/zikolas/vew21xgo) `/PCIC /IO=530 /VOL=0 /W=DC00` (2.5+ for the 212) | `/CARD:VEW211 /DACRATE11025 /CVOL0` | the card's YMF262 (211) or OPL4 (212) |
+| Roland SCP-55 | [SCP55GO](https://github.com/zikolas/scp55-enabler) `/PCIC /I=0 /W=DC00` | `/CARD:SCP55 /CVOL0` | General MIDI on the card's Sound Canvas |
+| IBM PCMCIA Audio Adapter (P/N 0933967) | [IBMAUDGO](https://github.com/zikolas/ibmaudgo) `/W=DC00` | `/CARD:IBMAUD` | OPL3LPT, or software OPL3 |
+| TDK MusicCard MC-8000, DMC-9000 (EMU8200) | [MC8KGO](https://github.com/zikolas/mc8kgo) `/W=DC00` | `/CARD:MC8K` | General MIDI through TDKSYN |
+| ThinkPad 755C planar CS4248 | none | `/CARD:TP755` | OPL3LPT, or software OPL3 |
+| Audigy 2 ZS Notebook (CardBus) | [AUD2GO](https://github.com/zikolas/aud2go) | VSBPCMA `/CARD:AUDIGY` | software OPL3; General MIDI on the card's wavetable |
 
-## Launching
+The binaries:
 
-Run `VSBPCM /?` for the full option list and a per-card recipe summary.
-`/CARD` is required; running without it prints those recipes rather than
-guessing. Two addresses are easy to confuse, so the help says it too:
+| File | What it is |
+|------|------------|
+| VSBPCM.EXE | every PCMCIA backend and the 755C; no software FM |
+| VSBPCMT.EXE | the same, plus DOSBox's OPL3 emulation (needs an FPU) |
+| VSBPCMA.EXE | the Audigy build, with software OPL3 and the wavetable |
+| VSBPCM16.EXE | for 16-bit protected-mode games (Tyrian and the Borland RTM catalogue) |
+| VSBPCMJ.DLL | optional Jemm module that speeds up real-mode FM and direct DAC |
 
- * `/A` is the **emulated** SB base — the address the guest looks for.
- * `/BASE` is the **real** card's base — match it to the enabler's setting.
+## Requirements
 
-`/BASE` defaults per card to that card's own enabler default (220 / 250 / 330
-/ 530 / 4E30; MC8K looks at 240 and then 260), so it can be omitted when you
-left the enabler at its default.
+* Jemm v5.84 or later (JEMM386 or JEMMEX), with JLOAD and QPIEMU.DLL from the
+  same release zip: https://github.com/Baron-von-Riedesel/Jemm. Mixed
+  releases refuse to load, lose real-mode support, or hang. Exclude the card
+  window from Jemm's UMB scan (`X=DC00-EFFF`): a scan over a live PCMCIA or
+  planar window hangs the machine.
+* HDPMI32i v3.21 or later, the "i" variant, from HX
+  (https://github.com/Baron-von-Riedesel/HX, BIN\HDPMI32i.EXE in the HXRT zip).
+  v3.20 and older fail with "Failed installing IO port trap for
+  protected-mode".
+* The card's enabler, from the table above.
 
-**Emulated SB at 220, real chip elsewhere.** Games that scan for a Sound
-Blaster probe 0x220 first and must find the emulation there; if they find the
-real chip instead they select a card with no DMA on the socket and go silent.
-This is why the ES1688 recipe moves the card to 240 — and why `/BASE` is in
-practice mandatory for ES1688, whose default would otherwise collide with
-`/A220`.
+## Getting started
 
-ES1688 PCMCIA card:
+A launcher for an ES1688 card; the other cards swap the first and last lines
+for the ones in the table:
 
     ES1688GO /SB=240 /FM /W=DC00
     SET BLASTER=A220 I7 D1 T4
@@ -69,474 +60,233 @@ ES1688 PCMCIA card:
     HDPMI32I -r -x -v
     VSBPCM /CARD:ES1688 /BASE240 /A220
 
-CF-VEW211 PCMCIA card:
+Jemm goes in CONFIG.SYS, or as `JEMM386.EXE LOAD NOEMS X=DC00-EFFF` at the top
+of the batch. deploy/ has a working batch for each card, and `VSBPCM /?` prints
+the switches with a recipe per card. Set games to Sound Blaster, 220h, IRQ 7,
+DMA 1.
 
-    VEW21XGO /PCIC /IO=530 /VOL=0 /W=DC00
+`/A` is the emulated SB, where games look; keep it at 220. `/BASE` is the
+real card; it defaults to the enabler's default (220 ES1688, 250 IBMAUD, 330
+SCP55, 530 VEW211, 4E30 TP755; MC8K tries 240, then 260). The ES1688 recipe
+moves the card to 240 because a game that finds the real chip at 220 picks a
+card with no DMA to the socket and goes silent.
+
+## Switches
+
+| Switch | Meaning |
+|--------|---------|
+| `/CARD:name` | backend, required: ES1688, VEW211, SCP55, MC8K, IBMAUD, TP755 (AUDIGY in VSBPCMA) |
+| `/BASE` | real card's I/O base, hex |
+| `/A /I /D /T /H` | emulated SB base, IRQ, DMA, type, high DMA (also read from BLASTER) |
+| `/DACRATE` | codec rate in Hz. The codec's rate on VEW211, SCP55, IBMAUD and TP755; on the ES1688 only the idle rate, as the guest's format wins |
+| `/MAXHZ` | codec rate ceiling, VEW211 and SCP55 (default 22050). Fewer pump interrupts on a slow host |
+| `/CVOL` | codec attenuation 0-63, 1.5 dB steps (VEW211, SCP55, TP755) |
+| `/RESAMP` | the engine resamples and mixes onto one codec rate (the render path) in place of the passthrough (VEW211, IBMAUD, TP755) |
+| `/LPT` | FM to an OPL3LPT: `/LPT` (378), `/LPT278`, `/LPT3BC` |
+| `/AUX[n]` | TP755: line-in jack on, n x 1.5 dB down (0-23, default 0) |
+| `/FMVOL` | volume trim on a real OPL3, 0-63 TL steps |
+| `/FMSHIM` | treat the card as FM-less (diagnostic) |
+| `/OPL0` | VSBPCMT, VSBPCMA: software OPL3 off |
+| `/PM0`, `/RM0` | leave protected-mode or real-mode games unserved |
+| `/PS /B /BP /BS` | period size, period count, buffer guard, PCM buffer |
+| `/CF` | VSBHDA compatibility flags |
+
+Settings that persist belong in switches. The environment variables left are
+for one experiment at a prompt:
+
+| Variable | Effect |
+|----------|--------|
+| `SBEPTLAT` | passthrough queue target, ms |
+| `SBEMAXHZ` | SCP55: codec rate cap. MC8K: guest rate cap, above which the feed decimates |
+| `SBERTC` | pin the RTC pump rate select, 3-15 |
+| `SBEFMPATCH=1` | rewrite protected-mode games' FM delay reads to `NOP` (with VSBPCMJ, real-mode games get this by default; `=0` turns it off) |
+| `SBEIBMST=0`, `SBEIBM16=0/1` | IBMAUD: mono output; 8 or 16-bit output |
+| `SBENOJLM=1`, `SBEDSPPATCH=0`, `SBEJLMPIC=0` | VSBPCMJ: leave it unarmed; leave game code unpatched; leave port 20h on QPI |
+| `SBENOSTUB=1`, `SBELPTDLY`, `SBELPTCLI=0` | `/LPT` A/B: V86 stub off; settle reads per strobe (6); interrupts on in the stub |
+| `SBENORS=1`, `ESNOI8`, `ESIRQ5`, `IRQTONE`, `FIFOTEST` | bench diagnostics: frame stepper off, IRQ0 heartbeat off, others in the source |
+
+## Real-mode and protected-mode games
+
+One resident serves both kinds of game, through the two port-trapping hosts
+it loads under:
+
+* Real-mode games (Monkey Island, Dune II, Another World) reach it through
+  Jemm's QPIEMU. Each trapped port access costs a nested V86 execution, which
+  VSBPCMJ.DLL (below) removes for the busiest ports.
+* 32-bit protected-mode games (DOS/4GW and DJGPP titles: DOOM, Duke Nukem 3D,
+  SimCity 2000, Quake) run as clients of the resident HDPMI32i, which traps
+  their port accesses and calls VSBPCM in protected mode with no switch to
+  real mode. With the FM shim, `SBEFMPATCH=1` removes their FM delay reads.
+* 16-bit protected-mode games (Tyrian and the Borland RTM, Phar Lap 286 and
+  DOS16M catalogue) get their own interrupt tables under DPMI 0.9, so they
+  need VSBPCM16.EXE with `HDPMI16I -x` in place of `HDPMI32I` (see below).
+
+`/PM0` or `/RM0` turns either world off. COMPATIBILITY.md lists what runs.
+
+### VSBPCMJ.DLL
+
+A Jemm module that serves the busiest real-mode ports at ring 0: FM while the
+shim or the software OPL3 owns it, the DSP write port for direct DAC (command
+10h), and port 20h. `JLOAD VSBPCMJ.DLL` after QPIEMU (the OPL3LPT launcher
+below shows the order); VSBPCM arms it and its load line says what it serves.
+On a DX4/75 it takes FM from 1,456 to 20,222 register writes a second and
+direct DAC from 5,200 to 36,400 samples a second; with it Theme Hospital's
+FM plays at normal speed and Another World in its normal audio mode. It
+patches the game's code as it runs (FM delay reads and DSP busy-waits become
+`NOP`); `SBEFMPATCH=0` and `SBEDSPPATCH=0` turn that off. It needs a 32-bit
+build.
+
+### VSBPCM16.EXE
+
+Launch it in place of VSBPCM with `HDPMI16I -x` (deploy/go16*.bat); it serves
+real-mode games as well. Run UNINST.EXE before switching between the 16-bit
+and 32-bit builds, since neither detects the other. Verified on a ThinkPad
+235 with a KXL-C101: Tyrian, sound and AdLib music, and Jazz Jackrabbit;
+Tyrian's menu runs slightly slow (doc/16bit.md). `SBEFMPATCH` and VSBPCMJ
+are 32-bit only.
+
+## FM music
+
+On a card with an FM chip (ES1688, VEW211, VEW212), 388h is left untrapped and
+games use the chip directly.
+
+On a card without one, games still run an AdLib timer test before they touch
+the DSP, so VSBPCM answers 388h and the SB's FM aliases from a timer-only shim.
+Detection passes and digital sound works; music needs one of these:
+
+* An OPL3LPT on the parallel port, on any card (next section).
+* The software OPL3 in VSBPCMT.EXE. The engine mixes it, so it needs the
+  render path: `/RESAMP` on the IBM card, automatic on the 755C. Each FM
+  access costs a trap. On the 755C's DX4/75, measured before VSBPCMJ, Monkey
+  Island 1 stutters in dense passages, Monkey Island 2 slows until it fails,
+  and DOOM's music crashes.
+* General MIDI instead of AdLib: the SCP-55's Sound Canvas, the TDK cards via
+  TDKSYN, the Audigy's wavetable.
+
+### OPL3LPT
+
+An OPL3LPT is a YMF262 on the printer port. `/LPT` sends every FM register
+write to it, from 388h-38Bh and the SB-base aliases alike, on any `/CARD`:
+`/LPT` for 378h, `/LPT278`, or `/LPT3BC`. The chip is write-only, so the timer
+shim answers detection, and a card's FM chip, if it has one, goes unused.
+VSBPCM silences the chip at load and at unload.
+
     SET BLASTER=A220 I7 D1 T4
-    JLOAD QPIEMU.DLL
-    HDPMI32I -r -x -v
-    VSBPCM /CARD:VEW211 /BASE530 /DACRATE11025 /CVOL0 /A220
-
-CF-VEW212 PCMCIA card — same backend, same command line:
-
-    VEW21XGO /PCIC /VOL=0 /W=DC00
-    SET BLASTER=A220 I7 D1 T4
-    JLOAD QPIEMU.DLL
-    HDPMI32I -r -x -v
-    VSBPCM /CARD:VEW211 /BASE530 /DACRATE11025 /CVOL0 /A220
-
-The 212 carries the same CS4231A behind a different ASIC, on a config index
-its own CIS never declares; VEW21XGO 2.5 sets that index itself, and there is
-only one codec base on this card, so `/IO=` is overridden to 530 (2.3 and 2.4
-recognise a 212 and decline it, leaving the card unconfigured).
-FM comes from the OPL4's OPL3-compatible half at 0x388 and rides it untrapped
-exactly like the 211's YMF262.
-
-Roland SCP-55 PCMCIA card:
-
-    SCP55GO /PCIC /I=0 /W=DC00
-    SET BLASTER=A220 I7 D1 T4
-    JLOAD QPIEMU.DLL
-    HDPMI32I -r -x -v
-    VSBPCM /CARD:SCP55 /BASE330 /CVOL0 /A220
-
-IBM PCMCIA Audio Adapter:
-
-    IBMAUDGO /W=DC00
-    SET BLASTER=A220 I7 D1 T4
-    JLOAD QPIEMU.DLL
-    HDPMI32I -r -x -v
-    VSBPCM /CARD:IBMAUD /A220
-
-TDK MC-8000 / DMC-9000:
-
-    MC8KGO /W=DC00
-    SET BLASTER=A220 I7 D1 T4
-    SET SBEMAXHZ=11025
-    JLOAD QPIEMU.DLL
-    HDPMI32I -r -x -v
-    VSBPCM /CARD:MC8K /A220
-
-ThinkPad 755C planar codec (no enabler):
-
-    SET BLASTER=A220 I7 D1 T4
-    JLOAD QPIEMU.DLL
-    HDPMI32I -r -x -v
-    VSBPCM /CARD:TP755 /A220
-
-Add `/LPT` for FM from an OPL3LPT (`/LPT3BC` where LPT1 sits at 3BCh) and
-`/AUX` to hear it through the 755's line-in jack. VSBPCMT.EXE, the software
-OPL3 build, runs with `/PS1024 /DACRATE11025` (see the TP755 section).
-
-JEMM386 must be loaded before JLOAD — from CONFIG.SYS, or as
-`JEMM386.EXE LOAD NOEMS X=DC00-EFFF` at the top of the batch. The `X=`
-exclusion covering the card window is MANDATORY: live PCMCIA/planar windows
-sit there and Jemm's UMB scan over them hard-wedges the machine.
-See deploy/ for working batches.
-
-## Options
-
-`/CARD:name` selects the backend and is required. The rest are optional:
-
- * `/BASE`    real card's IO base, hex (def per card: 220 / 250 / 330 / 530 /
-   4E30)
- * `/DACRATE` codec rate in Hz (def per card). On the ES1688 passthrough this
-   only sets the idle/bring-up rate — the guest's own format wins on the first
-   feed. On the VEW211, SCP55, TP755 and IBMAUD it is the codec's actual
-   rate.
- * `/MAXHZ`   codec rate ceiling in Hz (VEW211/SCP55; def 22050). The CPU knob
-   for a slow host: the 16-frame FIFO makes the pump interrupt count scale with
-   the codec rate, and the frame stepper folds a faster guest down onto the
-   cap. `/MAXHZ11025` halves the ticks of a 22 kHz stream.
- * `/CVOL`    codec DAC attenuation 0-63, ~1.5 dB per step (VEW211/SCP55/TP755)
- * `/RESAMP`  the engine resamples and mixes onto one codec rate (the render
-   path) instead of the passthrough tap (VEW211/IBMAUD/TP755)
- * `/FMVOL`   volume trim on a REAL OPL3, 0-63 TL steps
- * `/FMSHIM`  pretend the card has no FM chip (bench diagnostic; see below)
- * `/LPT`     FM from an OPL3LPT on the parallel port: `/LPT` (378),
-   `/LPT278` or `/LPT3BC` (see below)
- * `/AUX`     TP755 only: the 755C's line-in jack (codec AUX1) on, mixed into
-   the output in analog. `/AUX` is 0 dB, `/AUXn` is n x 1.5 dB down (0-23).
-   Without it the jack is muted.
- * `/A /I /D /T /H` the emulated SB's geometry (base, IRQ, DMA, type, high DMA)
-
-Configuration by environment variable was removed in v1.0: values persisted
-between runs, so a base or card left over from one launcher silently
-redirected the next. Only transient bench knobs remain in the environment —
-`SBERTC` (fixed RTC pump rate-select 3-15), `SBEPTLAT` (passthrough ring
-latency target, ms), `SBENORS` (VEW211/SCP55: disable the frame stepper),
-`SBEMAXHZ` (SCP55: cap the codec rate, `/MAXHZ` being the switch form for both
-CS4231A cards; MC8K: cap the guest rate, above which the feed decimates),
-`SBENOSTUB` (leave the V86 stub's fast paths — the FM alias forward, the DSP
-write-status answer and the `/LPT` forward — disarmed, for an A/B),
-`SBELPTDLY` and `SBELPTCLI` (`/LPT` timing: control-port reads after each
-strobe, default 6; `SBELPTCLI=0` leaves interrupts on in the stub),
-`SBEFMPATCH=1` (VSBPCM.EXE, with the FM shim: rewrite a protected-mode
-game's FM delay reads, the dummy `IN AL,DX` after each register write, to
-`NOP` in its code so they stop trapping; count in IAC 0x4F1; with VSBPCMJ
-loaded, real-mode games get this by default and `SBEFMPATCH=0` turns it
-off), `SBEDSPPATCH=0`, `SBEJLMPIC=0` and `SBENOJLM=1` (VSBPCMJ, see
-below), `ESNOI8`
-(disable the IRQ0 watchdog heartbeat), `ESIRQ5`, `IRQTONE`, `FIFOTEST`, and
-`SBEIBMST` / `SBEIBM16` (IBMAUD output format, see its section below).
-
-
-### FM and the detection shim
-
-Cards with real FM silicon (ES1688's ESFM, the VEW211's discrete YMF262, the
-VEW212's OPL4) get it for free: 0x388 is left untrapped and guest AdLib
-rides the hardware.
-
-A card with NO FM chip — the 755C and the SCP-55 — cannot simply ignore those
-ports. Era
-games run an AdLib timer test on the SB's FM aliases BEFORE they will touch
-the DSP, so an unanswered 0x388 costs you digital sound as well as music.
-The driver therefore answers those ports from a timer-only shim: enough to
-pass detection, with no synthesis behind it. FM music is silent on such a
-card unless the software OPL is compiled in (see the TP755 build below). The
-SCP-55 has a better option than either — see its section below.
-`/FMSHIM` forces that path on a card that does have a chip, to exercise it.
-
-`/LPT` takes the same path and also sends every FM register write, from the
-0x388-0x38B ports and the SB-base aliases alike, to an OPL3LPT (a YMF262 on
-the printer port). The OPL3LPT is write-only, so detection is answered by the
-shim, and the card's own FM chip, if it has one, goes unused. The chip is
-silenced at load and at unload. It works in both trap worlds on any `/CARD`.
-
-Each FM access is a port trap, and era drivers pad every register write with
-40 or so status reads. For real-mode games VSBPCM.EXE installs a V86 stub
-that answers those reads and drives the LPT itself, with no switch to
-protected mode (it lives in a small DOS block of its own; `SBENOSTUB=1`
-disarms it). Protected-mode games still pay a full trap per access. Before
-the stub, Monkey Island played cleanly on a DX4 and slowed on a 486SLC; on a
-DX4/75 DOOM itself ran normally but its music (protected mode, DMX) lost
-tempo after the opening. FastDoom has its own OPL3LPT driver, which needs no
-trapping. `/LPT` is not available in VSBPCMT (its V86 stub keeps 388h writes
-for dbopl), has no V86 stub in VSBPCM16, and does not combine with `/FMVOL`.
-
-### VSBPCMJ.DLL: FM and direct DAC at ring 0
-
-A real-mode game reaches VSBPCM through Jemm's QPIEMU, which runs VSBPCM's
-V86 stub as a nested execution for every port access. Two kinds of traffic
-are too dense for that on a 486: FM from a real-mode driver (thousands of
-register writes a second, each padded with status reads), and direct DAC
-(DSP command 10h and a sample byte, per sample, from a timer interrupt at the
-sample rate). VSBPCMJ.DLL is a Jemm loadable module that serves those ports
-at ring 0, one fault per access, and leaves every other port on QPI:
-
+    SET SBEFMPATCH=1
     JLOAD QPIEMU.DLL
     JLOAD VSBPCMJ.DLL
     HDPMI32I -r -x -v
     VSBPCM /CARD:IBMAUD /A220 /LPT
 
-VSBPCM finds it at load, arms it, and keeps the ports it took off its own
-QPI traps; the load line says what it serves. Protected-mode games still
-reach VSBPCM through HDPMI, as before.
+How each kind of game reaches the chip:
 
- * FM, while the timer shim owns the FM ports (no chip, `/FMSHIM`, `/LPT`)
-   or the software OPL3 does (VSBPCMT, VSBPCMA): 0x388-0x38B and the SB-base
-   aliases. Status comes from the shim's timer model, `/LPT` writes go to
-   the OPL3LPT, and for the software OPL3 the writes go into a ring in the
-   shared DOS memory that VSBPCM replays into the emulation before it
-   renders. A status read while the last
-   index written is 20h or above is delay padding, and its `IN AL,DX` is
-   rewritten to `NOP` in the game's code (`SBEFMPATCH=0` keeps them).
-   Theme Hospital's Miles FM driver runs in V86, and its music, slow from
-   the start before, plays normally with VSBPCMJ on a DX4/75.
- * Direct DAC: the DSP write port (base+0Ch). Write-status reads are
-   answered at ring 0, and command 10h with its sample goes into a ring in
-   DOS memory that VSBPCM drains on each tick; any other DSP write is passed
-   to VSBPCM's stub the way QPIEMU passes it. The game's code is patched as
-   it runs: a write-status busy-wait (`IN AL,DX`, a test, a branch back to
-   the `IN`) loses its `IN`, since this DSP is never busy; the `OUT` of a
-   10h that a sample write follows is dropped, so a sample costs one fault;
-   and Another World's exact sequence becomes a far call into a copy of the
-   ring's producer in that DOS memory, so its samples cost none
-   (`SBEDSPPATCH=0` leaves the game's code alone).
- * Port 20h: a game that plays direct DAC from its timer interrupt sends an
-   EOI per sample. VSBPCMJ does them at ring 0 and passes them to VSBPCM
-   only while VSBPCM is delivering an emulated SB interrupt (`SBEJLMPIC=0`
-   leaves port 20h on QPI).
- * The IBM card's sound interrupt is the RTC's periodic interrupt. VSBPCMJ
-   watches VSBPCM's interrupt count from the game's own port accesses; when
-   the count stands still for twice its usual span, it switches the RTC's
-   periodic interrupt back on or unmasks IRQ8, and after two RTC seconds
-   clears a stuck interrupt flag. VSBPCM then leaves out the IBM backend's
-   IRQ0 heartbeat, which cost two mode switches per timer tick.
+* Real mode: a V86 stub writes to the LPT and answers the delay reads with no
+  switch to protected mode. With VSBPCMJ the FM ports are served at ring 0
+  and the delay reads are patched out of the game's code.
+* 32-bit protected mode: every FM access is an HDPMI trap, and era drivers
+  pad each register write with about 40 status reads; DOOM's music lost
+  tempo. `SBEFMPATCH=1` rewrites those reads to `NOP` in the game's code
+  (index 20h or above, the ADLiPT rule), and DOOM's and SimCity 2000's music
+  keep tempo.
+* VSBPCM16 forwards FM to the LPT without the stub or the patch.
 
-`SBENOJLM=1` leaves VSBPCMJ loaded and unarmed, for an A/B. Measured on a
-T2130CT (DX4/75) with `Test/JLMTEST.ASM`: FM register writes with their
-padding, 1456 a second through QPI and 20222 through VSBPCMJ; direct-DAC
-samples, 5200 a second through QPI and 36400 through VSBPCMJ. A 10 kHz timer
-tick in Another World's shape costs about 35 us there with VSBPCM and
-VSBPCMJ loaded, against 9 us under Jemm alone: about 13 for the EOI and 13
-for the sample and VSBPCM's feed to the card. Another World plays in its
-normal audio mode. The crackle left in its heaviest scenes is the game's own
-mixer short of CPU: a 440 Hz tone through the same path (`JLMTEST W`)
-stays clean with the game's interrupts held off 3 ms in every 110. VSBPCMJ
-needs a 32-bit build (VSBPCM16 does not look for it) and Jemm386/JemmEx 5.84
-or later, and has been run with VSBPCM.EXE on IBMAUD; build it with
-`tools/buildjlm.sh`.
+Verified on a Toshiba T2130CT (DX4) with the IBM card: Monkey Island, Dune
+II, Flashback, DOOM and SimCity 2000, and Theme Hospital with VSBPCMJ. On the
+755C, `/AUX` mixes the OPL3LPT into the laptop's output. `/LPT` is not
+available in VSBPCMT or with `/FMVOL`. FastDoom drives an OPL3LPT with no help
+from VSBPCM.
 
-## Builds
+## Card notes
 
-`tools/build.sh` runs the whole build in a Linux container (see doc/NOTES.md);
-DJGPP v2.05 and JWasm v2.17+ are required.
-The engine is VSBHDA 2.0 (upstream merged 2026-09-05: in-place ADPCM decoder,
-central ring write pointer, `/B` `/BP` buffer options, `src/hw` layout).
+### Roland SCP-55
 
- * plain — **VSBPCM.EXE**, the unified NOFM binary (ES1688 + VEW211 + SCP55
-   + MC8K + TP755 + IBMAUD)
- * `CARD=TP755` — **VSBPCMT.EXE**: the same backends PLUS the DOSBox
-   OPL3 emulation, i.e. real FM MUSIC on the FM-less 755C instead of the
-   detection-only shim. A feature flag, not a card selector.
- * `CARD=AUDIGY` — **VSBPCMA.EXE**, see below.
+The card has no FM chip and carries an MPU-401 Sound Canvas. Set the game's
+music to General MIDI on port 330 and its sound to Sound Blaster on 220; both
+play at once. Never pass `/P` or put `P=` in BLASTER: either traps 330 and
+takes the Sound Canvas away. Verified on a Pentium MMX; on a 486 digital audio
+can crackle, and `SBEMAXHZ` or `SBERTC` lower the load.
 
-`tools/buildjlm.sh` builds **VSBPCMJ.DLL** (see above) on the host with JWasm
-and Open Watcom's wlink. Jemm's `JLM.INC` is not in this repository; the
-script says where to fetch it.
+### IBM PCMCIA Audio Adapter
 
-### 16-bit protected-mode games — VSBPCM16.EXE
+A WAV player with a 16K-word sample ring on the card and no SB logic, DMA or
+FM. VSBPCM tops the ring up from the RTC and paces on the card's play
+position, so no card IRQ is needed; it pads silence when the guest falls
+behind (an empty ring kills the codec link).
 
-DPMI 0.9 gives 16-bit and 32-bit clients separate protected-mode interrupt
-tables, so the 32-bit binaries above cannot serve a 16-bit PM game — Tyrian
-and the rest of the Borland RTM / Phar Lap 286 / DOS16M catalogue. Those need
-a driver that is itself a 16-bit client:
+Output is 8-bit stereo at 11025 Hz. `/DACRATE` picks another rate,
+`SBEIBMST=0` mono for the slowest hosts, `SBEIBM16=1` 16-bit, which is the
+`/RESAMP` default. FM music: VSBPCMT `/RESAMP` (deploy/goibmf.bat), or `/LPT`.
 
-    ./tools/build16.sh        ->  ow16/VSBPCM16.EXE
+Verified on an IBM PC110 (486SX/33): DOOM and Epic Pinball. Open issue: with
+`SBEIBMST=0`, Epic Pinball's downmix was heard as one channel.
 
-built with Open Watcom (`ow16.mak` is the on-box equivalent) rather than
-DJGPP. On the box it differs from the 32-bit stack in exactly two words —
-`HDPMI16I -x` instead of `HDPMI32I -x`, and `VSBPCM16` instead of `VSBPCM`;
-see `deploy/go16es.bat` and `deploy/go16vew.bat`. Run `UNINST.EXE` before
-switching between the two: neither reliably detects the other. Both serve
-real-mode games.
+### TDK MC-8000 and DMC-9000
 
-Bench-verified on the ThinkPad 235 + KXL-C101 (2026-08-23): **Tyrian**
-(Borland RTM, 16-bit PM) with digital SFX and AdLib FM both working, and
-**Jazz Jackrabbit** clean throughout. Known wart: Tyrian's own menu shell
-runs slightly slow (jukebox and gameplay are full speed) — see
-`doc/16bit.md` for the analysis, the staged experiments, and the three port
-bugs the bench shook out. The new protected-mode interrupt trampolines
-(`src/pmisr.asm`, replacing a DJGPP libc facility Open Watcom has no
-equivalent for) are proven on both hosts; `PMISR=1 ./tools/build.sh` builds
-the 32-bit A/B binary that runs them where known-good results exist —
-re-run it after any trampoline change.
+The EMU8200 plays a ring in the card's sample DRAM at the guest's rate.
+`SBEMAXHZ` caps that rate (default 22050; use 11025 on a 486). AdLib music is
+silent; TDKSYN in the MC8KGO repository plays General MIDI on the card.
+Verified on a ThinkPad 235 and a Toshiba T2130CT. Known issue: Epic Pinball has
+a rare stutter that sounds like part of an earlier sample replaying.
 
-`doc/vdpmi.md` covers the related question of whether crazii's VDPMI could
-replace this: it cannot — it is Pentium-only, it is at its worst on 16-bit
-clients, and VSBPCM's synchronous IRQ delivery is not the design VDPMI's
-virtual PIC serves.
+### ThinkPad 755C
 
-## CardBus backend: Audigy 2 ZS Notebook
+No enabler: the driver wakes the CS4248 through ThinkPad control port 15E8h
+(index 1Ch, bit 1), a write that is only safe on a ThinkPad, so the backend
+runs only when `/CARD:TP755` names it. The 750 family and the 360PE carry the
+same codec.
 
-The odd one out: a CardBus — i.e. PCI — card rather than PCMCIA, driven by
-the SB Live/Audigy driver with a real DMA ring instead of the passthrough,
-on machines whose BIOS supports CardBus sockets (tested: ThinkPad 235,
-Pentium 233MMX). Three sound sources:
+The 755C has ISA DMA to the codec: an 8237 channel 0 ring in conventional
+memory, paced by the codec's IRQ10. Use guest DMA 1 or 3 and SB type T4
+(games with a saved SB Pro setting play stereo at this mono DSP, double
+speed), and leave out `/CF4`.
 
- * Sound Blaster digital - the usual emulation, mixed on the card
- * OPL3 (AdLib) - EMULATED here (the Audigy has no hardware OPL); costs real
-   CPU on slow machines, disable with /OPL0 when games can use MIDI instead
- * **General MIDI on the EMU10K2's own hardware voices**: a SoundFont 2
-   synthesizer inside the driver. The card renders; the host CPU does no
-   mixing. Guest MIDI is trapped at port 330h (/P330)
+VSBPCM.EXE converts guest audio to 11025 Hz (`/DACRATE`) and caps the codec
+period at 1/128 s: guest SB blocks are taken once a period, and at 43 periods
+a second DOOM2's sound effects came out quiet and choppy. VSBPCMT with its
+software OPL3 on uses the render path, with `/PS1024 /DACRATE11025`.
 
-Launch order (see deploy/ and the audigy-wt1 release notes):
+The second 3.5 mm jack is a stereo line in that the codec mixes into its
+output. `/AUX` unmutes it, so an OPL3LPT or a synth plugged in there plays
+through the laptop:
 
-    JEMM386 LOAD X=D000-DFFF     (AUD2GO maps socket registers at D000)
-    AUD2GO                       (powers the socket, assigns resources)
+    VSBPCM /CARD:TP755 /A220 /LPT3BC /AUX
+
+Verified on a 755C (486DX4/75): SBDIAG, DOOM and DOOM2 sound effects, Epic
+Pinball, Duke Nukem II. doc/tp755-handoff.md covers the internals.
+
+### Audigy 2 ZS Notebook (CardBus)
+
+A PCI card, driven by the SB Live/Audigy driver with a DMA ring, on machines
+whose BIOS supports CardBus (tested: ThinkPad 235, Pentium 233MMX). It plays
+Sound Blaster digital, software OPL3 (`/OPL0` to save CPU when a game can use
+MIDI), and General MIDI on the EMU10K2's hardware voices from a SoundFont 2
+file, trapped at port 330:
+
+    JEMM386 LOAD X=D000-DFFF
+    AUD2GO
     JLOAD QPIEMU.DLL
     HDPMI32I -r -x -v
     SET AUDSF2=C:\VSBPCM\TIMGM6MB.SF2
-    VSBPCMA /A220 /P330 /OPL0
+    VSBPCMA /CARD:AUDIGY /A220 /P330 /OPL0
 
-Configure games: Music = General MIDI port 330, Sound = Sound Blaster
-A220 I7 D1. No soundfont ships with this repository: TimGM6mb (GPLv2, the
-tested one) comes from Debian's timgm6mb-soundfont package or MuseScore 1.x;
-any small/mid GM SoundFont 2 file named by AUDSF2 works.
+No SoundFont ships here; TimGM6mb (GPL v2, tested) comes from Debian's
+timgm6mb-soundfont package or MuseScore 1.x. `AUDWTGAIN` trims the level in
+centibels. Small and mid-size GM fonts are stable; large layered fonts
+(GeneralUser GS) can hang the machine mid-song. Chip tools: tools/audigy/.
 
-Wavetable knobs: AUDSF2 (font path; unset = wavetable off), AUDWTGAIN
-(level trim in centibels), AUDWTDEMO (play a scale at boot as a smoke test).
-Further AUDWT* variables are bisect/diagnostic switches — see src/hw/emu_wt.c.
+## Building
 
-Alpha limits: small/mid GM fonts are the stable path — large layered fonts
-(GeneralUser GS) can hard-wedge the machine mid-song, a voice-engine
-interaction still under investigation on this silicon; some instrument
-decays run slightly short; playback only, no MPU MIDI-in.
+| Command | Output |
+|---------|--------|
+| `tools/build.sh` | VSBPCM.EXE |
+| `CARD=TP755 tools/build.sh` | VSBPCMT.EXE (`OPLGEN=TABLELOG` or `HANDLER` picks dbopl's wave generator) |
+| `CARD=AUDIGY tools/build.sh` | VSBPCMA.EXE |
+| `tools/build16.sh` | VSBPCM16.EXE (Open Watcom) |
+| `tools/buildjlm.sh` | VSBPCMJ.DLL (JWasm and wlink; fetch Jemm's JLM.INC as the script says) |
 
-Chip-level bench tools (cbinit, fxvol, dacvol, the audmix mixer) live in
-tools/audigy/.
-
-## The Roland SCP-55
-
-`/CARD:SCP55`, after bringing the card up with SCP55GO. `/BASE` is 330, which
-is the enabler's own default, so you can leave it off.
-
-The card has no FM chip, but it does carry a real MPU-401 Sound Canvas. So set
-the game's music to **General MIDI on port 330** rather than AdLib, and its
-digital sound to Sound Blaster on 220 — both play at once, and the music is a
-GS synth instead of emulated OPL. Never pass `/P`, and keep `P=` out of
-BLASTER: either traps 330 and takes the Sound Canvas away.
-
-Verified on a Pentium MMX. On 486 machines digital audio plays but can crackle.
-`SBEMAXHZ` caps the codec rate and the pump rate follows it; `SBERTC` pins the
-pump directly. Lower is safer, at the cost of bandwidth.
-
-Why the card needs its own backend, and why it cannot pace audio from a card
-interrupt, is written up in the enabler repository.
-
-## The IBM PCMCIA Audio Adapter
-
-`/CARD:IBMAUD`, after bringing the card up with IBMAUDGO. The card needs no
-IRQ. `/BASE` is 250, IBMAUDGO's default, so you can leave it off.
-
-This card is a WAV player. It has no Sound Blaster logic, no DMA and no FM
-chip: an IBM ASIC in front of a serial codec keeps a 16K-word sample ring on
-the card, the host appends samples to it, and the card reports how far it has
-played. The backend tops the ring up from the RTC pump and paces on that
-position, so the card needs no interrupt. The ring must never run dry while
-playing (the codec link dies until the card is set up again), so the pump
-pads silence when the guest falls behind, and closes the card after a second
-with nothing to play.
-
-The codec runs one fixed format and the guest's audio is converted to it:
-8-bit stereo at 11025 Hz by default, one card word per frame, which is 11025
-port writes a second. With `/RESAMP` the engine does the mixing, software FM
-included, and the default is 16-bit stereo (22050 writes a second): cut to 8
-bits, FM note tails and fades come through grainy.
- * `/DACRATE` picks another rate from the codec's table (22050 for 22 kHz
-   titles, at twice the writes).
- * `SBEIBMST=0` selects mono, two samples per word, for the slowest hosts.
-   Open issue: in Epic Pinball the mono downmix was heard as one of the two
-   channels.
- * `SBEIBM16=1` or `SBEIBM16=0` forces 16-bit or 8-bit output either way.
-
-Direct DAC (DSP command 10h) carries no rate. VSBPCM measures it as samples
-received against the card's own play position and feeds the passthrough at
-that rate; with the card closed, the RTC ticks stand in until it plays. A
-trim on that rate keeps the card's queue at its target while the game's own
-rate wanders (a game that writes from its timer interrupt slows down when it
-runs short of CPU), and a pause in the game's samples is played as a pause.
-
-FM music takes the software OPL build, VSBPCMT.EXE, with `/RESAMP`: the
-passthrough path never runs the FM mixer (`deploy/goibmf.bat`). That build
-needs an FPU for its table setup. With the plain build the detection shim
-answers 388h instead, so games still find an AdLib and go on to use the
-digital, with FM silent.
-
-Verified on an IBM PC110 (486SX/33) at T4: DOOM (mono) and Epic Pinball
-(stereo). On a Toshiba T2130CT (486DX4) with VSBPCMT `/RESAMP`: Monkey Island's
-AdLib music, slowing a little in its densest passages. The playback interface
-was recovered by I/O trace of IBM's own DOS WAV player.
-
-## The TDK MC-8000 and DMC-9000
-
-`/CARD:MC8K`, after bringing the card up with MC8KGO. `/BASE` can be left off:
-the backend looks for the card at 240h (MC-8000) and then 260h (DMC-9000).
-
-These cards carry an EMU8200 wavetable chip and its sample DRAM, with no Sound
-Blaster logic, no DMA and no FM chip. The backend streams the guest's digital
-audio into a ring in that DRAM and loops a voice over it, so the chip plays
-the guest's own rate at exact pitch. `SBEMAXHZ` caps that rate (22050 by
-default; above it the feed decimates), and 486-class hosts want
-`SBEMAXHZ=11025`.
-
-The detection shim answers 388h, so AdLib music is silent. For music, TDKSYN
-in the MC8KGO repository plays General MIDI on the card's EMU8200.
-
-Verified on a ThinkPad 235, and on a Toshiba T2130CT (486DX4) with DOOM and
-Epic Pinball. Known issue: Epic Pinball has a rare stutter that sounds like
-part of an earlier sample replaying.
-
-## The TP755 planar backend
-
-`/CARD:TP755` drives the ThinkPad 755C's internal Crystal CS4248 (AD1848/WSS
-class, FRU 84G4289; the 750 family and 360PE carry the same planar codec).
-No enabler is needed — the driver wakes the codec itself (ThinkPad control
-port 0x15E8, index 0x1C, bit 0x02) at detect. Because that write must happen
-before the machine can be identified as a ThinkPad at all, this backend is
-opt-in: it does nothing unless `/CARD:TP755` names it.
-
-Unlike the PCMCIA passthrough, this machine HAS ISA DMA to the planar codec,
-so audio runs on a real 8237 channel-0 autoinit ring in DOS conventional
-memory, and the codec's period interrupt (IRQ10, planar-wired) is the engine
-clock. Guest DMA must therefore not be channel 0 — use `/D1` or `/D3`.
-
-Guest PCM takes the passthrough tap by default: the raw guest stream is
-stepped onto a fixed codec rate (11025 Hz unless `/DACRATE`) with the IBMAUD
-frame stepper and written into the ring ahead of the 8237 play position,
-which is also the clock that sets the rate of direct DAC (DSP command 10h).
-`SBEPTLAT` sets the queued-audio target (default 80 ms). The tap caps the
-codec period at 1/128 s (256 bytes at 11025 Hz, a 172 Hz interrupt) whatever
-`/PS` says: the guest's SB blocks are taken and its SB IRQs delivered once a
-period, and at 43 Hz (`/PS1024`) DOOM2's sound effects came out quiet and
-choppy. The engine render path is used instead under `/RESAMP`, and in
-VSBPCMT.EXE while its software OPL3 is on (the default; `/OPL0` turns it
-off), since a tap never runs the mixer.
-
-The 755C's second 3.5 mm jack is a stereo line in wired to the codec's AUX1
-input, which mixes into the output in analog (no ADC, no CPU). `/AUX` unmutes
-it: an OPL3LPT or an external synth plugged in there plays through the 755's
-speaker or headphone jack. `/AUXn` sets it n x 1.5 dB down (0-23).
-
-For FM music rather than detection-only, build `CARD=TP755` (VSBPCMT.EXE),
-which compiles the DOSBox OPL3 emulation back in. FM traffic is then tamed by
-a v86 fast path: delay reads answered in-stub, and non-timer register writes
-buffered through a 1024-entry ring drained each codec tick — see
-`doc/tp755-handoff.md` for the architecture, the IRQ0 guardian (self-healing
-engine clock) and the on-box telemetry map.
-
-Notes that matter on this box:
- * `/T4` (SB 2.0), not `/T3`: games with saved SB Pro configs push stereo at
-   this mono DSP and play double-speed.
- * No `/CF4` (suspected freeze aggravator here, unresolved).
- * `/DACRATE11025 /PS1024` is the DX4/75 envelope with OPL emulation on
-   (VSBPCMT, render path).
-
-Status, bench-verified on a 755C (486DX4/75):
- * Digital (SB voice/SFX): daily-driver ready — SBDIAG full pass, DOOM with
-   SFX, Epic Pinball, Duke Nukem II; DOOM2 SFX through the tap.
- * FM music, real-mode games (Monkey Island 1 class): plays with stutter
-   during dense passages; the engine self-heals and the game survives.
- * FM music, very dense scores (Monkey Island 2 class): plays, but the
-   sustained trap load runs the guest in slow motion and it eventually
-   crashes on its own — out of envelope on a DX4/75.
- * DOOM WITH music (protected-mode FM): out of envelope, crashes — run DOOM
-   with SFX only. The per-access port-trap cost is the limit, not the
-   synthesizer; see doc/tp755-handoff.md ("VSBHDA-as-JLM") for the fix.
-
-### OPL wave generator (OPLGEN)
-
-The dbopl wave generator is selectable at build time:
-`OPLGEN=TABLEMUL` (default), `TABLELOG` (multiply-free, fixes an upstream
-DOSBox operator-precedence bug in that path), or `HANDLER` (smallest
-tables) — outputs VSBPCMT.EXE / VSBPCMTL.EXE / VSBPCMTH.EXE. On the
-DX4/75 at 11025 Hz TABLEMUL and TABLELOG measure identical; the switch
-exists for smaller-cache machines.
-
-## Emulated modes/cards
-
-8-bit, 16-bit, mono, stereo, high-speed;
-Sound Blaster 1.0, 2.0, Pro, Pro2, 16.
-
-## Requirements
-
- * HDPMI32i v3.21+ - DPMI host with port trapping; 32-bit protected-mode.
-   Get it from https://github.com/Baron-von-Riedesel/HX (BIN\HDPMI32i.EXE
-   inside the HXRT release zip, e.g. HXRT223.zip). Note it must be the "i"
-   variant, and stock v3.20 or older fails with "Failed installing IO port
-   trap for protected-mode".
- * JEMM386/JEMMEX + JLOAD QPIEMU.DLL - V86 monitor with port trapping;
-   v86-mode. Get Jemm v5.84+ from https://github.com/Baron-von-Riedesel/Jemm -
-   JEMM386.EXE, JLOAD.EXE and QPIEMU.DLL all ship in that one zip and MUST
-   come from the same release (mixed generations refuse to load, lose
-   real-mode support, or hang).
- * An enabler that powers/configures the card (not needed for the 755C):
-   ES1688GO https://github.com/zikolas/es1688go (v1.4+ for game-native ESFM),
-   VEW21XGO https://github.com/zikolas/vew21xgo (2.5+ for the CF-VEW212),
-   or SCP55GO
-   https://github.com/zikolas/scp55-enabler.
+build.sh runs DJGPP v2.05 and JWasm v2.17+ in a Linux container (doc/NOTES.md);
+`RELEASE=1` leaves out the per-tick telemetry. The engine is VSBHDA 2.0.
+Released binaries always correspond to the tagged source in this repository.
 
 ## Credits and licence
 
@@ -544,58 +294,55 @@ VSBPCMCIA is GNU General Public License v2 (see COPYING). It is built on the
 projects below; each entry says what came from where, and copyright in those
 parts stays with their authors.
 
- * VSBHDA: https://github.com/Baron-von-Riedesel/VSBHDA - the SB emulation
-   core this is a fork of
- * MPXPlay (C) PDSoft (Attila Padar): https://mpxplay.sourceforge.net/ - the
-   au_cards sound-card driver interface every backend here implements
- * SBEMU: https://github.com/crazii/SBEMU - the ES1688 passthrough backend
-   was originally developed against SBEMU, and the DPMI helper API the
-   backends call (DPMI_InstallISR and friends, the pds_* helpers) keeps
-   crazii's shape; the DJGPP implementations behind it were written here
- * Linux ALSA, sound/isa/wss/wss_lib.c (GPL v2) - the ThinkPad
-   system-control twiddle that wakes the 755C's planar codec (port 0x15E8,
-   index 0x1C, bit 0x02) in src/hw/sc_tp755.c. sc_es1688.c separately cites
-   ALSA for one ES1688 reset behaviour (reset bit 1 clears the FIFO): that is
-   a documented register effect we cross-checked, not code taken from it --
-   noted here for completeness rather than because it is owed
- * Linux ALSA snd-emu10k1 (GPL v2), (C) Jaroslav Kysela and contributors -
-   the EMU10K2/CA0108 register definitions (src/hw/EMU10K1.H), the Audigy 2
-   ZS Notebook initialisation, the BAR+0x38 wake-up and the WM8768 DAC
-   sequences. The bench tools in tools/audigy/ take their chip knowledge from
-   the same source (see tools/audigy/README.md)
- * Linux ALSA, sound/isa/sb/emu8000.c (GPL v2 or later), (C) Jaroslav Kysela,
-   Steve Ratcliffe and Takashi Iwai - the EMU8000 initialisation arrays in
-   src/hw/emu8kini.h, carried verbatim (emu8000.c notes they come from
-   Creative's ADIP), which sc_mc8k.c loads into the TDK cards' EMU8200
- * DOSBox's DBOPL (GPL v2) - OPL3 emulation, linked only by the builds that
-   need it (CARD=TP755, CARD=AUDIGY)
- * FastDoom: https://github.com/viti95/FastDoom - the OPL3LPT write sequence
-   (control-port values and the settle reads, FASTDOOM/ns_sbmus.c) that
-   src/FMSHIM.C, src/RMCODE1.ASM and jlm/VSBPCMJ.ASM send
- * Jemm (Japheth): https://github.com/Baron-von-Riedesel/Jemm - the JLM
-   interface jlm/VSBPCMJ.ASM is built against (JLM.INC, not carried here),
-   and the public-domain QPIEMU and IOTRAP samples its module shape and its
-   hand-over to VSBPCM's stub follow
- * ADLiPT: https://github.com/pdewacht/adlipt - the rule for patching FM
-   delay reads (index 20h or above, `IN AL,DX` to `NOP`), which VSBPCMJ
-   applies to real-mode games and SBEFMPATCH to protected-mode ones; no code
-   is taken from it
- * TinySoundFont (MIT, vendored in tsf/) - optional software-synth fallback;
-   the hardware wavetable does not use it
+* VSBHDA: https://github.com/Baron-von-Riedesel/VSBHDA - the SB emulation
+  core this is a fork of
+* MPXPlay (C) PDSoft (Attila Padar): https://mpxplay.sourceforge.net/ - the
+  au_cards sound-card driver interface every backend here implements
+* SBEMU: https://github.com/crazii/SBEMU - the ES1688 passthrough backend was
+  originally developed against SBEMU, and the DPMI helper API the backends
+  call (DPMI_InstallISR and friends, the pds_* helpers) keeps crazii's shape;
+  the DJGPP implementations behind it were written here
+* Linux ALSA, sound/isa/wss/wss_lib.c (GPL v2) - the ThinkPad system-control
+  twiddle that wakes the 755C's planar codec (port 0x15E8, index 0x1C, bit
+  0x02) in src/hw/sc_tp755.c. sc_es1688.c separately cites ALSA for one ES1688
+  reset behaviour (reset bit 1 clears the FIFO), a documented register effect
+  we cross-checked, not code taken from it
+* Linux ALSA snd-emu10k1 (GPL v2), (C) Jaroslav Kysela and contributors - the
+  EMU10K2/CA0108 register definitions (src/hw/EMU10K1.H), the Audigy 2 ZS
+  Notebook initialisation, the BAR+0x38 wake-up and the WM8768 DAC sequences.
+  The bench tools in tools/audigy/ take their chip knowledge from the same
+  source (see tools/audigy/README.md)
+* Linux ALSA, sound/isa/sb/emu8000.c (GPL v2 or later), (C) Jaroslav Kysela,
+  Steve Ratcliffe and Takashi Iwai - the EMU8000 initialisation arrays in
+  src/hw/emu8kini.h, carried verbatim (emu8000.c notes they come from
+  Creative's ADIP), which sc_mc8k.c loads into the TDK cards' EMU8200
+* DOSBox's DBOPL (GPL v2) - OPL3 emulation, linked only by the builds that
+  need it (CARD=TP755, CARD=AUDIGY)
+* FastDoom: https://github.com/viti95/FastDoom - the OPL3LPT write sequence
+  (control-port values and the settle reads, FASTDOOM/ns_sbmus.c) that
+  src/FMSHIM.C, src/RMCODE1.ASM and jlm/VSBPCMJ.ASM send
+* Jemm (Japheth): https://github.com/Baron-von-Riedesel/Jemm - the JLM
+  interface jlm/VSBPCMJ.ASM is built against (JLM.INC, not carried here), and
+  the public-domain QPIEMU and IOTRAP samples its module shape and its
+  hand-over to VSBPCM's stub follow
+* ADLiPT: https://github.com/pdewacht/adlipt - the rule for patching FM delay
+  reads (index 20h or above, `IN AL,DX` to `NOP`), which VSBPCMJ applies to
+  real-mode games and SBEFMPATCH to protected-mode ones; no code is taken
+  from it
+* TinySoundFont (MIT, vendored in tsf/) - optional software-synth fallback;
+  the hardware wavetable does not use it
 
 Written here and (C) 2026 zikolas, GPL v2 with the rest of the tree: the
 passthrough architecture (ring, RTC pump, tick-credit pacing, frame stepper,
 watchdogs); the backends src/hw/sc_es1688.c, sc_vew211.c, sc_scp55.c (forked
 from sc_vew211.c), sc_tp755.c, sc_mc8k.c and sc_ibmaud.c, built on the
-interfaces and sequences credited above; the codec
-bring-up recipes worked out on the bench; the 755C's 8237 DMA ring; the
-telemetry; the SF2 reader src/hw/emu_sf2.c, written from the published
-SoundFont 2.01 specification; and the Audigy wavetable src/hw/emu_wt.c,
-which rests on ALSA's register-level work. Chip register semantics come from
-the ESS and Crystal datasheets, which are facts rather than anyone's code.
+interfaces and sequences credited above; the codec bring-up recipes worked out
+on the bench; the 755C's 8237 DMA ring; the telemetry; the SF2 reader
+src/hw/emu_sf2.c, written from the published SoundFont 2.01 specification;
+and the Audigy wavetable src/hw/emu_wt.c, which rests on ALSA's register-level
+work. Chip register semantics come from the ESS and Crystal datasheets, which
+are facts rather than anyone's code.
 
 "(C) 2026 zikolas" means the code written here and nothing more. No claim is
 made over anyone else's work, and anything traced to another project is
 credited above. Corrections welcome.
-
-Released binaries always correspond to the tagged source in this repository.
