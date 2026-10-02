@@ -1,0 +1,8 @@
+format windows nt dll
+runtime native
+name VSBPCMJ.DLL
+file VSBPCMJ.OBJ
+export _ddb.1
+option quiet
+option start='_DllMain@12'
+option map=VSBPCMJ.MAP

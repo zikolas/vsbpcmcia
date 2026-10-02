@@ -73,6 +73,12 @@ release never reads them. The rare-event bytes stay in every build.
 | 0x4FC/0x4FD | TSC boxes: longest outermost ISR pass, 256-cycle units; no-TSC boxes: PT bytes >> 4, 16-bit |
 | 0x4FE | PT_Feed ring-overfeed clamps (goal: 0) |
 
+IBMAUD (sc_ibmaud.c's header has its full map): 0x4F4 RTC revivals, 0x4F6
+codec links lost, 0x4FA arms, 0x4FE feed frames dropped for want of room.
+In builds without `SNDISR_TELEMETRY` two per-tick bytes change jobs: 0x4F5
+counts silence padded into a live tap stream (a gap in the audio), 0x4F8
+play-position reads refused as mid-step reads (goal for both: 0).
+
 Rate measurements: read 0x46C (BIOS tick dword) and the counters in ONE
 mem_read (0x46C, 148 bytes spans both) and clock deltas against the BIOS
 tick -- wall-clock between tool calls is unreliable.
@@ -158,7 +164,10 @@ it from a remote-control agent kills the agent.)
   buffer-half desync from emulated IRQ cadence around 0xD0/0xD4 pause/resume
   (vsb.c). Clears on stream restart. Full version of TH untested.
 * **Direct-DAC under passthrough** uses the render path with a poor rate
-  estimate (pre-existing; SC2000 uses DSP 0x14, not direct-DAC).
+  estimate on cards without a `clock` op (pre-existing; SC2000 uses DSP
+  0x14, not direct-DAC). IBMAUD has one: there `SNDISR_DacFeed` measures the
+  guest's rate against the card's play position and feeds the tap at it
+  (see "VSBPCMJ and the direct-DAC ring" below).
 * **ADPCM** (<8-bit) falls back to the full render path, paced by the broken
   AU sawtooth (rare in practice).
 * **CS4231A fade dropouts are FIFO physics (closed 2026-07-26).** Some
@@ -361,3 +370,93 @@ On an SB-compatible card this is a driver-only concern -- a direct-DAC guest
 needs no DMA, so it can simply talk to the real chip with the enabler alone
 and no vsbpcm loaded. On the CS4231A, CS4248 and EMU8200 cards there is no SB
 silicon to fall back to, so the render tail is the only path and this matters.
+
+## VSBPCMJ and the direct-DAC ring
+
+`jlm/VSBPCMJ.ASM` is a Jemm loadable module that serves the dense V86 ports
+at ring 0 (README, "VSBPCMJ.DLL"). It shares one block of DOS memory with
+VSBPCM (`src/JLMSHARE.H`, layout version 5); the block's segment is on
+VSBPCM's load line. Without the JLM the same struct is a static in `ptrap.c`
+and carries only the direct-DAC ring, which vsb.c fills for protected-mode
+and QPI-trapped guests.
+
+| offset | written by | meaning |
+|---|---|---|
+| 00-17 | VSBPCM | signature `VSBJ`, layout version, ring size, LPT, flags, SB base, stub entry, write-status cell |
+| 18, 19 | vsb.c, JLM | the next DSP write is a command byte; a 10h was taken and its sample is next |
+| 1A-1F | JLM, sndisr.c | ring producer and consumer index; the rate direct DAC is fed at (Hz) |
+| 20-3F | JLM | DAC samples received and lost (ring full); FM writes, status reads, delay reads patched; DSP writes passed to the stub; write-status reads; its version once armed |
+| 40-57 | JLM | the last write-status poll and the last DAC write: linear address and 8 code bytes |
+| 58-77 | sndisr.c | drains, samples fed, flushed at stream end, longest time between drains, drains cut by card room, drains held for a first estimate, ring peak, streams, rate changes, sample-less ticks |
+| 78-7C | sndisr.c, ptrap.c | sound interrupts counted; pump guard on |
+| 80-8B | JLM | RTC periodic interrupt switched back on, IRQ8 unmasked, stuck flags cleared; write-status polls patched |
+| 8C-9F | ptrap.c, JLM | the stub's PIC word (FFFFh while an SB interrupt is emulated); EOIs done at ring 0; 10h-and-sample pairs made one fault; samples put by the V86 producer; sequences made calls to it |
+| A0 | both | the ring, 2048 samples |
+| 8A0 | JLM | its copy of the V86 ring producer (16-bit code, called with the sample in AH) |
+| 900-90D | sndisr.c | lowest and highest one-second arrival rate (Hz); most card room left unfilled while samples arrived; the fill trim now, lowest and highest (Hz); gaps filled with a held sample |
+
+The rate measurement (`SNDISR_DacFeed`) counts samples received per unit of
+the card's `clock` op: in 1/16 s windows, folded into a running total that
+remembers about 16 s, checked once a second for a guest that changed rate.
+The first tick after a pause only syncs, a gap under 1/8 s counts as part of
+the stream, and half a second without a sample ends it. IBMAUD's clock is
+the card's play position while it plays and RTC ticks while it is closed.
+
+The tap is fed at that estimate with a fill trim. e = samples waiting in the
+ring minus the card's room below its target, in units of 1/12 s of samples;
+the trim is 0.3 of a negative e (the card short: an underrun coming) or 0.05
+of a positive one (only latency), plus an integral of 1/1024 of e per tick,
+within 12%. The integral stands still while the direct part alone is at the
+limit, and nothing is trimmed in a stream's first half second. A look that
+finds no samples marks a gap; when samples resume and the card is more than
+1/48 s short, the shortfall is filled with the first new sample held, as a
+real SB holds its DAC through the guest's pause. IBMAUD's stepper takes each
+rate change without a click (accumulator rescaled, previous frame kept).
+
+Test/JLMTEST.ASM (run it from V86 with VSBPCM loaded): `JLMTEST S` prints the
+block; `JLMTEST` alone also runs AdLib detection, FM writes with their delay
+reads and direct-DAC samples, and the counters again; `JLMTEST P [hz]` is the
+busy-loop cost of a fast PIT (bare ISR, Another World's DAC ISR, and three
+PUSHF/CLI/POPF); `JLMTEST T` reads IBMAUD's play position back to back;
+`JLMTEST W [s] [us]` plays a 440 Hz tone by direct DAC in Another World's
+code shape, optionally blocking interrupts for [us] every other BIOS tick.
+
+Bench, Another World on the T2130CT (IBMAUD, DX4/75, 2026-10-02):
+
+* The game's IRQ0 handler mixes four channels and writes one sample per PIT
+  tick, polling the write status before the 10h and before the sample
+  (`IN AL,DX / OR AL,AL / JS` back): four QPI traps per sample, unplayable.
+  With VSBPCMJ the polls are patched, the 10h and sample pair is made one
+  fault, then the whole sequence a call into the ring producer: no traps.
+* IRQ0 heartbeat: 53 us per 10 kHz PIT tick for the stack with it, and the
+  RTC pump was found switched off 20 times in one run. The pump guard took
+  its place. JLMTEST P now: 21.9 us a bare tick (the EOI), 35.4 us in
+  Another World's shape (the sample and the card feed), 9.0 under Jemm
+  alone. PUSHF/CLI/POPF cost 0.13 us each, so the CPU's VME is in use.
+* IBMAUD's play position (346h) can be read mid-step: a read that lands on
+  the count's increment returns the new high bits over the old low ones
+  (2C77h, 2C7Fh, 2C78h; up to 2^k - 1 ahead on a carry into bit k), about
+  one read in 14000 back to back (`JLMTEST T`). ib_track took the step back
+  to the true count as 16K words played, its clamp emptied the queue, and
+  the pump padded 40 ms of silence into a full card every 20-40 s; the fill
+  trim then pitched the music down to win back a shortfall that was never
+  there. A position is now two reads that agree, and a step longer than the
+  queue is refused for 16 ticks (IAC 0x4F8 counts refusals in builds without
+  SNDISR_TELEMETRY). Every IBMAUD stream had the same exposure.
+* IBMAUD's stepper averaged guest frames whenever the guest rate was above
+  the codec's. Near 1:1 that averages two frames now and then: a frame
+  dropped every few hundred, a grit. Direct DAC trimmed past 11025 Hz did
+  it, and an SB time constant of 166 (11111 Hz) would too. It averages only
+  above 3:2 now and interpolates below.
+* Result: no silence padded into live audio, no position reads refused, the
+  card never more than 9 ms short of its target, the trim within -1.75% and
+  +2.7%. A crackle remains in the heaviest scenes: the game's own mixer short
+  of CPU (its last 0.2 s of samples hold no repeated or stuck runs, and
+  `JLMTEST W` stays clean with interrupts held off 3 ms in every 110).
+
+Next, by expected gain for a 486: the EOI trap (13 us a tick) only while an
+SB interrupt is emulated; FM for the software-OPL builds (VSBPCMT, VSBPCMA),
+whose V86 FM still pays one QPI nested execution per access (41 per
+register write with the AdLib padding): the JLM could write the register
+pairs into the OPL ring rmcode1.asm already fills for `PTRAP_DrainOplRing`,
+answer status from its timer model, and patch the delay reads.

@@ -165,7 +165,10 @@ write-status answer and the `/LPT` forward — disarmed, for an A/B),
 strobe, default 6; `SBELPTCLI=0` leaves interrupts on in the stub),
 `SBEFMPATCH=1` (VSBPCM.EXE, with the FM shim: rewrite a protected-mode
 game's FM delay reads, the dummy `IN AL,DX` after each register write, to
-`NOP` in its code so they stop trapping; count in IAC 0x4F1), `ESNOI8`
+`NOP` in its code so they stop trapping; count in IAC 0x4F1; with VSBPCMJ
+loaded, real-mode games get this by default and `SBEFMPATCH=0` turns it
+off), `SBEDSPPATCH=0`, `SBEJLMPIC=0` and `SBENOJLM=1` (VSBPCMJ, see
+below), `ESNOI8`
 (disable the IRQ0 watchdog heartbeat), `ESIRQ5`, `IRQTONE`, `FIFOTEST`, and
 `SBEIBMST` / `SBEIBM16` (IBMAUD output format, see its section below).
 
@@ -203,6 +206,67 @@ tempo after the opening. FastDoom has its own OPL3LPT driver, which needs no
 trapping. `/LPT` is not available in VSBPCMT (its V86 stub keeps 388h writes
 for dbopl), has no V86 stub in VSBPCM16, and does not combine with `/FMVOL`.
 
+### VSBPCMJ.DLL: FM and direct DAC at ring 0
+
+A real-mode game reaches VSBPCM through Jemm's QPIEMU, which runs VSBPCM's
+V86 stub as a nested execution for every port access. Two kinds of traffic
+are too dense for that on a 486: FM from a real-mode driver (thousands of
+register writes a second, each padded with status reads), and direct DAC
+(DSP command 10h and a sample byte, per sample, from a timer interrupt at the
+sample rate). VSBPCMJ.DLL is a Jemm loadable module that serves those ports
+at ring 0, one fault per access, and leaves every other port on QPI:
+
+    JLOAD QPIEMU.DLL
+    JLOAD VSBPCMJ.DLL
+    HDPMI32I -r -x -v
+    VSBPCM /CARD:IBMAUD /A220 /LPT
+
+VSBPCM finds it at load, arms it, and keeps the ports it took off its own
+QPI traps; the load line says what it serves. Protected-mode games still
+reach VSBPCM through HDPMI, as before.
+
+ * FM, while the timer shim owns the FM ports (no chip, `/FMSHIM`, `/LPT`):
+   0x388-0x38B and the SB-base aliases. Status comes from the shim's timer
+   model and `/LPT` writes go to the OPL3LPT. A status read while the last
+   index written is 20h or above is delay padding, and its `IN AL,DX` is
+   rewritten to `NOP` in the game's code (`SBEFMPATCH=0` keeps them).
+   Theme Hospital's Miles FM driver runs in V86, and its music, slow from
+   the start before, plays normally with VSBPCMJ on a DX4/75.
+ * Direct DAC: the DSP write port (base+0Ch). Write-status reads are
+   answered at ring 0, and command 10h with its sample goes into a ring in
+   DOS memory that VSBPCM drains on each tick; any other DSP write is passed
+   to VSBPCM's stub the way QPIEMU passes it. The game's code is patched as
+   it runs: a write-status busy-wait (`IN AL,DX`, a test, a branch back to
+   the `IN`) loses its `IN`, since this DSP is never busy; the `OUT` of a
+   10h that a sample write follows is dropped, so a sample costs one fault;
+   and Another World's exact sequence becomes a far call into a copy of the
+   ring's producer in that DOS memory, so its samples cost none
+   (`SBEDSPPATCH=0` leaves the game's code alone).
+ * Port 20h: a game that plays direct DAC from its timer interrupt sends an
+   EOI per sample. VSBPCMJ does them at ring 0 and passes them to VSBPCM
+   only while VSBPCM is delivering an emulated SB interrupt (`SBEJLMPIC=0`
+   leaves port 20h on QPI).
+ * The IBM card's sound interrupt is the RTC's periodic interrupt. VSBPCMJ
+   watches VSBPCM's interrupt count from the game's own port accesses; when
+   the count stands still for twice its usual span, it switches the RTC's
+   periodic interrupt back on or unmasks IRQ8, and after two RTC seconds
+   clears a stuck interrupt flag. VSBPCM then leaves out the IBM backend's
+   IRQ0 heartbeat, which cost two mode switches per timer tick.
+
+`SBENOJLM=1` leaves VSBPCMJ loaded and unarmed, for an A/B. Measured on a
+T2130CT (DX4/75) with `Test/JLMTEST.ASM`: FM register writes with their
+padding, 1456 a second through QPI and 20222 through VSBPCMJ; direct-DAC
+samples, 5200 a second through QPI and 36400 through VSBPCMJ. A 10 kHz timer
+tick in Another World's shape costs about 35 us there with VSBPCM and
+VSBPCMJ loaded, against 9 us under Jemm alone: about 13 for the EOI and 13
+for the sample and VSBPCM's feed to the card. Another World plays in its
+normal audio mode. The crackle left in its heaviest scenes is the game's own
+mixer short of CPU: a 440 Hz tone through the same path (`JLMTEST W`)
+stays clean with the game's interrupts held off 3 ms in every 110. VSBPCMJ
+needs a 32-bit build (VSBPCM16 does not look for it) and Jemm386/JemmEx 5.84
+or later, and has been run with VSBPCM.EXE on IBMAUD; build it with
+`tools/buildjlm.sh`.
+
 ## Builds
 
 `tools/build.sh` runs the whole build in a Linux container (see doc/NOTES.md);
@@ -216,6 +280,10 @@ central ring write pointer, `/B` `/BP` buffer options, `src/hw` layout).
    OPL3 emulation, i.e. real FM MUSIC on the FM-less 755C instead of the
    detection-only shim. A feature flag, not a card selector.
  * `CARD=AUDIGY` — **VSBPCMA.EXE**, see below.
+
+`tools/buildjlm.sh` builds **VSBPCMJ.DLL** (see above) on the host with JWasm
+and Open Watcom's wlink. Jemm's `JLM.INC` is not in this repository; the
+script says where to fetch it.
 
 ### 16-bit protected-mode games — VSBPCM16.EXE
 
@@ -332,6 +400,13 @@ bits, FM note tails and fades come through grainy.
    Open issue: in Epic Pinball the mono downmix was heard as one of the two
    channels.
  * `SBEIBM16=1` or `SBEIBM16=0` forces 16-bit or 8-bit output either way.
+
+Direct DAC (DSP command 10h) carries no rate. VSBPCM measures it as samples
+received against the card's own play position and feeds the passthrough at
+that rate; with the card closed, the RTC ticks stand in until it plays. A
+trim on that rate keeps the card's queue at its target while the game's own
+rate wanders (a game that writes from its timer interrupt slows down when it
+runs short of CPU), and a pause in the game's samples is played as a pause.
 
 FM music takes the software OPL build, VSBPCMT.EXE, with `/RESAMP`: the
 passthrough path never runs the FM mixer (`deploy/goibmf.bat`). That build
@@ -465,6 +540,17 @@ parts stays with their authors.
    Creative's ADIP), which sc_mc8k.c loads into the TDK cards' EMU8200
  * DOSBox's DBOPL (GPL v2) - OPL3 emulation, linked only by the builds that
    need it (CARD=TP755, CARD=AUDIGY)
+ * FastDoom: https://github.com/viti95/FastDoom - the OPL3LPT write sequence
+   (control-port values and the settle reads, FASTDOOM/ns_sbmus.c) that
+   src/FMSHIM.C, src/RMCODE1.ASM and jlm/VSBPCMJ.ASM send
+ * Jemm (Japheth): https://github.com/Baron-von-Riedesel/Jemm - the JLM
+   interface jlm/VSBPCMJ.ASM is built against (JLM.INC, not carried here),
+   and the public-domain QPIEMU and IOTRAP samples its module shape and its
+   hand-over to VSBPCM's stub follow
+ * ADLiPT: https://github.com/pdewacht/adlipt - the rule for patching FM
+   delay reads (index 20h or above, `IN AL,DX` to `NOP`), which VSBPCMJ
+   applies to real-mode games and SBEFMPATCH to protected-mode ones; no code
+   is taken from it
  * TinySoundFont (MIT, vendored in tsf/) - optional software-synth fallback;
    the hardware wavetable does not use it
 

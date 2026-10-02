@@ -36,6 +36,11 @@ uint8_t PTRAP_UntrappedIO_IN(uint16_t port);
  * reads without a mode switch; NULL without real-mode support */
 uint8_t *PTRAP_DspStatusCell( void );
 
+#if DACRING
+/* VSBPCMJ.DLL: stop its pump guard (unload, before the card closes) */
+void PTRAP_JlmQuiesce( void );
+#endif
+
 
 #ifdef CARD_TP755
 /* OPL write ring (v86 stub producer, see rmcode1.asm/ptrap.c) */

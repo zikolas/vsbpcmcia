@@ -75,6 +75,14 @@
 #define PT0V86    1   /* 1=support read access to v86 page table 0 */
 #define HOSTRT    0   /* 0=protect SB irq, so it's not modified by programs; must match setting in SBISR.ASM */
 #define IRQONPORTACC 0 /* v2.0: 1=allow hw sound IRQs when IF==0 */
+/* 1=direct DAC (DSP cmd 10h) through the shared ring of jlmshare.h, fed to
+ * a passthrough card at a measured rate, and VSBPCMJ.DLL support. 32-bit
+ * build only: VSBPCM16 keeps vsb.c's DirectBuffer and its DGROUP budget. */
+#ifdef NOTFLAT
+#define DACRING   0
+#else
+#define DACRING   1
+#endif
 
 #define HW_FREQ_DEFAULT 22050 /* default value for /F */
 #define HW_CHANNELS 2         /* must be 2 */

@@ -18,6 +18,9 @@
 #include "AU.H"
 #include "HOSTSVC.H"   /* LOW_PokeB (RATEDIAG) */
 #include "ADPCM.H"
+#if DACRING
+#include "JLMSHARE.H"  /* the direct-DAC ring, shared with VSBPCMJ.DLL */
+#endif
 
 /* compatibility switches */
 #define FASTCMD14 1  /* 1=DSP cmd 0x14 for SB detection is handled instantly */
@@ -186,6 +189,39 @@ static struct VSB_Status vsb;
  * vsb.bWS otherwise. Every access below goes through this pointer, so the
  * PM world and the stub always see one counter. */
 static uint8_t *vsb_pWS = &vsb.bWS;
+
+#if DACRING
+/* Direct DAC goes into the ring of jlmshare.h, which sndisr.c drains. With
+ * VSBPCMJ.DLL loaded, V86 guests' 10h commands and samples never reach this
+ * file: the JLM puts them in the same ring at ring 0. To tell a 10h command
+ * from a 10h data byte it needs our parser state, so DSP_Publish puts that
+ * in the shared block after every change. Two producers, the JLM and us, but
+ * never at once: a guest drives the DSP from one world. */
+static void DAC_Put( uint8_t smpl )
+{
+    struct vsbj_share *s = PTRAP_Share();
+    uint16_t h = s->dhead, n = (uint16_t)(( h + 1 ) & VSBJ_RMASK);
+    s->dcount++;
+    if ( n == s->dtail ) {
+        s->dlost++;
+        return;
+    }
+    s->ring[h] = smpl;
+    s->dhead = n;
+}
+
+/* 1 = the next base+0Ch write is a command byte this DSP would act on */
+static void DSP_Publish( void )
+{
+    PTRAP_Share()->dspidle = ( vsb.dsp_cmd == SB_DSP_NOCMD && !vsb.HighSpeed
+#if SBMIDIUART
+                               && !vsb.UARTMode
+#endif
+                             );
+}
+#else
+#define DSP_Publish()
+#endif
 
 
 /* search item in table, return index if found, else -1 */
@@ -458,6 +494,11 @@ static void DSP_Reset( uint8_t value )
         }
         vsb.ResetState = false;
     }
+#if DACRING
+    if ( value == 1 )
+        PTRAP_Share()->pend10 = 0;  /* a reset ends a 10h waiting for its sample */
+#endif
+    DSP_Publish();
     return;
 }
 
@@ -541,6 +582,15 @@ static void DSP_DoCommand( uint32_t );
 static void DSP_Write0C( uint8_t value, uint32_t flags )
 ////////////////////////////////////////////////////////
 {
+#if DACRING
+    /* VSBPCMJ took a V86 10h, and its sample comes from protected mode */
+    if ( PTRAP_Share()->pend10 ) {
+        PTRAP_Share()->pend10 = 0;
+        DAC_Put( value );
+        *vsb_pWS = 0;
+        return;
+    }
+#endif
     /* some progs want the cmd port 0x0C to be busy after the port has been written */
     *vsb_pWS = CMDPORTMASK;  /* v1.9: next read of port 0x0C will return status "busy" */
 
@@ -579,6 +629,7 @@ static void DSP_Write0C( uint8_t value, uint32_t flags )
         DSP_DoCommand( flags );
         vsb.dsp_cmd = SB_DSP_NOCMD;
     }
+    DSP_Publish();
 }
 
 static void DSP_DoCommand( uint32_t flags )
@@ -760,7 +811,11 @@ static void DSP_DoCommand( uint32_t flags )
         dbgprintf(("DSP_DoCommand(%X): set sample rate=%u\n", vsb.dsp_cmd, vsb.SampleRate ));
         break;
     case SB_DSP_8BIT_DIRECT: /* 10 */
+#if DACRING
+        DAC_Put( vsb.dsp_in_data[0] );
+#else
         vsb.DirectBuffer[vsb.DirIdxW++] = vsb.dsp_in_data[0];
+#endif
 #if CMD10NOWAIT
         *vsb_pWS = 0;
 #endif
@@ -965,6 +1020,7 @@ void VSB_Init(int irq, int dma, int hdma, int type, void *hAU )
      * vsb_pWS); PTRAP_Prepare_RM_PortTrap has run by now (main.c order) */
     { uint8_t *cell = PTRAP_DspStatusCell();
       if ( cell ) { *cell = vsb.bWS; vsb_pWS = cell; } }
+    DSP_Publish();
     vsb.Irq = irq;
 
     vsb.Dma8 = dma;
@@ -1053,6 +1109,7 @@ void VSB_Stop()
     if ( vsb.HighSpeed )
         vsb.SampleRate = 0;   /* the rate ceiling drops with the flag */
     vsb.HighSpeed = false;
+    DSP_Publish();            /* the end of a high-speed block frees the DSP */
     /* v1.8: no need to reset position */
     //vsb.BytesPlayed = 0;
 }
@@ -1171,6 +1228,29 @@ int VSB_GetIRQStatus( void )
 int VSB_ReadDirectSamples( uint8_t *pBuffer )
 /////////////////////////////////////////////
 {
+#if DACRING
+    /* the shared ring; at most the old 255 a tick, the rest waits */
+    struct vsbj_share *s = PTRAP_Share();
+    uint16_t tail = s->dtail;
+    int rc = ( s->dhead - tail ) & VSBJ_RMASK, i;
+    if ( !rc )
+        return 0;
+    if ( rc > VSB_DIRECTBUFFER_SIZE - 1 )
+        rc = VSB_DIRECTBUFFER_SIZE - 1;
+# if CMD10LASTSMPL
+    *pBuffer++ = vsb.DirLastSmpl;
+# endif
+    for ( i = 0; i < rc; i++ ) {
+        pBuffer[i] = s->ring[tail];
+        tail = (uint16_t)(( tail + 1 ) & VSBJ_RMASK);
+    }
+    s->dtail = tail;
+# if CMD10LASTSMPL
+    vsb.DirLastSmpl = pBuffer[rc-1];
+    rc++; /* seems to reduce noise a bit */
+# endif
+    return rc;
+#else
     int rc;
     uint8_t tmp = vsb.DirIdxW; /* the write pointer is volatile, may change */
     if ( tmp == vsb.DirIdxR )
@@ -1191,6 +1271,7 @@ int VSB_ReadDirectSamples( uint8_t *pBuffer )
 #endif
     vsb.DirIdxR = tmp;
     return rc;
+#endif
 }
 
 uint8_t VSB_GetMixerReg(uint8_t index)

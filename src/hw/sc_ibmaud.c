@@ -93,7 +93,8 @@
 
 // ==========================================================================
 //  Telemetry (the 0x4F0-0x4FF map -- see doc/NOTES.md). This backend's own
-//  bytes: 0x4F8 irq_routine calls, 0x4FB/0x4FF 16-bit feed count, 0x4FE
+//  bytes: 0x4F8 irq_routine calls (play-position reads refused, in builds
+//  without SNDISR_TELEMETRY), 0x4FB/0x4FF 16-bit feed count, 0x4FE
 //  feed frames dropped for want of card room, 0x4F4 watchdog revivals,
 //  0x4F5 card queue gauge (words >> 5), 0x4F6 dead codec links caught,
 //  0x4F3 feed re-entries, 0x4FA arms and 0x4F2 guest rate >> 8 (both on
@@ -102,6 +103,8 @@
 static uint16_t      ib_tel_feed16;
 static unsigned long ib_tel_bytes;
 static unsigned char ib_tel_irq, ib_tel_drop, ib_tel_dead, ib_tel_arm, ib_reentry;
+static unsigned char ib_tel_gap;               // silence padded into a live tap stream
+static unsigned char ib_tel_badpos;            // play-position reads ib_track refused
 
 // ---- card geometry ---------------------------------------------------------
 #define IB_B0_DEF     0x250         // IBMAUDGO's default /IO1
@@ -162,6 +165,8 @@ static volatile int  ib_armed;
 static uint32_t      ib_wr;                    // words written since arm
 static uint32_t      ib_cons;                  // words played since arm
 static unsigned      ib_lastpos;               // last 14-bit position read
+static int           ib_bad;                   // ib_track is refusing a step ...
+static uint32_t      ib_bad_since;             // ... since this ib_tick_seq
 
 static unsigned char ib_rtc_rs = IB_RS_IDLE;   // current armed RTC pump rate
 static int           ib_rtc_fixed;             // SBERTC pins it
@@ -172,6 +177,14 @@ static volatile uint32_t ib_tick_seq;          // ++ per delivered RTC tick
 static volatile uint32_t ib_feed_seq;          // ib_tick_seq at the last feed (any path)
 static volatile uint32_t ib_pt_seq;            // ib_tick_seq at the last TAP feed
 static uint32_t      ib_arm_fail;              // tick of the last failed arm, 0 = none
+// The pt_ops clock (ptops.h), 1/32768 s. While the codec plays, its own play
+// position is the time: it keeps counting through RTC interrupts that were
+// lost, merged or switched off, and it is the clock the guest's direct DAC
+// has to match. While the card is closed, each RTC tick adds the period it
+// was delivered at (RS n = 2^(n-1) units).
+static volatile unsigned long ib_clock;
+static unsigned long ib_clock_frac;            // remainder, 1/(32768 * frate) s
+static uint32_t      ib_clock_cons;            // ib_cons already counted
 
 // Passthrough stream + frame stepper.
 static volatile int  ib_pt_active;
@@ -256,14 +269,46 @@ static int ib_rate_pick(unsigned long rate, unsigned long ceil)
 // ib_busy held. The 14-bit position wraps every 16K words -- 3 s at the 8-bit
 // mono default, 186 ms at 44.1 kHz 16-bit stereo; the pump samples it at
 // 128-256 Hz while armed.
+//
+// A read that lands on the count's step can return the new high bits over the
+// old low ones: 2C7Fh between 2C77h and 2C78h, up to 2^k - 1 words ahead on a
+// carry into bit k (JLMTEST T, 2026-10-02: 106 such reads in 1.4 million).
+// The next true read sits behind it, its step wraps to some 16K words, and
+// the card looks drained: every 20-40 s the pump padded 40 ms of silence into
+// a full queue, and direct DAC's fill trim pitched the music down to win back
+// a shortfall that was never there. So a position is two reads that agree
+// (the count steps every 10 us at the fastest format, a read takes about 2),
+// and a step longer than the queue is refused until it has stood 16 ticks.
+#define IB_QUEUED() ((unsigned)(ib_wr - ib_cons))
+static unsigned ib_pos(void)
+{
+ unsigned a = ib_inw(IB_POS) & 0x3FFFu, b, i;
+ for(i = 0; i < 4u; i++){
+  b = ib_inw(IB_POS) & 0x3FFFu;
+  if(b == a) break;
+  a = b;
+ }
+ return a;
+}
 static void ib_track(void)
 {
- unsigned p = ib_inw(IB_POS) & 0x3FFFu;
- ib_cons += (uint32_t)((p - ib_lastpos) & 0x3FFFu);
+ unsigned p = ib_pos(), d = (p - ib_lastpos) & 0x3FFFu;
+ if(d > IB_QUEUED() + 2u){                       // more than we wrote
+  if(!ib_bad){ ib_bad = 1; ib_bad_since = ib_tick_seq; }
+  if(ib_tick_seq - ib_bad_since < 16u){
+#if !SNDISR_TELEMETRY
+   LOW_PokeB(0x4F8, ++ib_tel_badpos);
+#else
+   (void)ib_tel_badpos;
+#endif
+   return;
+  }
+ }
+ ib_bad = 0;
+ ib_cons += d;
  ib_lastpos = p;
  if(ib_cons > ib_wr) ib_cons = ib_wr;          // it cannot play past our writes
 }
-#define IB_QUEUED() ((unsigned)(ib_wr - ib_cons))
 
 // ---- codec arm / close ---------------------------------------------------------
 // One five-byte control frame, strobed by base+8 bit 7; base+9 is pulsed
@@ -330,8 +375,10 @@ static int ib_arm(void)
  outportb(ib_b0+8, 0x01);
  ib_outw(IB_CMD, 0x0102);
  // the play position restarts here; the two silence words above are queued
- ib_lastpos = ib_inw(IB_POS) & 0x3FFFu;
+ ib_lastpos = ib_pos();
+ ib_bad = 0;
  ib_wr = 2; ib_cons = 0; ib_ohave = 0;
+ ib_clock_cons = 0;
  for(i = 0; i < ib_qlow; i++) ib_outw(IB_FIFO, ib_sil);
  ib_wr += ib_qlow;
  // release the hold: the card starts playing the ring
@@ -399,6 +446,8 @@ static void ib_emit(int l, int r)
 }
 // output frames that fit in `words` card words
 #define IB_WORDS_TO_FRAMES(w) ((unsigned)(((unsigned long)(w) * 2UL) / ib_bpf))
+// the stepper averages (decimates) above this guest rate, interpolates below
+#define IB_DECIMATE(f) ((f) + ((f) >> 1))
 
 // ---- the pump: RTC tick -------------------------------------------------------
 static void ib_pump(void)
@@ -425,6 +474,11 @@ static void ib_pump(void)
      if(n) n--;
     }
     if(ib_o16 && ib_ost) n = (n + 1u) & ~1u;     // keep L/R word pairs aligned
+#if !SNDISR_TELEMETRY
+    // 0x4F5 (the queue gauge in telemetry builds): silence padded while the
+    // tap was feeding within the last two ticks = a gap in live audio
+    if(ib_tick_seq - ib_pt_seq <= 2u) LOW_PokeB(0x4F5, ++ib_tel_gap);
+#endif
     ib_wr += n;
     while(n--) ib_outw(IB_FIFO, ib_sil);
     q = IB_QUEUED();
@@ -529,7 +583,18 @@ static void IB_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, unsig
  ib_feed_seq = ib_pt_seq = ib_tick_seq;
  if(!rate) rate = (unsigned)ib_frate;
  if(!ib_ensure_armed()){ ib_busy = 0; return; }
- if(!ib_pt_active || rate != ib_pt_rate || bits != ib_pt_bits || channels != ib_pt_channels){
+ if(ib_pt_active && rate != ib_pt_rate && bits == ib_pt_bits && channels == ib_pt_channels){
+  // Only the rate moved, in a running stream: sndisr.c trims direct DAC's
+  // rate a little on every tick to follow the guest. Keep the stepper's
+  // phase and its previous frame, the accumulator rescaled to the new rate;
+  // a full re-aim here would put a click in at each trim.
+  ib_step_acc = ib_step_acc * rate / ib_pt_rate;
+  if((rate > IB_DECIMATE(ib_frate)) != (ib_pt_rate > IB_DECIMATE(ib_frate))){
+   ib_dsl = ib_dsr = 0; ib_dn = 0;               // across the decimator's edge
+  }
+  ib_pt_rate = rate;
+  ib_step_inv = (1UL << 24) / rate;
+ }else if(!ib_pt_active || rate != ib_pt_rate || bits != ib_pt_bits || channels != ib_pt_channels){
   // A format change only re-aims the stepper: the codec keeps its clock.
   ib_pt_rate = rate; ib_pt_bits = bits; ib_pt_channels = channels;
   ib_step_acc = 0;
@@ -565,15 +630,20 @@ static void IB_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, unsig
   if(!ib_ost && channels >= 2) l = (int)(((long)l + r) >> 1);   // mono out: downmix
 #endif
   ib_step_acc += ib_frate;
-  if(rate > ib_frate){
-   // DECIMATING (guest faster than the codec): average every guest frame in
-   // the output frame's interval instead of interpolating between two of
-   // them. Point sampling folds everything above the codec's Nyquist back
-   // into the audible band; averaging is a crude low-pass for one add per
-   // guest frame and one divide per output frame. It also mixes an SB Pro
+  if(rate > IB_DECIMATE(ib_frate)){
+   // DECIMATING (guest over 3:2 faster than the codec): average every guest
+   // frame in the output frame's interval instead of interpolating between
+   // two of them. Point sampling folds everything above the codec's Nyquist
+   // back into the audible band; averaging is a crude low-pass for one add
+   // per guest frame and one divide per output frame. It also mixes an SB Pro
    // stereo stream that the guest sends to an SB 2.0 (T3): that arrives as
    // mono at twice the frame rate, alternating L,R -- point-sampled, the
-   // L-R difference folded to a tone (Epic Pinball, 2026-09-29).
+   // L-R difference folded to a tone (Epic Pinball, 2026-09-29). Not nearer
+   // 1:1: there the average is of one frame, now and then of two -- a frame
+   // dropped every few hundred, a grit in every note. Direct DAC trimmed a
+   // hair over the codec rate did that (9890 Hz +12% on 11025), and so would
+   // an SB time constant of 166 (11111 Hz); the interpolator below takes
+   // any rate up to 3:2 without it.
    ib_dsl += l; ib_dsr += r; ib_dn++;
    if(ib_step_acc >= rate){
     int ol, orr = 0;
@@ -673,6 +743,21 @@ static volatile int ib_isr_depth;
 static void ib_dbg_tick(void){ ib_isr_depth++; SNDISR_dbg_tick(); }
 static void ib_dbg_exit(void){ SNDISR_dbg_exit(); if(ib_isr_depth) ib_isr_depth--; }
 static int  IBMAUD_Depth(void){ return ib_isr_depth; }
+static unsigned long IBMAUD_Clock(void){ return ib_clock; }
+
+// IRQ8, after the pump has read the play position: advance ib_clock.
+static void ib_clock_tick(void)
+{
+ if(ib_armed){
+  uint32_t w = ib_cons - ib_clock_cons;        // card words played since
+  if(ib_cons < ib_clock_cons || w > 16384u) w = 0;   // re-armed meanwhile
+  ib_clock_cons = ib_cons;
+  ib_clock_frac += (unsigned long)w * (65536UL / ib_bpf);   // frames x 32768
+  ib_clock += ib_clock_frac / ib_frate;
+  ib_clock_frac %= ib_frate;
+ }else
+  ib_clock += 1UL << (ib_rtc_rs - 1);
+}
 
 // ==========================================================================
 //  au_cards interface
@@ -684,6 +769,8 @@ static const struct pt_ops_s ibmaud_pt_ops = {
  IB_PT_Space, IB_PT_Feed, IB_PT_Watchdog,
  ib_dbg_tick, ib_dbg_exit, SNDISR_dbg_reenter,
  IBMAUD_Depth,
+ 0, 0,                                          // render_cap, render_div: no render path
+ IBMAUD_Clock,                                  // direct DAC rate measurement (sndisr.c)
 };
 // /RESAMP: no tap; the engine renders 16-bit stereo at the codec rate -- the
 // card's own format, so writedata is a straight copy.
@@ -798,7 +885,10 @@ static void IBMAUD_setrate(struct audioout_info_s *aui)
 static void IBMAUD_start(struct audioout_info_s *aui)
 {
  (void)aui;
- ib_i8_install();
+ // VSBPCMJ guards the pump from the guest's own EOIs and port accesses;
+ // this hook would cost two mode switches per PIT tick under a game that
+ // runs the PIT at its sample rate (measured: 24 us a tick, DX4/75).
+ if(!PTOPS_PumpGuard) ib_i8_install();
  ib_pt_active = 0;
  ib_busy = 1;
  // The render path is fed continuously, so arm now; the passthrough path
@@ -881,6 +971,7 @@ static int IBMAUD_irq(struct audioout_info_s *aui)
  // ack RTC (runs before sndisr enables interrupts: no cli pair needed)
  outportb(0x70,0x0C); (void)inportb(0x71);
  ib_pump();
+ ib_clock_tick();                                // before the rate is settled
  if(!ib_rtc_fixed){
   unsigned char want = ib_armed ? ib_rs_run : IB_RS_IDLE;
   if(ib_rtc_rs != want) ib_rtc_setrate(want);

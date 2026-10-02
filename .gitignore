@@ -4,3 +4,5 @@
 *.obj
 *.ar
 .DS_Store
+/jlm/jemm/
+/jlm/out/

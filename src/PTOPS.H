@@ -47,6 +47,11 @@ struct pt_ops_s {
      * passes overrun their tick (= missed feeds = static). So: pump every
      * tick, render every Nth. render_cap must cover one render interval. */
     int  render_div;
+    /* Time since load in 1/32768 s, wrapping; NULL = the card keeps none.
+     * Direct DAC (DSP cmd 10h) carries no rate, so sndisr.c measures it as
+     * samples received per unit of this clock and feeds the tap at that
+     * rate. Without a clock, direct DAC takes the render path as before. */
+    unsigned long (*clock)(void);
 };
 
 #define PTF_TAP      0x0001  /* arm the sndisr tap: raw guest DMA -> feed() */
@@ -156,6 +161,11 @@ void SNDISR_dbg_exit(void);
 void SNDISR_dbg_reenter(void);
 
 extern int SNDISR_PassThru;             /* tap gate (set by PTOPS_Register) */
+extern int PTOPS_PumpGuard;             /* VSBPCMJ keeps an RTC pump alive from
+                                         * the guest's own port accesses, so a
+                                         * backend's IRQ0 watchdog hook (two
+                                         * mode switches per PIT tick) can stay
+                                         * out (set before AU_start) */
 extern int SNDISR_HasTsc;               /* CPUID-verified TSC present */
 extern volatile int SNDISR_ReviveSquelch; /* post-heal guest-IRQ squelch ticks
                                            * (backend guardian sets; sndisr

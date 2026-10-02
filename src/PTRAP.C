@@ -33,6 +33,9 @@
 #if VMPU
 #include "VMPU.H"
 #endif
+#if DACRING
+#include "JLMSHARE.H"
+#endif
 #if IRQONPORTACC
 extern void SNDISR_IrqOnPortAcc( void );
 #endif
@@ -578,6 +581,217 @@ uint8_t *PTRAP_DspStatusCell( void )
     return dm ? &dm->bDspWS : NULL;
 }
 
+#if DACRING
+/* ---- VSBPCMJ.DLL, the ring-0 companion (jlm/VSBPCMJ.ASM) ----
+ * QPIEMU runs our V86 stub as a nested execution for every trapped access,
+ * and that cost is the floor for the two densest kinds of V86 traffic: FM
+ * register writes with their delay reads (Theme Hospital's Miles driver runs
+ * in V86), and direct DAC, two trapped writes per sample (Another World).
+ * When the JLM is loaded, it takes those ports at ring 0 and they stay off
+ * the QPI traps: the FM ports while the timer shim owns them (no chip,
+ * /FMSHIM, /LPT), and the DSP write port always. Protected-mode guests still
+ * come through HDPMI to the handlers here. SBENOJLM=1 (bench knob) leaves the
+ * JLM unarmed, so everything takes QPI as before.
+ *
+ * The JLM and we share one block in DOS memory (jlmshare.h): its config,
+ * vsb.c's "next DSP write is a command" flag, the direct-DAC ring that
+ * sndisr.c drains, and the JLM's counters. Without the JLM the same struct
+ * is JlmLocal and carries only the ring. */
+static struct vsbj_share JlmLocal;
+static struct vsbj_share *JlmShare = &JlmLocal;
+static __dpmi_raddr JlmEntry;   /* the JLM's V86 API; segment 0 = not loaded */
+static uint16_t JlmSel;         /* DPMI selector of the shared DOS block */
+static uint8_t JlmArmed;        /* VSBJ_F_* the JLM took */
+static uint16_t JlmSB;          /* emulated SB base it serves */
+static uint32_t QPI_StubCB;     /* the seg:off we gave QPI (fn 1A07h) */
+static int PrepSB;              /* PTRAP_Prepare's sbaddr */
+static int PrepLptDly = 6;      /* ... and the /LPT strobe delay it chose */
+static int PrepIrq;             /* ... and the card's IRQ (8 = the RTC pumps) */
+
+struct vsbj_share *PTRAP_Share( void )
+{
+    return JlmShare;
+}
+
+/* INT 2Fh AX=1684h BX=device id must run as an interrupt in V86, so call a
+ * three-byte INT 2Fh + RETF at PSP:5Ch, as the QPIEMU check does. */
+static void JlmDetect( void )
+{
+    __dpmi_regs r;
+    uint32_t *dosmem = NearPtr(_my_psp() + 0x5C);
+    memset( &r, 0, sizeof(r) );
+    *dosmem = 0xCB2FCD;  /* INT 2Fh & RETF */
+    r.x.ax = 0x1684;
+    r.x.bx = VSBJ_DEVID;
+    r.x.cs = _my_psp() >> 4;
+    r.x.ip = 0x5C;
+    r.x.flags = 0x202;
+    if ( __dpmi_simulate_real_mode_procedure_retf( &r ) == 0 && r.h.al == 0
+         && r.x.es ) {
+        JlmEntry.v86.segment = r.x.es;
+        JlmEntry.v86.offset  = r.x.di;
+    }
+}
+
+/* one call into the JLM's V86 API: 0 on success, else its error (AX) */
+static int JlmCall( __dpmi_regs *r )
+{
+    r->x.cs = JlmEntry.v86.segment;
+    r->x.ip = JlmEntry.v86.offset;
+    r->x.ss = r->x.sp = 0;
+    r->x.flags = 0x202;
+    if ( __dpmi_simulate_real_mode_procedure_retf( r ) != 0 )
+        return -1;
+    return ( r->x.flags & CPU_CFLAG ) ? r->x.ax : 0;
+}
+
+/* Does the JLM own this port (so QPI must not trap it)? */
+static int JlmOwns( uint16_t port )
+{
+    if ( ( JlmArmed & VSBJ_F_FM )
+         && ( ( port >= 0x388 && port <= 0x38B )
+              || ( port >= JlmSB && port <= JlmSB + 3 )
+              || port == JlmSB + 8 || port == JlmSB + 9 ) )
+        return 1;
+    if ( ( JlmArmed & VSBJ_F_DAC ) && port == JlmSB + SB_PORT_DSP_WRITE_WS )
+        return 1;
+    if ( ( JlmArmed & VSBJ_F_PIC ) && port == 0x20 )
+        return 1;
+    return 0;
+}
+
+static void JlmFreeBlock( void )
+{
+    if ( JlmSel ) {
+        __asm__ __volatile__("int $0x31"
+                             : : "a"(0x0101), "d"((uint32_t)JlmSel)
+                             : "cc", "memory");
+        JlmSel = 0;
+    }
+}
+
+/* Arm the JLM, if it is loaded: runs from PTRAP_Install_RM_PortTraps, after
+ * PTRAP_Prepare and VSB_Init, before any QPI trap goes in. Any failure
+ * leaves every port on QPI, as without the JLM. */
+static void JlmArm( void )
+{
+    __dpmi_regs r;
+    struct vsbj_share *s;
+    struct rmcode1 *dm = RMVars();
+    uint32_t eax = 0x0100, edx = 0, lin, stub;
+    uint8_t want = VSBJ_F_DAC, err;
+    const char *e;
+    int rc;
+
+    if ( !JlmEntry.v86.segment || !dm || !QPI_StubCB || !PrepSB )
+        return;
+    if ( ( e = getenv("SBENOJLM") ) && *e == '1' ) {
+        printf("VSBPCMJ: loaded, left unarmed (SBENOJLM=1)\n");
+        return;
+    }
+    /* A JLM that reports itself armed was armed by a VSBPCM that is gone
+     * (IsInstalled found none running), so its block is stale: disarm. */
+    memset( &r, 0, sizeof(r) );
+    if ( JlmCall( &r ) == 0 && r.x.bx ) {
+        memset( &r, 0, sizeof(r) );
+        r.x.ax = 2;
+        JlmCall( &r );
+    }
+    if ( FmShimOn ) {
+        want |= VSBJ_F_FM;
+        /* the delay-read patch is the point of taking FM to ring 0, so it
+         * is on here unless SBEFMPATCH=0 (protected mode: =1 turns it on) */
+        if ( !( ( e = getenv("SBEFMPATCH") ) && *e == '0' ) )
+            want |= VSBJ_F_PATCH;
+    }
+    /* the same for a direct-DAC guest's write-status busy-waits, two of
+     * its four traps per sample, then its 10h-and-sample pairs, and for
+     * Another World's exact sequence a call into the JLM's V86 copy of the
+     * ring producer, no trap at all; SBEDSPPATCH=0 keeps all three */
+    if ( !( ( e = getenv("SBEDSPPATCH") ) && *e == '0' ) )
+        want |= VSBJ_F_POLL | VSBJ_F_PAIR | VSBJ_F_V86;
+    /* Port 20h: a guest's EOIs, which a timer-driven direct-DAC game sends
+     * at its sample rate, went through QPIEMU and back into QPI for the real
+     * OUT (~20 us each on a DX4/75). The JLM does them at ring 0 and hands
+     * them back to us only while an SB IRQ is virtualized; SBEJLMPIC=0
+     * leaves port 20h on QPI. */
+    if ( !( ( e = getenv("SBEJLMPIC") ) && *e == '0' ) )
+        want |= VSBJ_F_PIC;
+    __asm__ __volatile__("int $0x31; setc %0"
+                         : "=q"(err), "+a"(eax), "=d"(edx)
+                         : "b"(( sizeof(struct vsbj_share) + 15 ) / 16)
+                         : "cc", "memory");
+    if ( err ) {
+        printf("VSBPCMJ: no DOS memory for its block, not used\n");
+        return;
+    }
+    JlmSel = (uint16_t)edx;
+    lin = ( eax & 0xFFFFUL ) << 4;
+    s = NearPtr( lin );
+    memset( s, 0, sizeof(*s) );
+    s->sig = VSBJ_SIG;
+    s->ver = VSBJ_VER;
+    s->ringsize = VSBJ_RING;
+    s->lpt = ( want & VSBJ_F_FM ) ? (uint16_t)FOpts.lpt : 0;
+    s->lptdly = (uint8_t)PrepLptDly;
+    s->flags = want;
+    s->sbbase = (uint16_t)PrepSB;
+    s->qpicb = QPI_StubCB;
+    stub = RMStubLinear ? RMStubLinear : _my_psp() + DOSMEMSTART;
+    s->wscell = stub + offsetof(struct rmcode1, bDspWS);
+    s->piccell = stub + offsetof(struct rmcode1, wPort);
+    s->dspidle = JlmLocal.dspidle;     /* vsb.c has published here so far */
+    /* An RTC pump (card IRQ 8) can be switched off under a game; the JLM's
+     * pulse puts it back from the guest's own FM and DSP accesses. */
+    s->guard = ( PrepIrq == 8 );
+
+    memset( &r, 0, sizeof(r) );
+    r.x.ax = 1;
+    r.d.edx = lin;
+    if ( ( rc = JlmCall( &r ) ) != 0 ) {
+        if ( rc == 3 )
+            printf("VSBPCMJ: port %Xh is trapped already, not used\n", r.x.dx );
+        else
+            printf("VSBPCMJ: refused the shared block (error %d), not used\n", rc );
+        JlmFreeBlock();
+        return;
+    }
+    JlmShare = s;
+    JlmArmed = want;
+    JlmSB = (uint16_t)PrepSB;
+    PTOPS_PumpGuard = s->guard;
+    /* worst case 74 columns: FM at 388h+220h (LPT 378h, patching), DSP 22Ch */
+    if ( want & VSBJ_F_FM )
+        printf("VSBPCMJ: ring 0 serves FM 388h+%Xh (%s%s), DSP %Xh; block %04lXh\n",
+               PrepSB, FOpts.lpt ? "LPT, " : "",
+               ( want & VSBJ_F_PATCH ) ? "patching" : "no patching",
+               PrepSB + SB_PORT_DSP_WRITE_WS, (unsigned long)( lin >> 4 ) );
+    else
+        printf("VSBPCMJ: ring 0 serves direct DAC at DSP %Xh; block %04lXh\n",
+               PrepSB + SB_PORT_DSP_WRITE_WS, (unsigned long)( lin >> 4 ) );
+}
+
+/* Unload: stop the pump guard before the card closes its RTC pump, so
+ * nothing switches the periodic interrupt back on behind it. */
+void PTRAP_JlmQuiesce( void )
+{
+    JlmShare->guard = 0;
+}
+
+static void JlmDisarm( void )
+{
+    __dpmi_regs r;
+    if ( !JlmArmed )
+        return;
+    memset( &r, 0, sizeof(r) );
+    r.x.ax = 2;
+    JlmCall( &r );
+    JlmArmed = 0;
+    JlmShare = &JlmLocal;
+    JlmFreeBlock();
+}
+#endif /* DACRING */
+
 
 #if HANDLE_IN_388H_DIRECTLY
 /* The v86 stub answers byte reads of 0x388 from rmcode1.data's high byte
@@ -834,9 +1048,16 @@ bool PTRAP_Prepare_RM_PortTrap()
     QPI_regs.x.di = rmcb.v86.offset;
     QPI_regs.x.es = rmcb.v86.segment;
 #endif
+#if DACRING
+    /* VSBPCMJ hands the DSP writes it does not keep to this same entry */
+    QPI_StubCB = ((uint32_t)QPI_regs.x.es << 16) | QPI_regs.x.di;
+#endif
     QPI_regs.x.ax = 0x1A07; /* set trap handler */
     if( __dpmi_simulate_real_mode_procedure_retf(&QPI_regs) != 0 || (QPI_regs.x.flags & CPU_CFLAG))
         return false;
+#if DACRING
+    JlmDetect();
+#endif
     return true;
 }
 
@@ -848,6 +1069,10 @@ static bool Install_RM_PortRangeTrap( uint16_t start, uint16_t end )
     int i;
 
     for( i = start; i < end; i++ ) {
+#if DACRING
+        if ( JlmOwns( PortTable[i] & 0x7fff ) )
+            continue;                   /* VSBPCMJ traps it at ring 0 */
+#endif
         if ( QPI_OldCallback.v86.segment ) {
             /* this is unreliable, since if the port was already trapped, there's no
              * guarantee that the previous handler can actually handle it.
@@ -875,6 +1100,9 @@ bool PTRAP_Install_RM_PortTraps( void )
     int i;
 
     dbgprintf(("PTRAP_Install_RM_PortTraps: maxports=%u, maxranges=%u\n", maxports, maxranges ));
+#if DACRING
+    JlmArm();   /* first: the ports it takes stay off the QPI traps below */
+#endif
     for ( i = 0; i < maxranges; i++ ) {
         dbgprintf(("PTRAP_Install_RM_PortTraps: range[%u]: ports %X-%X\n", i, PortTable[portranges[i]], PortTable[portranges[i+1]-1] ));
 #if RMPICTRAPDYN
@@ -929,6 +1157,9 @@ bool PTRAP_Uninstall_RM_PortTraps( void )
 {
     int i;
 
+#if DACRING
+    JlmDisarm();
+#endif
     for( i = 0; i < maxports; ++i ) {
         if ( !( PortState[i] & 0xff00 )) {
             if( PortState[i] & PDT_FLGS_RMINST ) {
@@ -1200,6 +1431,10 @@ void PTRAP_Prepare( int opl, int sbaddr, int dma, int hdma, int sndirq )
     if ( sbaddr != 0x220 )
         for( i = portranges[SB_PDT]; i < portranges[SB_PDT+1]; i++ )
             PortTable[i] += sbaddr - 0x220;
+#if DACRING
+    PrepSB = sbaddr;    /* for VSBPCMJ (JlmArm) */
+    PrepIrq = sndirq;
+#endif
 
     /* DSP write-status reads (base+0xC) are answered by the V86 stub from a
      * counter it shares with vsb.c (rmcode1.asm isws, PTRAP_DspStatusCell):
@@ -1255,6 +1490,9 @@ void PTRAP_Prepare( int opl, int sbaddr, int dma, int hdma, int sndirq )
                 if ( lptdly < 1 || lptdly > 255 )
                     lptdly = 6;
                 FMSHIM_SetLpt( (uint16_t)FOpts.lpt, lptdly );
+#if DACRING
+                PrepLptDly = lptdly;        /* VSBPCMJ's writes use it too */
+#endif
 #if !HANDLE_IN_388H_DIRECTLY
                 /* Arm the LPTSTUB variant: it serves real-mode FM itself --
                  * 388h-38Bh, and through wFmSB the SB-base aliases, which

@@ -16,6 +16,9 @@
 #include "VSB.H"
 #include "PTRAP.H"
 #include "PTOPS.H"
+#if DACRING
+#include "JLMSHARE.H"   /* the direct-DAC ring (SNDISR_DacFeed) */
+#endif
 
 #include "HOSTSVC.H"       /* LOW_PokeB: the engine telemetry pokes below */
 #include "ADPCM.H"
@@ -89,6 +92,7 @@ void tsf_render_short(void *, short *, int, int);
  *     path, so a re-entrant SNDISR (SETIF=1) skips the render and can't
  *     march the private ISR stack into the data segment (#GP fix). */
 int SNDISR_PassThru = 0;
+int PTOPS_PumpGuard = 0;
 volatile int es_in_render = 0;
 
 /* Post-heal guest-IRQ squelch (formerly sc_tp755's tp_revive_squelch): a
@@ -440,6 +444,215 @@ static void cv_channels_1_to_2( PCM_CV_TYPE_S *pcm_sample, unsigned int nSamples
 extern void cv_channels_1_to_2( PCM_CV_TYPE_S *pcm_sample, unsigned int nSamples );
 #endif
 
+#if DACRING && !defined(NOES1688)
+/* DIRECT DAC ON A PASSTHROUGH CARD (DSP cmd 10h, from the ring of jlmshare.h).
+ * A direct-DAC guest writes one sample per tick of a timer of its own and
+ * states no rate anywhere. The render path below derives one per tick as
+ * samples x codec rate / frames requested, which holds only while the engine
+ * requests one tick of output; on a passthrough card it requests
+ * PT_MODE_SAMPLES whatever the card needs, and the estimate came out about 12x
+ * low on the IBM card (128 Hz pump, ~86 frames a tick). So with a card clock
+ * (PT_Ops->clock, 1/32768 s) the rate is measured instead, as samples
+ * received per unit of it: in 1/16 s windows, folded into a running total
+ * that remembers about 16 s. The first tick that brings samples after a
+ * pause is partial, so it only starts the count; a gap under 1/8 s is part
+ * of the stream, a longer one discards the window and waits for the next
+ * first tick. A guest that writes in bursts (PTBYPASS: one BIOS tick's worth
+ * at a time) puts one or two bursts in a window, so single windows are not
+ * judged: each second of windows is compared with the estimate instead, and
+ * one more than 1/8 off means the guest changed rate, so the estimate
+ * restarts from that second. Half a second without a sample ends the stream.
+ * The tap is fed at the estimate, trimmed by the fill (below), as much as
+ * the card has room for. Until the first window is done, samples wait in
+ * the ring. */
+#define DAC_WIN    2048UL           /* a window: 1/16 s */
+#define DAC_GAP    4096UL           /* 1/8 s without a sample: a pause */
+#define DAC_QUIET  16384UL          /* 1/2 s without a sample: stream over */
+#define DAC_CHECK  32768UL          /* a second of windows: rate changed? */
+#define DAC_KEEP   (32768UL * 16)   /* running total: halved past ~16 s */
+#define DAC_TAKE   1024             /* samples handed to the tap per tick */
+
+static struct {
+    unsigned long clk;              /* the clock at the last look */
+    uint32_t cnt;                   /* the ring's dcount at the last look */
+    unsigned long wt, st, tt;       /* time: window, second, running total */
+    uint32_t ws, ss, ts;            /* samples: the same three */
+    unsigned long quiet;            /* time since the last sample */
+    unsigned rate;                  /* the estimate, Hz; 0 = none yet */
+    unsigned fed;                   /* the rate the tap was last fed at */
+    long trimi;                     /* the fill trim's integral, 1/65536 */
+    unsigned livet;                 /* ticks with samples since the stream began */
+    uint8_t live;                   /* the last look brought samples */
+    uint8_t gap;                    /* a look since the last samples found none */
+} dac;
+static uint8_t dac_buf[DAC_TAKE];
+
+static void SNDISR_DacFeed( void )
+//////////////////////////////////
+{
+    struct vsbj_share *s = PTRAP_Share();
+    unsigned long clk = PT_Ops->clock(), dt = clk - dac.clk;
+    uint32_t cnt = s->dcount, ds = cnt - dac.cnt;
+    uint16_t tail;
+    int n, i, room, resume;
+
+    dac.clk = clk;
+    dac.cnt = cnt;
+    s->dcalls++;
+    if ( dac.live && dt > s->dmaxdt )
+        s->dmaxdt = dt;                 /* a starved tick shows here */
+    if ( !ds ) {
+        dac.gap = 1;
+        if ( dac.quiet < DAC_QUIET && ( dac.quiet += dt ) >= DAC_QUIET ) {
+            dac.rate = 0;               /* the stream is over */
+            dac.tt = dac.ts = dac.st = dac.ss = 0;
+            dac.trimi = 0;
+            dac.livet = 0;
+            s->dflush += ( s->dhead - s->dtail ) & VSBJ_RMASK;
+            s->dtail = s->dhead;        /* anything left never got a rate */
+        }
+        if ( dac.quiet >= DAC_GAP ) {
+            dac.live = 0;               /* a pause: drop the window */
+            dac.wt = dac.ws = 0;
+        } else if ( dac.live ) {
+            dac.wt += dt;               /* a gap inside a bursty stream */
+            s->dgaps++;
+        }
+    } else {
+        dac.quiet = 0;
+        if ( !dac.live )
+            dac.live = 1;               /* partial tick: it only syncs */
+        else {
+            dac.wt += dt;
+            dac.ws += ds;
+            if ( dac.wt >= DAC_WIN ) {
+                if ( !dac.rate )
+                    s->dstreams++;
+                dac.tt += dac.wt;
+                dac.ts += dac.ws;
+                dac.st += dac.wt;
+                dac.ss += dac.ws;
+                dac.wt = dac.ws = 0;
+                if ( dac.tt > DAC_KEEP ) {
+                    dac.tt >>= 1;
+                    dac.ts >>= 1;
+                }
+                if ( dac.st >= DAC_CHECK ) {
+                    unsigned sec = (unsigned)( ( (unsigned long long)dac.ss << 15 ) / dac.st );
+                    unsigned diff = sec > dac.rate ? sec - dac.rate : dac.rate - sec;
+                    if ( !s->secmin || sec < s->secmin )
+                        s->secmin = (uint16_t)sec;
+                    if ( sec > s->secmax )
+                        s->secmax = (uint16_t)sec;
+                    if ( diff > dac.rate / 8 ) {
+                        dac.tt = dac.st;    /* the guest changed rate */
+                        dac.ts = dac.ss;
+                        s->drestart++;
+                    }
+                    dac.st = dac.ss = 0;
+                }
+                dac.rate = (unsigned)( ( (unsigned long long)dac.ts << 15 ) / dac.tt );
+            }
+        }
+    }
+
+    tail = s->dtail;
+    n = ( s->dhead - tail ) & VSBJ_RMASK;
+    if ( n > s->dmaxocc )
+        s->dmaxocc = (uint16_t)n;
+    if ( !n )
+        return;
+    if ( !dac.rate ) {
+        s->dnorate++;
+        return;
+    }
+    room = PT_Ops->space();             /* guest bytes; 8-bit mono = samples */
+    /* AFTER A GAP. A look that found no samples was the guest's DAC standing
+     * still (a real SB holds its last value) while the card played on from
+     * its queue, so the samples after it find the card short by the gap. The
+     * trim below would win that back by playing the music slow. Instead a
+     * shortfall over 1/48 s is filled with the first new sample, held: the
+     * guest's pause, played as a pause. */
+    resume = 0;
+    if ( ds && dac.gap ) {
+        dac.gap = 0;
+        resume = room - n > (int)( dac.rate / 48 );
+    }
+    if ( ds && dac.live && !resume && room - n > (int)s->dmaxroom )
+        s->dmaxroom = (uint16_t)( room - n );   /* the card short of its target */
+    /* THE FILL TRIM. The estimate above is a long-term average, and a guest
+     * that writes from its own timer interrupt slows down when it runs short
+     * of CPU: its ticks merge, and Another World's rate sags 4% in a heavy
+     * second (9516..10170 Hz against 9890). Fed the average, the card then
+     * plays faster than the samples come, its queue runs down, and the pump
+     * pads silence into the music: crackle. So the rate is trimmed on each
+     * tick that brought samples, from the fill: e = samples waiting minus the
+     * card's room below its target, + backlog, - shortfall, in units of
+     * 1/12 s of samples. Directly 0.3 of a shortfall, which is an underrun
+     * coming, but 0.05 of a backlog, which is only latency: a stream starts
+     * with the 1/16 s its first estimate took waiting in the ring, and 0.3 of
+     * that put the music 12% sharp, past the codec rate. Plus an integral of
+     * 1/1024 of e a tick that brings the queue back to its target, within
+     * 12%. The stepper takes each change without a click (sc_ibmaud.c). Not
+     * in the first half second of a stream, while the card fills from
+     * nothing. The integral stands still while the direct part alone is at
+     * the limit: a shortfall that big is an event, not a rate, and must not
+     * wind it up. */
+    {
+        long trim = 0;
+        if ( ds && dac.live && !resume ) {
+            long unit = dac.rate / 12 ? (long)( dac.rate / 12 ) : 1;
+            long e = (long)n - room;
+            if ( dac.livet < 64 )
+                dac.livet++;
+            else {
+                long p = e * ( e < 0 ? 19661L : 3277L ) / unit;
+                if ( p > -7864 && p < 7864 ) {
+                    dac.trimi += e * 64 / unit;
+                    if ( dac.trimi > 7864 ) dac.trimi = 7864;
+                    if ( dac.trimi < -7864 ) dac.trimi = -7864;
+                }
+                trim = p + dac.trimi;
+                if ( trim > 7864 ) trim = 7864;
+                if ( trim < -7864 ) trim = -7864;
+            }
+        } else
+            trim = dac.trimi;           /* between samples, hold the integral */
+        dac.fed = (unsigned)( (long)dac.rate + (long)dac.rate * trim / 65536 );
+        s->dacrate = (uint16_t)dac.fed;
+        s->dtrim = (int16_t)( (long)dac.rate * trim / 65536 );
+        if ( s->dtrim < s->dtrimmin )
+            s->dtrimmin = s->dtrim;
+        if ( s->dtrim > s->dtrimmax )
+            s->dtrimmax = s->dtrim;
+    }
+    if ( resume ) {
+        int hold = room - n;
+        if ( hold > DAC_TAKE )
+            hold = DAC_TAKE;
+        memset( dac_buf, s->ring[tail], (size_t)hold );
+        PT_Ops->feed( dac_buf, hold, dac.fed, 8, 1 );
+        room -= hold;
+        s->dholds++;
+    }
+    if ( n > room ) {
+        n = room;
+        s->dspace++;
+    }
+    if ( n > DAC_TAKE )
+        n = DAC_TAKE;
+    if ( n <= 0 )
+        return;
+    for ( i = 0; i < n; i++ ) {
+        dac_buf[i] = s->ring[tail];
+        tail = (uint16_t)( ( tail + 1 ) & VSBJ_RMASK );
+    }
+    s->dtail = tail;
+    s->dfed += n;
+    PT_Ops->feed( dac_buf, n, dac.fed, 8, 1 );
+}
+#endif
+
 static int SNDISR_Interrupt( void )
 ///////////////////////////////////
 {
@@ -481,6 +694,9 @@ static int SNDISR_Interrupt( void )
 
 #ifndef NOES1688
     PT_Ops->dbg_tick();   /* DIAG: entry count (0x4F7) + nesting depth (0x4F0) */
+#endif
+#if DACRING
+    PTRAP_Share()->tick++;  /* VSBPCMJ's pump guard: we are being called */
 #endif
 
     /* check if the sound hw does request an interrupt. */
@@ -936,6 +1152,16 @@ static int SNDISR_Interrupt( void )
     };
 
 #ifndef NOES1688
+#if DACRING
+    /* direct DAC on a card with a clock goes to the tap here, at a measured
+     * rate (SNDISR_DacFeed), and skips the render tail below altogether --
+     * still inside the render owner's guard, like the DMA tap above */
+    if ( pt_mode && !IdxSm && PT_Ops->clock ) {
+        SNDISR_DacFeed();
+        es_in_render = 0;
+        goto isrexit;
+    }
+#endif
     es_in_render = 0;   /* render owner done (re-entrant path skipped this via goto isrexit) */
 #if PTDIAG
     if ( pt_mode ) {

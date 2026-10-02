@@ -325,6 +325,9 @@ void MAIN_Uninstall( void )
 ///////////////////////////
 {
 	/* v1.9: call AU_close() before ReleaseRes() */
+#if DACRING
+	PTRAP_JlmQuiesce();
+#endif
 	AU_close( gm.hAU );
 	ReleaseRes();
 	_uninstall_tsr( _my_psp() ); /* should not return */
