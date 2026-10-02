@@ -144,7 +144,7 @@ static const struct {
 #endif
     "BASE", "real card base, hex (enabler)", &FOpts.base,
     "DACRATE", "codec rate, Hz", &FOpts.dacrate,
-    "MAXHZ", "codec rate ceiling, Hz (CS4231A)", &FOpts.maxhz,
+    "MAXHZ", "codec rate cap, Hz (CS4231A)", &FOpts.maxhz,
 
     "CVOL", "codec attenuation [0-63]", &FOpts.cvol,
     "FMSHIM", "pretend card has no FM", &FOpts.fmshim,
@@ -192,7 +192,7 @@ static const struct {
     "PS", "period size [def 512]", &gvars.period_size,
 #if SOUNDFONT
     "SF:", "Set sound font file name", (int *)&gvars.soundfont,
-    "MV",  "Set voice limit [0-256, def 64]", &gvars.voices,
+    "MV",  "voice limit [0-256, def 64]", &gvars.voices,
 #endif
     "CF", "compat flags [def 0]", &gvars.compatflags,
 #ifdef _DEBUG
