@@ -455,6 +455,17 @@ so audio runs on a real 8237 channel-0 autoinit ring in DOS conventional
 memory, and the codec's period interrupt (IRQ10, planar-wired) is the engine
 clock. Guest DMA must therefore not be channel 0 — use `/D1` or `/D3`.
 
+Guest PCM takes the passthrough tap by default: the raw guest stream is
+stepped onto a fixed codec rate (11025 Hz unless `/DACRATE`) with the IBMAUD
+frame stepper and written into the ring ahead of the 8237 play position,
+which is also the clock that sets the rate of direct DAC (DSP command 10h).
+`SBEPTLAT` sets the queued-audio target (default 80 ms). The tap caps the
+codec period at 1/128 s (256 bytes at 11025 Hz, a 172 Hz interrupt) whatever
+`/PS` says: the guest's SB blocks are taken and its SB IRQs delivered once a
+period, and at 43 Hz (`/PS1024`) DOOM2's sound effects came out quiet and
+choppy. The engine render path is used instead when the software OPL3 is live (VSBPCMT.EXE without
+`/LPT` or `/FMVOL`; a tap never runs the mixer) or under `/RESAMP`.
+
 For FM music rather than detection-only, build `CARD=TP755` (VSBPCMT.EXE),
 which compiles the DOSBox OPL3 emulation back in. FM traffic is then tamed by
 a v86 fast path: delay reads answered in-stub, and non-timer register writes

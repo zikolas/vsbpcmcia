@@ -79,6 +79,11 @@ In builds without `SNDISR_TELEMETRY` two per-tick bytes change jobs: 0x4F5
 counts silence padded into a live tap stream (a gap in the audio), 0x4F8
 play-position reads refused as mid-step reads (goal for both: 0).
 
+TP755 (sc_tp755.c's header has its full map; its own IAC instrument, 0x4F0-0x4FD,
+in every build). In tap mode two more: 0x4FE silence padded into a live tap
+stream (a gap the guest left), 0x4FF steps where the 8237 overtook the tap's
+writer and the ring replayed stale audio (goal for both: 0).
+
 Rate measurements: read 0x46C (BIOS tick dword) and the counters in ONE
 mem_read (0x46C, 148 bytes spans both) and clock deltas against the BIOS
 tick -- wall-clock between tool calls is unreliable.

@@ -148,7 +148,7 @@ static const struct {
 
     "CVOL", "codec attenuation [0-63]", &FOpts.cvol,
     "FMSHIM", "pretend card has no FM", &FOpts.fmshim,
-    "RESAMP", "resample, no PT (VEW211)", &FOpts.resamp,
+    "RESAMP", "resample, no PT (VEW/IBM/755)", &FOpts.resamp,
     "FMVOL", "real-OPL3 volume [0-63]", &gvars.fmvol,
     "LPT", "OPL3LPT on LPT, hex [378]", &FOpts.lpt,
     "?", "this help", &gm.bHelp,

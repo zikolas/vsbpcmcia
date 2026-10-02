@@ -20,11 +20,20 @@
 //
 //  So this driver is the SC_ICH model, not the sc_es1688/sc_vew211 pump
 //  model: a hardware-paced 8237 ch0 autoinit ring in DOS conventional
-//  memory, refilled by SNDISR on the codec's own half-ring... rather,
-//  per-period IRQ10. No RTC, no tick credit, no PRDY workarounds, no
-//  passthrough (the sndisr tap stays unarmed): the engine renders SB PCM + emulated OPL3
-//  (CARD_TP755 unmasks NOFM -- there is no FM chip anywhere on the 755C)
-//  into the ring via the standard AU_cardbuf_space/AU_writedata path.
+//  memory, refilled by SNDISR on the codec's per-period IRQ10. No RTC, no
+//  tick credit, no PRDY workarounds. Two ways to fill the ring:
+//   * TAP (the default since 2026-10-02): the sndisr passthrough tap hands
+//     the guest's raw PCM to TP_PT_Feed, which steps it onto the codec's
+//     fixed rate (11025 Hz unless /DACRATE) with sc_ibmaud.c's stepper and
+//     writes it into the ring ahead of the 8237 play position. The 8237
+//     position is also the pt_ops clock, so direct DAC is fed at a measured
+//     rate (SNDISR_DacFeed). DOOM2's SFX were quiet and choppy through the
+//     render path on this codec and clean through the IBM card's tap on the
+//     same 755.
+//   * RENDER: the engine renders SB PCM + emulated OPL3 (CARD_TP755 unmasks
+//     NOFM -- there is no FM chip anywhere on the 755C) into the ring via
+//     the standard AU_cardbuf_space/AU_writedata path. Taken when the
+//     software OPL3 is live (a tap never runs the mixer) or under /RESAMP.
 //
 //  Enable: the card powers up dark; ThinkPad system control port 0x15E8
 //  (index) / 0x15E9 (data), index 0x1C, bit 0x02 = codec enable (from the
@@ -114,9 +123,13 @@ extern uint32_t DSBase;
 
 #define TP_RING_BYTES 8192u         // must be a power of two and a multiple
 #define TP_PERIOD_DEF 512u          //   of the period; 8K @ 22050 st16 = ~81ms queue
-#define TP_RATE_DEF   22050u
+#define TP_RATE_DEF   22050u        // render path
+#define TP_RATE_TAP   11025u        // tap: the stepper folds every guest rate onto it
 #define TP_RATE_MIN   5510u
 #define TP_RATE_MAX   48000u
+#define TP_RF   (TP_RING_BYTES / 4u)  // ring frames (16-bit stereo)
+#define TP_QMAX (TP_RF - TP_RF / 8u)  // tap: frames queued, hard cap (play never
+                                      //   catches the writer from behind)
 
 //---------------------------------------------------------------- state ---
 struct tp755_card_s { uint16_t base; };
@@ -134,6 +147,34 @@ static unsigned tp_hw_rate   = 0;            // configured-format record: enable
 static unsigned tp_hw_armed  = 0;            //   cheap restart + the watchdog heal
 static uint8_t  tp_ctl_was_on = 0;           // enable state found at detect
 
+// Tap state (TP_PT_*). OWNERSHIP: the ring write side and the position
+// tracker are touched only with tp_busy held -- SETIF lets a second SNDISR
+// nest, and its irq_routine pad must not interleave with an outer feed
+// (sc_ibmaud.c's ONE WRITER rule).
+static int      tp_tap       = 0;            // PTF_TAP registered (adetect)
+static volatile int tp_busy;
+static uint32_t tp_wr, tp_cons;              // frames written / played since start
+static unsigned tp_lastp;                    // last ring frame position tracked
+static uint8_t  tp_bad;                      // consecutive refused position steps
+static unsigned tp_lat_ms    = 80;           // SBEPTLAT: queued-audio target
+static unsigned tp_qtarget, tp_qlow;         // frames: latency target, pad floor
+static uint32_t tp_pt_cons;                  // tp_cons at the last tap feed
+static uint8_t  tp_tel_gap, tp_tel_under;    // 0x4FE / 0x4FF (tap builds)
+// pt_ops clock, 1/32768 s: the 8237's own consumption, which keeps counting
+// through lost or late IRQ10s
+static volatile unsigned long tp_clock;
+static unsigned long tp_clock_frac;          // remainder, 1/(32768 * rate) s
+// frame stepper (sc_ibmaud.c's: Bresenham + linear interpolation, averaging
+// only above 3:2)
+static int           tp_pt_active;
+static unsigned      tp_pt_rate, tp_pt_bits, tp_pt_channels;
+static unsigned long tp_step_acc;            // Bresenham phase, 0..rate-1
+static unsigned long tp_step_inv;            // (1 << 24) / rate
+static int           tp_pl, tp_pr, tp_pvok;  // previous guest frame, 16-bit L/R
+static long          tp_dsl, tp_dsr;         // decimator sums ...
+static unsigned      tp_dn;                  // ... over this many guest frames
+#define TP_DECIMATE(f) ((f) + ((f) >> 1))
+
 // TELEMETRY (VEW211 pattern): breadcrumbs into the BIOS IAC area 0x4F0-4FF,
 // readable over COMrade mid-wedge (agent alive) or after a WARM reboot
 // (IAC survives Ctrl-Alt-Del on IBM BIOSes). Layout:
@@ -145,6 +186,9 @@ static uint8_t  tp_ctl_was_on = 0;           // enable state found at detect
 // published while it is 1 -- build with RATEDIAG 0 to diagnose this card.
 //   4FB = depth high-water         4FC = IRQ0 polls per tick (last)
 //   4FD = polls-per-tick high-water (the IRQ0-saturation meter)
+//   tap only: 4FE = silence padded into a live stream (a gap the guest left)
+//             4FF = play position overtook the writer (stale ring replayed),
+//                   counted once the step has stood 2 looks
 #define TP_PH_CLAIM  1   /* irq_routine claimed the interrupt      */
 #define TP_PH_GETPOS 2   /* space computed (render about to start) */
 #define TP_PH_WRITE  3   /* writedata reached (render finished)    */
@@ -296,11 +340,14 @@ static void tp_pen(int on)
 // and unsticks everything when it freezes while PEN is on.
 static DPMI_ISR_HANDLE tp_i8_handle;
 static uint8_t tp_i8_hooked = 0;
-static uint8_t tp_g_last = 0, tp_g_frozen = 0, tp_g_begging = 0;
+static uint8_t tp_g_last = 0;
+static uint16_t tp_g_frozen = 0, tp_g_begging = 0;
 static uint8_t tp_g_futile = 0;      // consecutive heals with no tick advance
 static uint8_t tp_g_healtick = 0;    // tick byte at last heal
 static uint16_t tp_g_gap = 0;        // IRQ0 polls since last tick advance
 static uint8_t tp_g_t2 = 0;          // tier-2 (slave re-ICW) heals fired
+static uint16_t tp_g_norm8 = 0;      // polls per engine tick x 8, smoothed 1/8
+#define tp_g_norm (tp_g_norm8 >> 3)
 // Healthy-baseline IMRs, stashed at guardian install (= stack-up, before any
 // guest runs): what tier 2 restores after re-initializing the slave PIC. A
 // mid-init PIC returns garbage on reads, so the restore value must come from
@@ -330,12 +377,14 @@ static void tp_guardian(void)
  if(tp_tick8 != tp_g_last){
   tp_g_last = tp_tick8; tp_g_frozen = 0; tp_g_begging = 0;
   tp_g_futile = 0;                            // real progress ends dormancy
+  tp_g_norm8 = (uint16_t)(tp_g_norm8 - (tp_g_norm8 >> 3)
+                          + (tp_g_gap > 4095 ? 4095 : tp_g_gap));
   tp_iac[0x0C] = (uint8_t)(tp_g_gap > 255 ? 255 : tp_g_gap);
   if(tp_iac[0x0C] > tp_iac[0x0D]) tp_iac[0x0D] = tp_iac[0x0C];
   tp_g_gap = 0;
   return;
  }
- if(tp_g_frozen < 255) tp_g_frozen++;
+ if(tp_g_frozen < 0xFFFF) tp_g_frozen++;
  if(tp_g_frozen < 8) return;
  // FUTILITY BUDGET (MI1 heal-storm lesson, 2026-08-14 pt.2): 250+ heals
  // in seconds while the true blocker (IRQ0 monopoly / stack exhaustion)
@@ -356,7 +405,15 @@ static void tp_guardian(void)
    // and advances the tick counter; SR begging on 3 CONSECUTIVE polls
    // with the counter frozen is impossible unless delivery is truly
    // dead, at any PIT rate.
-   if(++tp_g_begging < 3) return;
+   // POLL-RATE SCALED (JLMTEST W on the 755, 2026-10-02): a guest PIT of
+   // several kHz makes three polls a fraction of a millisecond, and IRQ10
+   // can wait that long behind a saturated IRQ0 -- heals on a healthy
+   // engine, each one a PEN bounce and a gap. So the begging must also
+   // outlast two codec periods' worth of polls, from tp_g_norm (no port
+   // I/O here: every 8237 read is an HDPMI call, and adding them to this
+   // hook made it worse).
+   if(tp_g_begging < 0xFFFF) tp_g_begging++;
+   if(tp_g_begging < 3 || tp_g_begging < 2u * tp_g_norm) return;
    if(tp_tick8 == tp_g_healtick) { if(tp_g_futile < 255) tp_g_futile++; }
    else tp_g_futile = 0;
    tp_g_healtick = tp_tick8;
@@ -419,8 +476,9 @@ static void tp_guardian(void)
    // ticks frozen and codec NOT asking: starved (masked/killed DMA ch0,
    // e.g. a guest 8237 master reset) -> re-unmask; codec resumes, count
    // expires, clock restarts. Benign if false, but be patient enough
-   // that a high-rate PIT can't thrash it (32 polls, not 8).
-   if(tp_g_frozen < 32) return;
+   // that a high-rate PIT can't thrash it (32 polls, not 8, and three
+   // periods' worth at a PIT of several kHz -- see POLL-RATE SCALED).
+   if(tp_g_frozen < 32 || tp_g_frozen < 3u * tp_g_norm) return;
    UntrappedIO_OUT(DMA_REG_SINGLEMASK, 0x00);
    TP_HEAL();
    tp_g_frozen = 0;
@@ -482,15 +540,176 @@ static unsigned tp_dma_count(void)
  return c2;
 }
 
+//------------------------------------------------------------------ tap ---
+// Ring play position in frames for the tap. ONE count per IRQ10, from the
+// pump: every 8237 access is an HDPMI untrapped-I/O call (a count is six),
+// and reading it from space and feed as well -- the IBM card's habit, where a
+// position read is one INW -- cost enough on the DX4/75 to delay IRQ10.
+// tp_dma_count already insists on a stable high byte; a torn count that
+// still gets through is caught by tp_track's step check.
+static unsigned tp_pos_frames(void)
+{
+ return ((TP_RING_BYTES - 1 - tp_dma_count()) & (TP_RING_BYTES - 1)) >> 2;
+}
+
+#define TP_QUEUED() ((unsigned)(tp_wr - tp_cons))
+
+// tp_busy held, pump only. Advance tp_cons and the clock from the 8237
+// position; space, feed and writedata work from this snapshot. A step
+// longer than the queue is either the play position overtaking the writer
+// (the ring replays stale audio; the writer jumps ahead) or a bad read: it
+// is refused for 2 looks first.
+static void tp_track(void)
+{
+ unsigned p = tp_pos_frames(), d = (p - tp_lastp) & (TP_RF - 1);
+ if(d > TP_QUEUED() + 16u){
+  if(tp_bad < 2){ tp_bad++; return; }
+  if(tp_iac) tp_iac[0x0F] = ++tp_tel_under;
+ }
+ tp_bad = 0;
+ tp_cons += d;
+ tp_lastp = p;
+ tp_clock_frac += (unsigned long)d * 32768UL;
+ tp_clock += tp_clock_frac / tp_hw_rate;
+ tp_clock_frac %= tp_hw_rate;
+ if((long)(tp_cons - tp_wr) > 0) tp_wr = tp_cons;
+}
+
+// tp_busy held, room checked by the caller: one 16-bit stereo frame
+static void tp_put(int l, int r)
+{
+ int16_t *f = (int16_t *)tp_ring + (unsigned)(tp_wr & (TP_RF - 1)) * 2u;
+ f[0] = (int16_t)l; f[1] = (int16_t)r;
+ tp_wr++;
+}
+
+// IRQ10, tp_busy free: track, and pad silence below the floor so the 8237
+// never reaches ring contents we did not write this lap.
+static void tp_pump(void)
+{
+ unsigned q;
+ if(tp_busy) return;                           // an outer pass is writing
+ tp_busy = 1;
+ tp_track();
+ q = TP_QUEUED();
+ if(q < tp_qlow){
+  if(tp_pt_active && tp_cons - tp_pt_cons < (uint32_t)(tp_hw_rate / 8u) && tp_iac)
+   tp_iac[0x0E] = ++tp_tel_gap;               // the guest left a gap
+  while(q++ < tp_qlow) tp_put(0, 0);
+ }
+ tp_busy = 0;
+}
+
+static unsigned long TP755_Clock(void){ return tp_clock; }
+
+// Guest bytes the ring accepts now: room up to the latency target, scaled
+// back through the stepper to guest frames.
+static int TP_PT_Space(void)
+{
+ unsigned q, unit;
+ unsigned long g;
+ if(tp_busy) return 0;
+ q = TP_QUEUED();                              // as of this tick's pump
+ if(q >= tp_qtarget) return 0;
+ if(!tp_pt_rate) return 1024;
+ unit = (tp_pt_channels >= 2 ? 2u : 1u) * (tp_pt_bits >= 16 ? 2u : 1u);
+ g = (unsigned long)(tp_qtarget - q) * tp_pt_rate / tp_hw_rate * unit;
+ if(g > 16384UL) g = 16384UL;                  // int is 16 bits in the NOTFLAT build
+ return (int)g;
+}
+
+// Feed raw guest PCM (sndisr.c tap): step it onto the codec rate, 16-bit
+// stereo, into the ring. The stepper is sc_ibmaud.c's IB_PT_Feed; see the
+// notes there for why it averages only above 3:2 and keeps its phase on a
+// rate-only change.
+static void TP_PT_Feed(const unsigned char *buf, int bytes, unsigned rate, unsigned bits, unsigned channels)
+{
+ unsigned unit, q, room;
+ if(tp_busy){ if(tp_iac) tp_iac[4]++; return; }   // counted as a reenter
+ tp_busy = 1;
+ if(!rate) rate = tp_hw_rate;
+ if(tp_pt_active && rate != tp_pt_rate && bits == tp_pt_bits && channels == tp_pt_channels){
+  // rate only (direct DAC's fill trim): keep the phase and the previous frame
+  tp_step_acc = tp_step_acc * rate / tp_pt_rate;
+  if((rate > TP_DECIMATE(tp_hw_rate)) != (tp_pt_rate > TP_DECIMATE(tp_hw_rate))){
+   tp_dsl = tp_dsr = 0; tp_dn = 0;              // across the decimator's edge
+  }
+  tp_pt_rate = rate;
+  tp_step_inv = (1UL << 24) / rate;
+ }else if(!tp_pt_active || rate != tp_pt_rate || bits != tp_pt_bits || channels != tp_pt_channels){
+  // a format change only re-aims the stepper: the codec keeps its clock
+  tp_pt_rate = rate; tp_pt_bits = bits; tp_pt_channels = channels;
+  tp_step_acc = 0;
+  tp_step_inv = (1UL << 24) / rate;
+  tp_dsl = tp_dsr = 0; tp_dn = 0;
+  tp_pvok = 0;
+  tp_pt_active = 1;
+ }
+ tp_pt_cons = tp_cons;
+ q = TP_QUEUED();
+ room = q < TP_QMAX ? TP_QMAX - q : 0;
+ unit = (channels >= 2 ? 2u : 1u) * (bits >= 16 ? 2u : 1u);
+ while(bytes >= (int)unit){
+  int l, r;
+  if(bits >= 16){
+   l = (int)(short)((unsigned)buf[0] | ((unsigned)buf[1] << 8));
+   r = channels >= 2 ? (int)(short)((unsigned)buf[2] | ((unsigned)buf[3] << 8)) : l;
+  }else if(channels >= 2){
+   // SB Pro 8-bit stereo: the first byte of a frame is the RIGHT channel
+   // (the render path's swap in sndisr.c, kept so the image does not flip)
+   r = ((int)buf[0] - 128) << 8;
+   l = ((int)buf[1] - 128) << 8;
+  }else
+   l = r = ((int)buf[0] - 128) << 8;
+  tp_step_acc += tp_hw_rate;
+  if(rate > TP_DECIMATE(tp_hw_rate)){
+   // decimating: average the guest frames of each output interval
+   tp_dsl += l; tp_dsr += r; tp_dn++;
+   if(tp_step_acc >= rate){
+    tp_step_acc -= rate;
+    if(!room){ bytes = 0; break; }             // ring full: drop the rest
+    tp_put((int)(tp_dsl / (long)tp_dn), (int)(tp_dsr / (long)tp_dn));
+    tp_dsl = tp_dsr = 0; tp_dn = 0;
+    room--;
+   }
+  }else
+  // interpolating: w runs 0..256 from the previous guest frame to this one
+  while(tp_step_acc >= rate){
+   long w;
+   tp_step_acc -= rate;
+   w = 256L - (long)((tp_step_acc * tp_step_inv) >> 16);
+   if(w < 0) w = 0;
+   if(w > 256) w = 256;
+   if(!tp_pvok) w = 256;                        // no previous frame yet
+   if(!room){ bytes = 0; break; }               // ring full: drop the rest
+   tp_put(tp_pl + (int)((((long)l - (long)tp_pl) * w) >> 8),
+          tp_pr + (int)((((long)r - (long)tp_pr) * w) >> 8));
+   room--;
+  }
+  tp_pl = l; tp_pr = r; tp_pvok = 1;
+  buf += unit; bytes -= (int)unit;
+ }
+ tp_busy = 0;
+}
+
 //------------------------------------------------------------ callbacks ---
 // Engine passthrough ops (ptops.h; bodies live in the engine-ABI section at
-// the end of this file). No tap and NO real FM anywhere on a 755C -- the
-// absence of PTF_REAL_FM is what tells the engine 0x388 is open bus here.
+// the end of this file). NO real FM anywhere on a 755C -- the absence of
+// PTF_REAL_FM is what tells the engine 0x388 is open bus here.
 static void tp_dbg_tick(void);
 static void tp_dbg_exit(void);
 static void tp_dbg_reenter(void);
 static void tp_watchdog(void);
-static const struct pt_ops_s tp755_pt_ops = {
+static const struct pt_ops_s tp755_tap_ops = {
+ PTF_TAP,
+ TP_PT_Space, TP_PT_Feed, tp_watchdog,
+ tp_dbg_tick, tp_dbg_exit, tp_dbg_reenter,
+ TP755_Depth,
+ 0, 0,                                         // render_cap, render_div: no render path
+ TP755_Clock,                                  // direct DAC rate measurement (sndisr.c)
+};
+// render path: the software OPL3 is live, or /RESAMP
+static const struct pt_ops_s tp755_render_ops = {
  0,
  NULL, NULL, tp_watchdog,
  tp_dbg_tick, tp_dbg_exit, tp_dbg_reenter,
@@ -517,6 +736,17 @@ static int TP755_adetect(struct audioout_info_s *aui)
   printf("CS4248: guest DMA 0 collides with the codec's real DMA ch0; use /D1 or /D3\n");
   return 0;
  }
+
+ // Tap unless the mixer has work only it can do: the software OPL3 (live
+ // unless main.c gives 388h to /LPT or /FMVOL) is rendered there, and a tap
+ // never runs it. /RESAMP picks the render path by hand.
+ tp_tap = !FOpts.resamp;
+#ifdef CARD_TP755
+ if(aui->gvars->opl3 && !FOpts.lpt && aui->gvars->fmvol < 0) tp_tap = 0;
+#endif
+ if(tp_tap) tp_dacrate = TP_RATE_TAP;
+ if((e = getenv("SBEPTLAT")) != NULL){ int ms = atoi(e);
+        if(ms >= 20 && ms <= 1000) tp_lat_ms = (unsigned)ms; }
 
  // /BASE here is the planar codec block (0x4E30).
  if(FOpts.base > 0 && FOpts.base <= 0xFFFC) tp_cb = (uint16_t)FOpts.base;
@@ -585,7 +815,7 @@ static int TP755_adetect(struct audioout_info_s *aui)
  tp_iac = (uint8_t *)TP_NEARPTR(0x4F0);       // telemetry window (BIOS IAC)
  memset(tp_iac, 0, 16);
  tp_i8_install();                             // the clock guardian
- PTOPS_Register(&tp755_pt_ops);               // dbg instrument + reset hook; no tap
+ PTOPS_Register(tp_tap ? &tp755_tap_ops : &tp755_render_ops);
 
  printf("CS4248 found @ %04Xh (I12=%02Xh, TP ctl was %02Xh)\n",
         tp_cb, id, tp_ctl_was_on);
@@ -602,6 +832,16 @@ static void TP755_setrate(struct audioout_info_s *aui)
 
  tp_period = aui->gvars->period_size ? (unsigned)aui->gvars->period_size
                                      : TP_PERIOD_DEF;
+ // TAP: the engine runs once a period, and that is when the guest's SB
+ // blocks are taken and its SB IRQs delivered. At 43 Hz (1024-byte periods
+ // at 11025) DOOM2's SFX were quiet and choppy -- through the render path
+ // too -- and at 172 Hz (256-byte) they were clean (755, 2026-10-02); the
+ // IBM card's tap pumps at 128 Hz. So the tap caps the period at 1/128 s,
+ // whatever /PS says (the launchers carry /PS1024 for the render path).
+ if(tp_tap){
+  unsigned cap = (unsigned)(tp_rates[tp_rate_pick(tp_dacrate)].hz / 128UL) * 4u;
+  if(tp_period > cap) tp_period = cap;
+ }
  if(tp_period < 128) tp_period = 128;
  if(tp_period > 2048) tp_period = 2048;
  tp_period &= ~3u;                            // whole 16-bit stereo frames
@@ -613,14 +853,39 @@ static void TP755_setrate(struct audioout_info_s *aui)
  aui->bits_card = 16;                         // codec native == engine native
  MDma_initbuf(aui, TP_RING_BYTES);            // v2.0: sets card_dmasize only
 
- printf("CS4248 (TP755 planar WSS) 8237-ch0 autoinit ring @ %04Xh, %u Hz, "
-        "%u-byte periods on IRQ10\n", tp_cb, got, tp_period);
+ // Tap queue in frames. The pump (IRQ10) visits once a period, so the pad
+ // floor must outlast one period with margin, and the target sits a period
+ // above the floor and a period below the hard cap.
+ { unsigned pf = tp_period / 4u;
+   unsigned long q = (unsigned long)got * tp_lat_ms / 1000UL;
+   unsigned low;
+   if(q > (unsigned long)(TP_QMAX - pf)) q = TP_QMAX - pf;
+   low = (unsigned)q / 2u;
+   if(low < pf + pf / 2u) low = pf + pf / 2u;
+   if(q < (unsigned long)(low + pf)) q = low + pf;
+   tp_qtarget = (unsigned)q; tp_qlow = low; }
+
+ // one console line, 79 columns at most (worst case 77: 48000 Hz, 2048-byte
+ // periods, a 3-digit queue -- the ring caps it at 325 ms)
+ if(tp_tap)
+  printf("CS4248 %04Xh: %u Hz, 8237 ch0 ring, %u-byte periods on IRQ10, tap %u ms\n",
+         tp_cb, got, tp_period, (unsigned)((unsigned long)tp_qtarget * 1000UL / got));
+ else
+  printf("CS4248 %04Xh: %u Hz, 8237 ch0 ring, %u-byte periods on IRQ10, render\n",
+         tp_cb, got, tp_period);
 }
 
 static void TP755_start(struct audioout_info_s *aui)
 {
  int tries;
  memset(tp_ring, 0, TP_RING_BYTES);           // 16-bit signed silence = 0
+ // the 8237 restarts at ring offset 0; the zeroed floor counts as queued.
+ // tp_clock runs on across a restart.
+ tp_busy = 1;
+ tp_cons = 0; tp_lastp = 0; tp_bad = 0;
+ tp_wr = tp_qlow;
+ tp_pt_active = 0;
+ tp_busy = 0;
  tp_dma_arm();
  outportb(tp_cb + TC_SR, 0);                  // clear any stale codec INT
  tp_ci_put(0x0A, I10_IEN);                    // interrupt pin enable
@@ -675,11 +940,26 @@ static unsigned int TP755_getbufpos(struct audioout_info_s *aui)
  return pos;
 }
 
-// thin MDma_writedata wrapper: phase breadcrumb = "render finished, copying"
+// Render path: MDma_writedata at the engine's write pointer. Tap builds land
+// here too for what the tap does not take (ADPCM; direct DAC in the 16-bit
+// build, which has no DAC ring): engine frames are the ring's format, so they
+// are appended at the tap's writer, up to the latency target. A live tap
+// stream owns the ring for half a second after its last feed.
 static void TP755_writedata(struct audioout_info_s *aui, char *src, unsigned int bytes)
 {
+ const int16_t *p = (const int16_t *)src;
+ unsigned n, q;
  TP_IAC(1, TP_PH_WRITE);
- MDma_writedata(aui, src, bytes);
+ if(!tp_tap){ MDma_writedata(aui, src, bytes); return; }
+ if(tp_busy) return;
+ if(tp_pt_active && tp_cons - tp_pt_cons < (uint32_t)(tp_hw_rate / 2u)) return;
+ tp_busy = 1;
+ q = TP_QUEUED();
+ n = bytes / 4u;
+ if(q >= tp_qtarget) n = 0;
+ else if(n > tp_qtarget - q) n = tp_qtarget - q;
+ while(n--){ tp_put(p[0], p[1]); p += 2; }
+ tp_busy = 0;
 }
 
 static int TP755_irq(struct audioout_info_s *aui)
@@ -687,6 +967,7 @@ static int TP755_irq(struct audioout_info_s *aui)
  unsigned char s = (unsigned char)inportb(tp_cb + TC_SR);
  if(s & SR_INT) outportb(tp_cb + TC_SR, 0);   // any Status write clears INT
  if(tp_iac){ tp_iac[1] = TP_PH_CLAIM; tp_iac[5] = s; }
+ if(tp_tap && tp_pen_on) tp_pump();           // track + pad ahead of the 8237
  // CLAIM UNCONDITIONALLY -- bench-proven mid-DOOM 2026-08-14: returning 0
  // chains to the IBM BIOS default INT 72h stub, which EOIs the MASTER
  // only; the slave's in-service bit sticks and IRQ10..15 (our clock AND
@@ -729,6 +1010,7 @@ static void tp_dbg_reenter(void)
 }
 static void tp_watchdog(void)
 {
+ tp_pt_active = 0;                             // tap: the next feed re-aims the stepper
  if(tp_hw_armed){
   uint8_t f = DPMI_DisableInterrupt();
   UntrappedIO_OUT(DMA_REG_SINGLEMASK, 0x00);  // re-unmask ch0
@@ -765,7 +1047,7 @@ struct sndcard_info_s TP755_sndcard_info={
  &TP755_adetect,                                      // card_detect
  &TP755_start, &TP755_stop, &TP755_close,             // start / stop / close
  &TP755_setrate,                                      // card_setrate
- &MDma_writedata, &TP755_getbufpos,                   // writedata / getpos (v2.0: no clear slot)
+ &TP755_writedata, &TP755_getbufpos,                  // writedata / getpos (v2.0: no clear slot)
  &TP755_irq,                                          // irq_routine (check+ack)
  NULL, NULL, NULL,                                    // mixer slots
  sizeof(struct tp755_card_s)                          // private_data_size: the engine allocates it
