@@ -225,9 +225,12 @@ VSBPCM finds it at load, arms it, and keeps the ports it took off its own
 QPI traps; the load line says what it serves. Protected-mode games still
 reach VSBPCM through HDPMI, as before.
 
- * FM, while the timer shim owns the FM ports (no chip, `/FMSHIM`, `/LPT`):
-   0x388-0x38B and the SB-base aliases. Status comes from the shim's timer
-   model and `/LPT` writes go to the OPL3LPT. A status read while the last
+ * FM, while the timer shim owns the FM ports (no chip, `/FMSHIM`, `/LPT`)
+   or the software OPL3 does (VSBPCMT, VSBPCMA): 0x388-0x38B and the SB-base
+   aliases. Status comes from the shim's timer model, `/LPT` writes go to
+   the OPL3LPT, and for the software OPL3 the writes go into a ring in the
+   shared DOS memory that VSBPCM replays into the emulation before it
+   renders. A status read while the last
    index written is 20h or above is delay padding, and its `IN AL,DX` is
    rewritten to `NOP` in the game's code (`SBEFMPATCH=0` keeps them).
    Theme Hospital's Miles FM driver runs in V86, and its music, slow from

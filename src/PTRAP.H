@@ -39,6 +39,8 @@ uint8_t *PTRAP_DspStatusCell( void );
 #if DACRING
 /* VSBPCMJ.DLL: stop its pump guard (unload, before the card closes) */
 void PTRAP_JlmQuiesce( void );
+/* replay the JLM's FM ring into vopl3 (builds with the software OPL3) */
+void PTRAP_DrainJlmFm( void );
 #endif
 
 

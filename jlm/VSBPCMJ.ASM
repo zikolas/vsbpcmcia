@@ -21,12 +21,15 @@
 ;
 ;  WHAT IT OWNS, once VSBPCM arms it (VSBPCM then leaves these ports off
 ;  its QPI traps; protected-mode guests still reach VSBPCM through HDPMI):
-;   - FM, when VSBPCM runs its FM shim (no FM chip, /FMSHIM or /LPT):
-;     388h-38Bh and the SB-base aliases (base+0..3, base+8/9). Status
-;     reads come from the timer model of src/FMSHIM.C; with /LPT every
-;     index and data write also goes to the OPL3LPT. A status read while
-;     the last index written is 20h or above is delay padding: its
-;     IN AL,DX (ECh) is rewritten to NOP (90h) in the guest's code.
+;   - FM, when VSBPCM runs its FM shim (no FM chip, /FMSHIM or /LPT) or
+;     its software OPL3 (the builds with dbopl): 388h-38Bh and the
+;     SB-base aliases (base+0..3, base+8/9). Status reads come from the
+;     timer model of src/FMSHIM.C; with /LPT every index and data write
+;     also goes to the OPL3LPT, and for the software OPL3 every data
+;     write goes into the FM ring in the shared block, which VSBPCM
+;     replays into its OPL3 before it renders. A status read while the
+;     last index written is 20h or above is delay padding: its IN AL,DX
+;     (ECh) is rewritten to NOP (90h) in the guest's code.
 ;   - direct DAC: the DSP write port (base+0Ch). Write-status reads are
 ;     answered from the counter VSBPCM's stub and vsb.c share; command 10h
 ;     and its sample byte go into a ring that VSBPCM drains each tick;
@@ -60,7 +63,7 @@
 
 DEVICE_ID   equ 5650h
 VER_MAJOR   equ 0
-VER_MINOR   equ 4
+VER_MINOR   equ 5
 
 DLL_PROCESS_ATTACH  equ 1
 DLL_PROCESS_DETACH  equ 0
@@ -107,9 +110,16 @@ SH_V86PATCH equ 9Ch         ; sequences turned into calls to ringput
 SH_RING     equ 0A0h
 SH_V86CODE  equ SH_RING + 800h  ; ringput's copy, after a 2048-byte ring
 V86CODEMAX  equ 96
+                            ; 900h-90Dh: VSBPCM's drain statistics
+SH_OHEAD    equ 90Eh        ; FM ring: producer index (here)
+SH_OTAIL    equ 910h        ;          consumer index (VSBPCM)
+SH_OSIZE    equ 912h        ;          entries, a power of two; 0 = none
+SH_OLOST    equ 914h        ;          FM writes dropped, ring full
+SH_ORING    equ 91Ch        ;          dwords: value | index << 8 |
+                            ;          register array << 16
 
 SIG_VSBJ    equ 4A425356h   ; 'VSBJ'
-BLK_VER     equ 5
+BLK_VER     equ 6
 
 F_FM        equ 01h
 F_DAC       equ 02h
@@ -118,6 +128,7 @@ F_POLL      equ 08h         ; DSP write-status polls -> no read at all
 F_PIC       equ 10h         ; port 20h: the master PIC's command port
 F_PAIR      equ 20h         ; 10h-and-sample sequences -> one trap
 F_V86       equ 40h         ; ... and then a call to ringput, no trap
+F_OPL       equ 80h         ; FM data writes into the FM ring, not the LPT
 
 NPAIR       equ 4           ; direct-DAC sample sites remembered
 
@@ -144,6 +155,7 @@ share   dd 0                ; linear address of the shared block; 0 = disarmed
 rmask   dd 0                ; DAC ring size - 1
 lptdat  dd 0                ; OPL3LPT data port; 0 = no chip
 lptdly  dd 0                ; control-port reads after each strobe
+omask   dd 0                ; FM ring entries - 1
 flags   dd 0                ; F_* armed
 sbbase  dd 0
 qpicb   dd 0
@@ -162,7 +174,7 @@ piccell dd 0
 pairsin dd 0                ; pair sites in use
 pairs   dd NPAIR dup (0)    ; linear addresses of their sample OUTs
 
-banner  db "VSBPCMJ 0.4: ring-0 FM and DSP ports for VSBPCM, armed when it loads"
+banner  db "VSBPCMJ 0.5: ring-0 FM and DSP ports for VSBPCM, armed when it loads"
         db 13, 10, 0
 
 ;--- ringput: 16-bit code, copied to SH_V86CODE in the shared block at arm
@@ -271,8 +283,26 @@ arm_lptok:
 @@:
         mov sbbase, eax
         movzx eax, byte ptr [ebx+SH_FLAGS]
-        and eax, F_FM or F_DAC or F_PATCH or F_POLL or F_PIC or F_PAIR or F_V86
+        and eax, F_FM or F_DAC or F_PATCH or F_POLL or F_PIC or F_PAIR or F_V86 or F_OPL
         mov flags, eax
+        test eax, F_OPL                 ; the FM ring: FM ports, no LPT, and
+        jz arm_noopl                    ; a ring that ends below 0F0000h
+        test eax, F_FM
+        jz arm_bad
+        mov lptdat, 0
+        movzx eax, word ptr [ebx+SH_OSIZE]
+        cmp eax, 16
+        jb arm_bad
+        cmp eax, 4096
+        ja arm_bad
+        lea ecx, [eax-1]
+        test eax, ecx
+        jnz arm_bad
+        mov omask, ecx
+        lea ecx, [ebx+SH_ORING+eax*4]
+        cmp ecx, 0F0000h
+        ja arm_bad
+arm_noopl:
         mov eax, [ebx+SH_QPICB]
         mov qpicb, eax
         mov eax, [ebx+SH_WSCELL]
@@ -574,10 +604,33 @@ fmw_first:
         jz fmw_send
         mov fmtmr[1], al
 fmw_send:
+        test byte ptr flags, F_OPL
+        jnz fmw_ring
         cmp lptdat, 0
         jz fmw_done
         mov bx, 0C08h                   ; value: control 12/8/12
         call lptout
+        jmp fmw_done
+fmw_ring:                               ; the software OPL3's entry, in order
+        push eax
+        push edx
+        movzx eax, al
+        mov ah, fmidx[ecx]
+        shl ecx, 16
+        or eax, ecx                     ; value | index << 8 | array << 16
+        movzx ecx, word ptr [ebx+SH_OHEAD]
+        lea edx, [ecx+1]
+        and edx, omask
+        cmp dx, word ptr [ebx+SH_OTAIL]
+        jz fmw_full
+        mov [ebx+SH_ORING+ecx*4], eax
+        mov word ptr [ebx+SH_OHEAD], dx ; then the index: the entry is whole
+        jmp fmw_put
+fmw_full:
+        inc dword ptr [ebx+SH_OLOST]
+fmw_put:
+        pop edx
+        pop eax
 fmw_done:
         pop ecx
         pop ebx

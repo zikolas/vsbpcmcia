@@ -211,6 +211,16 @@ struct rmlpt {
  * 17 of the 160 bytes in the plain build, 279 + 17 with the OPL fast path. */
 #define PSP_STUB_ROOM   (0x100 - DOSMEMSTART)
 
+#ifdef VSBJ_FMRING
+/* An FM access that reaches us (a protected-mode guest's, or one that the
+ * JLM does not own) is newer than whatever V86 FM writes wait in the JLM's
+ * FM ring, so they go into vopl3 first. */
+static int IsVopl3Handler( PORT_TRAP_HANDLER h )
+{
+    return h == VOPL3_388 || h == VOPL3_389 || h == VOPL3_38A || h == VOPL3_38B;
+}
+#endif
+
 /* One byte of a decomposed multi-byte access: route it through the port's
  * registered handler if the port is trapped, else to real hardware. */
 static uint8_t PTRAP_TrapByte( uint16_t port, uint8_t val, uint16_t flags )
@@ -218,6 +228,10 @@ static uint8_t PTRAP_TrapByte( uint16_t port, uint8_t val, uint16_t flags )
     int i;
     for ( i = 0; i < maxports; i++ )
         if ( PortTable[i] == port ) {
+#ifdef VSBJ_FMRING
+            if ( IsVopl3Handler( PortHandler[i] ) )
+                PTRAP_DrainJlmFm();
+#endif
 #if HANDLE_IN_388H_DIRECTLY
             if ( IsOplHandler( PortHandler[i] ) ) {
                 PTRAP_DrainOplRing();       /* ring entries are older: first */
@@ -419,6 +433,10 @@ uint32_t PTRAP_PM_TrapHandler( uint16_t port, uint16_t flags, uint32_t value,
     }
     for( i = 0; i < maxports; i++ )
         if( PortTable[i] == port) {
+#ifdef VSBJ_FMRING
+            if ( IsVopl3Handler( PortHandler[i] ) )
+                PTRAP_DrainJlmFm();
+#endif
 #if HANDLE_IN_388H_DIRECTLY
             /* drain-first + keep the v86 stub's 0x388 status cache fresh
              * across worlds (a PM game's OPL writes must be visible to a
@@ -589,7 +607,9 @@ uint8_t *PTRAP_DspStatusCell( void )
  * in V86), and direct DAC, two trapped writes per sample (Another World).
  * When the JLM is loaded, it takes those ports at ring 0 and they stay off
  * the QPI traps: the FM ports while the timer shim owns them (no chip,
- * /FMSHIM, /LPT), and the DSP write port always. Protected-mode guests still
+ * /FMSHIM, /LPT) or the software OPL3 does (builds without NOFM: the JLM
+ * then puts the writes in its FM ring and PTRAP_DrainJlmFm replays them
+ * into vopl3), and the DSP write port always. Protected-mode guests still
  * come through HDPMI to the handlers here. SBENOJLM=1 (bench knob) leaves the
  * JLM unarmed, so everything takes QPI as before.
  *
@@ -607,6 +627,7 @@ static uint32_t QPI_StubCB;     /* the seg:off we gave QPI (fn 1A07h) */
 static int PrepSB;              /* PTRAP_Prepare's sbaddr */
 static int PrepLptDly = 6;      /* ... and the /LPT strobe delay it chose */
 static int PrepIrq;             /* ... and the card's IRQ (8 = the RTC pumps) */
+static int PrepOpl;             /* ... and whether the software OPL3 is on */
 
 struct vsbj_share *PTRAP_Share( void )
 {
@@ -704,6 +725,18 @@ static void JlmArm( void )
         if ( !( ( e = getenv("SBEFMPATCH") ) && *e == '0' ) )
             want |= VSBJ_F_PATCH;
     }
+#ifdef VSBJ_FMRING
+    else if ( PrepOpl ) {
+        /* The software OPL3: the JLM takes the V86 FM ports as it does for
+         * the shim and answers status from the same timer model, and its
+         * data writes go into the FM ring for PTRAP_DrainJlmFm, one fault a
+         * write where the stub took a QPI round trip (and, for array 1 and
+         * the SB aliases, an RMCB as well). */
+        want |= VSBJ_F_FM | VSBJ_F_OPL;
+        if ( !( ( e = getenv("SBEFMPATCH") ) && *e == '0' ) )
+            want |= VSBJ_F_PATCH;
+    }
+#endif
     /* the same for a direct-DAC guest's write-status busy-waits, two of
      * its four traps per sample, then its 10h-and-sample pairs, and for
      * Another World's exact sequence a call into the JLM's V86 copy of the
@@ -732,11 +765,14 @@ static void JlmArm( void )
     s->sig = VSBJ_SIG;
     s->ver = VSBJ_VER;
     s->ringsize = VSBJ_RING;
-    s->lpt = ( want & VSBJ_F_FM ) ? (uint16_t)FOpts.lpt : 0;
+    s->lpt = ( ( want & ( VSBJ_F_FM | VSBJ_F_OPL ) ) == VSBJ_F_FM ) ? (uint16_t)FOpts.lpt : 0;
     s->lptdly = (uint8_t)PrepLptDly;
     s->flags = want;
     s->sbbase = (uint16_t)PrepSB;
     s->qpicb = QPI_StubCB;
+#ifdef VSBJ_FMRING
+    s->osize = ( want & VSBJ_F_OPL ) ? VSBJ_FMRING : 0;
+#endif
     stub = RMStubLinear ? RMStubLinear : _my_psp() + DOSMEMSTART;
     s->wscell = stub + offsetof(struct rmcode1, bDspWS);
     s->piccell = stub + offsetof(struct rmcode1, wPort);
@@ -760,10 +796,10 @@ static void JlmArm( void )
     JlmArmed = want;
     JlmSB = (uint16_t)PrepSB;
     PTOPS_PumpGuard = s->guard;
-    /* worst case 74 columns: FM at 388h+220h (LPT 378h, patching), DSP 22Ch */
+    /* worst case 79 columns: FM 388h+240h (dbopl, no patching), DSP 24Ch */
     if ( want & VSBJ_F_FM )
         printf("VSBPCMJ: ring 0 serves FM 388h+%Xh (%s%s), DSP %Xh; block %04lXh\n",
-               PrepSB, FOpts.lpt ? "LPT, " : "",
+               PrepSB, ( want & VSBJ_F_OPL ) ? "dbopl, " : FOpts.lpt ? "LPT, " : "",
                ( want & VSBJ_F_PATCH ) ? "patching" : "no patching",
                PrepSB + SB_PORT_DSP_WRITE_WS, (unsigned long)( lin >> 4 ) );
     else
@@ -790,6 +826,48 @@ static void JlmDisarm( void )
     JlmShare = &JlmLocal;
     JlmFreeBlock();
 }
+
+#ifdef VSBJ_FMRING
+/* The JLM's FM ring: a V86 guest's FM register writes in its order, as
+ * value | index << 8 | register array << 16, replayed into vopl3 before
+ * each render (sndisr.c) and before any FM access that still comes here.
+ * The sound interrupt and a protected-mode trap can both drain, so entries
+ * are taken with interrupts off, 32 at a time: one long cli would hold off
+ * COMRADE's UART past its FIFO (PTRAP_DrainOplRing, the same reasoning). */
+void PTRAP_DrainJlmFm( void )
+{
+    struct vsbj_share *s = JlmShare;
+    const uint16_t mask = VSBJ_FMRING - 1;
+    uint16_t head, tail, occ;
+    uint32_t f;
+    int n;
+
+    if ( !( JlmArmed & VSBJ_F_OPL ) || s->ohead == s->otail )
+        return;
+    do {
+        __asm__ __volatile__("pushfl; popl %0; cli" : "=r"(f) :: "memory");
+        head = s->ohead;
+        tail = s->otail;
+        occ = (uint16_t)( ( head - tail ) & mask );
+        if ( occ > s->ohigh )
+            s->ohigh = occ;
+        for ( n = 32; tail != head && n; n-- ) {
+            uint32_t e = s->oring[tail];
+            if ( e & 0x10000UL ) {
+                VOPL3_38A( 0x38A, (uint8_t)( e >> 8 ), TRAPF_OUT );
+                VOPL3_38B( 0x38B, (uint8_t)e, TRAPF_OUT );
+            } else {
+                VOPL3_388( 0x388, (uint8_t)( e >> 8 ), TRAPF_OUT );
+                VOPL3_389( 0x389, (uint8_t)e, TRAPF_OUT );
+            }
+            tail = (uint16_t)( ( tail + 1 ) & mask );
+        }
+        s->otail = tail;
+        if ( f & 0x200 )
+            __asm__ __volatile__("sti" ::: "memory");
+    } while ( tail != head );
+}
+#endif
 #endif /* DACRING */
 
 
@@ -1434,6 +1512,7 @@ void PTRAP_Prepare( int opl, int sbaddr, int dma, int hdma, int sndirq )
 #if DACRING
     PrepSB = sbaddr;    /* for VSBPCMJ (JlmArm) */
     PrepIrq = sndirq;
+    PrepOpl = opl;
 #endif
 
     /* DSP write-status reads (base+0xC) are answered by the V86 stub from a

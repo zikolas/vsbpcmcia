@@ -375,7 +375,7 @@ silicon to fall back to, so the render tail is the only path and this matters.
 
 `jlm/VSBPCMJ.ASM` is a Jemm loadable module that serves the dense V86 ports
 at ring 0 (README, "VSBPCMJ.DLL"). It shares one block of DOS memory with
-VSBPCM (`src/JLMSHARE.H`, layout version 5); the block's segment is on
+VSBPCM (`src/JLMSHARE.H`, layout version 6); the block's segment is on
 VSBPCM's load line. Without the JLM the same struct is a static in `ptrap.c`
 and carries only the direct-DAC ring, which vsb.c fills for protected-mode
 and QPI-trapped guests.
@@ -393,7 +393,9 @@ and QPI-trapped guests.
 | 8C-9F | ptrap.c, JLM | the stub's PIC word (FFFFh while an SB interrupt is emulated); EOIs done at ring 0; 10h-and-sample pairs made one fault; samples put by the V86 producer; sequences made calls to it |
 | A0 | both | the ring, 2048 samples |
 | 8A0 | JLM | its copy of the V86 ring producer (16-bit code, called with the sample in AH) |
-| 900-90D | sndisr.c | lowest and highest one-second arrival rate (Hz); most card room left unfilled while samples arrived; the fill trim now, lowest and highest (Hz); gaps filled with a held sample |
+| 900-90D | sndisr.c | lowest and highest one-second arrival rate (Hz); most card room left unfilled while samples arrived; the fill trim now; gaps filled with a held sample; the fill trim's lowest and highest (Hz) |
+| 90E-91B | JLM, ptrap.c | FM ring producer and consumer index, entries (0 = none), writes dropped with the ring full, most entries waiting at a drain |
+| 91C | JLM | the FM ring (software-OPL3 builds only): dwords, value \| index << 8 \| register array << 16 |
 
 The rate measurement (`SNDISR_DacFeed`) counts samples received per unit of
 the card's `clock` op: in 1/16 s windows, folded into a running total that
@@ -401,6 +403,18 @@ remembers about 16 s, checked once a second for a guest that changed rate.
 The first tick after a pause only syncs, a gap under 1/8 s counts as part of
 the stream, and half a second without a sample ends it. IBMAUD's clock is
 the card's play position while it plays and RTC ticks while it is closed.
+
+In the builds with the software OPL3 (VSBPCMT, VSBPCMA: no `NOFM`), the JLM
+takes the V86 FM ports too when the emulation is on (`VSBJ_F_OPL`). Status
+comes from its timer model, as for the shim, delay reads are patched, and
+each data write goes into the FM ring with the index latched for its array.
+`PTRAP_DrainJlmFm` replays the ring into vopl3 at the top of each sound
+interrupt, before the render, and before any FM access that still comes to
+VSBPCM (a protected-mode guest's), so the order holds. It takes 32 entries
+per interrupts-off window. The TP755 stub's own ring covered array 0 only
+and sent timer writes, array 1 and the SB aliases through an RMCB; the JLM
+takes all of them. The ring is 512 entries (2 KB) and exists only in those
+builds, so the others keep the smaller block.
 
 The tap is fed at that estimate with a fill trim. e = samples waiting in the
 ring minus the card's room below its target, in units of 1/12 s of samples;

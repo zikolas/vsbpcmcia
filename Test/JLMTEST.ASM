@@ -307,7 +307,17 @@ showblk proc uses es bx si
 	movzx edx, word ptr es:[bx+904h]
 	invoke printf, CStr("  1-s rate %lu..%lu Hz, card short by up to %lu samples",10), eax, ecx, edx
 	movsx eax, word ptr es:[bx+906h]
-	invoke printf, CStr("  fill trim now %ld Hz",10), eax
+	movsx ecx, word ptr es:[bx+90Ah]
+	movsx edx, word ptr es:[bx+90Ch]
+	movzx esi, word ptr es:[bx+908h]
+	invoke printf, CStr("  fill trim now %ld Hz, range %ld..%ld, gaps held %lu",10), eax, ecx, edx, esi
+	cmp word ptr es:[bx+4], 6       ; the FM ring came with layout 6
+	jb sb_noring
+	movzx eax, word ptr es:[bx+912h]
+	mov ecx, es:[bx+918h]
+	mov edx, es:[bx+914h]
+	invoke printf, CStr("  FM ring: %lu entries, %lu waiting at most, %lu lost",10), eax, ecx, edx
+sb_noring:
 	lea si, [bx+40h]
 	call showsite
 	lea si, [bx+4Ch]

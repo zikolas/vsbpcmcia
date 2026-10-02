@@ -2,6 +2,7 @@
 #define _JLMSHARE_H_
 #include <stdint.h>
 #include <stddef.h>
+#include "CONFIG.H"     /* NOFM decides whether the FM ring is there */
 
 /* The block VSBPCM shares with VSBPCMJ.DLL, its ring-0 companion JLM
  * (jlm/VSBPCMJ.ASM; the SH_* offsets there must match this layout). It lives
@@ -10,10 +11,16 @@
  *
  * Without the JLM the same structure is a static in ptrap.c and carries only
  * the direct-DAC ring: protected-mode and QPI-trapped direct DAC fill it from
- * vsb.c, and sndisr.c drains it either way. 32-bit build only (DACRING). */
+ * vsb.c, and sndisr.c drains it either way. 32-bit build only (DACRING).
+ *
+ * Builds with the software OPL3 (no NOFM: CARD=TP755, CARD=AUDIGY) add an FM
+ * ring at the end: with VSBJ_F_OPL the JLM puts a V86 guest's FM register
+ * writes there instead of on an OPL3LPT, and ptrap.c replays them into
+ * vopl3 (PTRAP_DrainJlmFm). The other builds leave it out of the block and
+ * its DOS memory. */
 
 #define VSBJ_SIG     0x4A425356UL   /* "VSBJ" */
-#define VSBJ_VER     5
+#define VSBJ_VER     6
 #define VSBJ_RING    2048           /* DAC ring bytes, a power of two */
 #define VSBJ_DEVID   0x5650         /* the JLM's device id (INT 2Fh 1684h) */
 
@@ -24,6 +31,11 @@
 #define VSBJ_F_PIC   0x10           /* port 20h at ring 0 unless we virtualize */
 #define VSBJ_F_PAIR  0x20           /* 10h-and-sample sequences made one trap */
 #define VSBJ_F_V86   0x40           /* ... and then a V86 call, no trap */
+#define VSBJ_F_OPL   0x80           /* FM writes into the FM ring, not the LPT */
+
+#ifndef NOFM
+#define VSBJ_FMRING  512            /* FM ring entries, a power of two */
+#endif
 
 struct vsbj_share {
     uint32_t sig;                   /* 00 VSBJ_SIG */
@@ -98,12 +110,27 @@ struct vsbj_share {
     volatile uint16_t dholds;       /* 908 gaps filled with a held sample */
     volatile int16_t  dtrimmin;     /* 90A the lowest trim seen, Hz */
     volatile int16_t  dtrimmax;     /* 90C the highest */
+    /* the FM ring (VSBJ_F_OPL) */
+    volatile uint16_t ohead;        /* 90E JLM: producer index */
+    volatile uint16_t otail;        /* 910 ptrap.c: consumer index */
+    uint16_t          osize;        /* 912 entries, a power of two; 0 = none */
+    volatile uint32_t olost;        /* 914 JLM: FM writes dropped, ring full */
+    volatile uint32_t ohigh;        /* 918 ptrap.c: most waiting at a drain */
+#ifdef VSBJ_FMRING
+    volatile uint32_t oring[VSBJ_FMRING];   /* 91C value | index << 8 |
+                                             *     register array << 16 */
+#endif
 };
 
 #define VSBJ_RMASK (VSBJ_RING - 1)
 
-/* the ring offset is the JLM's SH_RING: a mismatch fails the build */
+/* the ring offsets are the JLM's SH_RING and SH_ORING: a mismatch fails
+ * the build */
 typedef char vsbj_ring_at_a0h[ ( offsetof( struct vsbj_share, ring ) == 0xA0 ) ? 1 : -1 ];
+typedef char vsbj_ohead_at_90eh[ ( offsetof( struct vsbj_share, ohead ) == 0x90E ) ? 1 : -1 ];
+#ifdef VSBJ_FMRING
+typedef char vsbj_oring_at_91ch[ ( offsetof( struct vsbj_share, oring ) == 0x91C ) ? 1 : -1 ];
+#endif
 
 /* the live block (DOS memory with the JLM, ptrap.c's static without);
  * NULL only before PTRAP_Prepare */

@@ -750,6 +750,10 @@ static int SNDISR_Interrupt( void )
     { extern void PTRAP_DrainOplRing(void);
       PTRAP_DrainOplRing(); }
 #endif
+#if DACRING && defined(VSBJ_FMRING)
+    /* and the ones VSBPCMJ took from a V86 guest, in its FM ring */
+    PTRAP_DrainJlmFm();
+#endif
     /* since the client context is now restored when a SB IRQ is emulated,
      * it's safe to call VIRQ_Invoke here. This will happen only for
      * DSP cmds 0xF2/0xF3 (trigger IRQ).
