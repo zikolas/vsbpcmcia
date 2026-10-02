@@ -160,7 +160,7 @@ static unsigned tp_lat_ms    = 80;           // SBEPTLAT: queued-audio target
 static unsigned tp_qtarget, tp_qlow;         // frames: latency target, pad floor
 static uint32_t tp_pt_cons;                  // tp_cons at the last tap feed
 static uint8_t  tp_tel_gap, tp_tel_under;    // 0x4FE / 0x4FF (tap builds)
-// pt_ops clock, 1/32768 s: the 8237's own consumption, which keeps counting
+// pt_ops clock, 1/32768 s: frames the 8237 has played, which keep counting
 // through lost or late IRQ10s
 static volatile unsigned long tp_clock;
 static unsigned long tp_clock_frac;          // remainder, 1/(32768 * rate) s
@@ -303,6 +303,14 @@ static unsigned tp_codec_config(unsigned rate)
 
  tp_ci_put(0x06, (unsigned char)(tp_vol & 0x3F));   // DAC unmute + level
  tp_ci_put(0x07, (unsigned char)(tp_vol & 0x3F));   // (bench: default is MUTED)
+ // AUX1 L/R = the 755C's second 3.5 mm jack, a stereo line in mixed into the
+ // output in analog, no ADC (bench 2026-10-02: an OPL3LPT plugged in there
+ // played on headphones once I2/I3 were unmuted, and nothing else routes it).
+ // /AUX[n]: gain field 8 = 0 dB, each step 1.5 dB down. Muted otherwise,
+ // which is also the power-up state, so a reload never inherits it.
+ { unsigned char a = FOpts.aux >= 0 ? (unsigned char)(8 + FOpts.aux) : 0x88;
+   tp_ci_put(0x02, a);
+   tp_ci_put(0x03, a); }
 
  // playback base count = frames per IRQ, minus one; reloads each expiry,
  // so this is the interrupt cadence -- the 8237 rolls the ring on its own
@@ -873,6 +881,9 @@ static void TP755_setrate(struct audioout_info_s *aui)
  else
   printf("CS4248 %04Xh: %u Hz, 8237 ch0 ring, %u-byte periods on IRQ10, render\n",
          tp_cb, got, tp_period);
+ if(FOpts.aux >= 0)
+  printf("CS4248: line-in jack (AUX1) on, %s%u.%u dB\n", FOpts.aux ? "-" : "",
+         (unsigned)(FOpts.aux * 3 / 2), (unsigned)(FOpts.aux * 15 % 10));
 }
 
 static void TP755_start(struct audioout_info_s *aui)

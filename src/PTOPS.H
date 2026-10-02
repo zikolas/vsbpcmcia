@@ -97,6 +97,9 @@ struct fork_opts_s {
     int lpt;            /* /LPT: OPL3LPT on this parallel port (hex); 0 = off.
                          * Takes 388h for the timer shim, which forwards every
                          * write to the LPT chip. main.c allows 378/278/3BC. */
+    int aux;            /* /AUX[n]: TP755 line-in jack (codec AUX1) on, n x
+                         * 1.5 dB down, 0-23; a bare /AUX is 0 dB; -1 = off
+                         * (sc_tp755 mutes it). TP755 only, main.c checks. */
 };
 
 extern struct fork_opts_s FOpts;

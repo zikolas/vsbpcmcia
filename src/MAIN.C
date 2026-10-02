@@ -109,7 +109,7 @@ static struct MAIN_s gm = { NULL, false, false, false, false };
 
 /* Fork-side options (ptops.h). cvol -1 means "card default", which a
  * deliberate /CVOL0 (full scale) must not be confused with. */
-struct fork_opts_s FOpts = { NULL, 0, 0, -1, 0, 0, 0, 0 };
+struct fork_opts_s FOpts = { NULL, 0, 0, -1, 0, 0, 0, 0, -1 };
 
 
 struct globalvars gvars = { BASE_DEFAULT, IRQ_DEFAULT, DMA_DEFAULT, /* /A /I /D */
@@ -151,6 +151,7 @@ static const struct {
     "RESAMP", "resample, no PT (VEW/IBM/755)", &FOpts.resamp,
     "FMVOL", "real-OPL3 volume [0-63]", &gvars.fmvol,
     "LPT", "OPL3LPT on LPT, hex [378]", &FOpts.lpt,
+    "AUX", "TP755 line in, att 0-23 [0]", &FOpts.aux,
     "?", "this help", &gm.bHelp,
     "A", "EMULATED SB base [220|240]", &gvars.base,
     "I", "IRQ [2|5|7, def 7]", &gvars.irq,
@@ -435,6 +436,9 @@ int main(int argc, char* argv[])
                                 : ( argv[i][len] >= '0' && argv[i][len] <= '9' ) ) {
                         *GOptions[j].pValue = strtol(&argv[i][len], NULL, IsHexOption(j) ? 16 : 10 );
                         break;
+                    } else if ( argv[i][len] == 0 && GOptions[j].pValue == &FOpts.aux ) {
+                        FOpts.aux = 0;      /* bare /AUX: 0 dB (-1 is off) */
+                        break;
                     } else if ( argv[i][len] == 0 && *GOptions[j].pValue == false ) {
                         *GOptions[j].pValue = true;
                         break;
@@ -550,6 +554,14 @@ int main(int argc, char* argv[])
     }
     if( FOpts.cvol != -1 && ( FOpts.cvol < 0 || FOpts.cvol > 63 ) ) {
         printf("Error: /CVOL takes 0-63 (codec DAC attenuation, ~1.5 dB per step)\n" );
+        return(1);
+    }
+    if( FOpts.aux != -1 && ( FOpts.aux < 0 || FOpts.aux > 23 ) ) {
+        printf("Error: /AUX takes 0-23 (line-in attenuation, 1.5 dB per step)\n" );
+        return(1);
+    }
+    if( FOpts.aux != -1 && !PTOPS_CardIs("tp755") ) {
+        printf("Error: /AUX is the ThinkPad 755C's line-in jack (/CARD:TP755)\n" );
         return(1);
     }
     if( FOpts.maxhz && ( FOpts.maxhz < 4000 || FOpts.maxhz > 48000 ) ) {

@@ -122,7 +122,11 @@ ThinkPad 755C planar codec (no enabler):
     SET BLASTER=A220 I7 D1 T4
     JLOAD QPIEMU.DLL
     HDPMI32I -r -x -v
-    VSBPCM /CARD:TP755 /A220 /PS1024 /DACRATE11025
+    VSBPCM /CARD:TP755 /A220
+
+Add `/LPT` for FM from an OPL3LPT (`/LPT3BC` where LPT1 sits at 3BCh) and
+`/AUX` to hear it through the 755's line-in jack. VSBPCMT.EXE, the software
+OPL3 build, runs with `/PS1024 /DACRATE11025` (see the TP755 section).
 
 JEMM386 must be loaded before JLOAD — from CONFIG.SYS, or as
 `JEMM386.EXE LOAD NOEMS X=DC00-EFFF` at the top of the batch. The `X=`
@@ -145,11 +149,15 @@ See deploy/ for working batches.
    the codec rate, and the frame stepper folds a faster guest down onto the
    cap. `/MAXHZ11025` halves the ticks of a 22 kHz stream.
  * `/CVOL`    codec DAC attenuation 0-63, ~1.5 dB per step (VEW211/SCP55/TP755)
-
+ * `/RESAMP`  the engine resamples and mixes onto one codec rate (the render
+   path) instead of the passthrough tap (VEW211/IBMAUD/TP755)
  * `/FMVOL`   volume trim on a REAL OPL3, 0-63 TL steps
  * `/FMSHIM`  pretend the card has no FM chip (bench diagnostic; see below)
  * `/LPT`     FM from an OPL3LPT on the parallel port: `/LPT` (378),
    `/LPT278` or `/LPT3BC` (see below)
+ * `/AUX`     TP755 only: the 755C's line-in jack (codec AUX1) on, mixed into
+   the output in analog. `/AUX` is 0 dB, `/AUXn` is n x 1.5 dB down (0-23).
+   Without it the jack is muted.
  * `/A /I /D /T /H` the emulated SB's geometry (base, IRQ, DMA, type, high DMA)
 
 Configuration by environment variable was removed in v1.0: values persisted
@@ -463,8 +471,14 @@ which is also the clock that sets the rate of direct DAC (DSP command 10h).
 codec period at 1/128 s (256 bytes at 11025 Hz, a 172 Hz interrupt) whatever
 `/PS` says: the guest's SB blocks are taken and its SB IRQs delivered once a
 period, and at 43 Hz (`/PS1024`) DOOM2's sound effects came out quiet and
-choppy. The engine render path is used instead when the software OPL3 is live (VSBPCMT.EXE without
-`/LPT` or `/FMVOL`; a tap never runs the mixer) or under `/RESAMP`.
+choppy. The engine render path is used instead under `/RESAMP`, and in
+VSBPCMT.EXE while its software OPL3 is on (the default; `/OPL0` turns it
+off), since a tap never runs the mixer.
+
+The 755C's second 3.5 mm jack is a stereo line in wired to the codec's AUX1
+input, which mixes into the output in analog (no ADC, no CPU). `/AUX` unmutes
+it: an OPL3LPT or an external synth plugged in there plays through the 755's
+speaker or headphone jack. `/AUXn` sets it n x 1.5 dB down (0-23).
 
 For FM music rather than detection-only, build `CARD=TP755` (VSBPCMT.EXE),
 which compiles the DOSBox OPL3 emulation back in. FM traffic is then tamed by
@@ -477,11 +491,12 @@ Notes that matter on this box:
  * `/T4` (SB 2.0), not `/T3`: games with saved SB Pro configs push stereo at
    this mono DSP and play double-speed.
  * No `/CF4` (suspected freeze aggravator here, unresolved).
- * `/DACRATE11025 /PS1024` is the DX4/75 envelope with OPL emulation on.
+ * `/DACRATE11025 /PS1024` is the DX4/75 envelope with OPL emulation on
+   (VSBPCMT, render path).
 
 Status, bench-verified on a 755C (486DX4/75):
  * Digital (SB voice/SFX): daily-driver ready — SBDIAG full pass, DOOM with
-   SFX, Epic Pinball, Duke Nukem II.
+   SFX, Epic Pinball, Duke Nukem II; DOOM2 SFX through the tap.
  * FM music, real-mode games (Monkey Island 1 class): plays with stutter
    during dense passages; the engine self-heals and the game survives.
  * FM music, very dense scores (Monkey Island 2 class): plays, but the
